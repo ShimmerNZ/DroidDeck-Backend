@@ -1,13 +1,27 @@
+#!/usr/bin/env python3
+"""
+WALL-E Camera Proxy - Enhanced Version
+Proxy ESP32 camera stream with improved error handling and monitoring
+"""
+
 import cv2
 import time
 import threading
 import requests
+import signal
+import sys
+import os
 from flask import Flask, Response, jsonify
 import json
-import os
 import numpy as np
 import logging
+from pathlib import Path
 
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = "configs/camera_config.json"
@@ -19,16 +33,35 @@ class CameraProxy:
         self.last_frame_time = 0
         self.frame_count = 0
         self.dropped_frames = 0
+        self.connection_errors = 0
         self.running = True
+        self.connected_to_esp32 = False
         self.lock = threading.Lock()
-        self.stats_enabled = getattr(self, 'enable_stats', True)
+        self.stream_thread = None
+        self.flask_app = None
+        
+        # Setup graceful shutdown
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
+        
+        logger.info(f"📷 Camera Proxy initialized - Port: {self.rebroadcast_port}")
+
+    def signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        logger.info("📷 Received shutdown signal, stopping camera proxy...")
+        self.stop()
+        sys.exit(0)
 
     def load_config(self):
         """Load camera configuration with fallback defaults"""
         default_config = {
-            "esp32_url": "http://esp32.local:81/stream",
+            "esp32_url": "http://esp33.local:81/stream",
             "rebroadcast_port": 8081,
-            "enable_stats": True
+            "enable_stats": True,
+            "connection_timeout": 10,
+            "reconnect_delay": 5,
+            "max_connection_errors": 10,
+            "frame_quality": 80
         }
         
         try:
@@ -50,11 +83,16 @@ class CameraProxy:
             logger.warning(f"⚠️ Failed to load camera config: {e}, using defaults")
             config = default_config
         
+        # Load config values
         self.esp32_url = config.get("esp32_url", default_config["esp32_url"])
         self.rebroadcast_port = config.get("rebroadcast_port", default_config["rebroadcast_port"])
         self.enable_stats = config.get("enable_stats", default_config["enable_stats"])
+        self.connection_timeout = config.get("connection_timeout", default_config["connection_timeout"])
+        self.reconnect_delay = config.get("reconnect_delay", default_config["reconnect_delay"])
+        self.max_connection_errors = config.get("max_connection_errors", default_config["max_connection_errors"])
+        self.frame_quality = config.get("frame_quality", default_config["frame_quality"])
         
-        logger.info(f"📷 Camera proxy config - URL: {self.esp32_url}, Port: {self.rebroadcast_port}")
+        logger.info(f"📷 Camera config - URL: {self.esp32_url}, Port: {self.rebroadcast_port}")
 
     def start_stream(self):
         """Start the camera stream in a background thread"""
@@ -63,11 +101,23 @@ class CameraProxy:
             
             while self.running:
                 try:
+                    if self.connection_errors >= self.max_connection_errors:
+                        logger.error(f"📷 Too many connection errors ({self.connection_errors}), giving up")
+                        break
+                    
                     logger.debug(f"📷 Connecting to ESP32 camera stream...")
-                    stream = requests.get(self.esp32_url, stream=True, timeout=10)
+                    stream = requests.get(
+                        self.esp32_url, 
+                        stream=True, 
+                        timeout=self.connection_timeout,
+                        headers={'User-Agent': 'WALL-E-Camera-Proxy/1.0'}
+                    )
                     stream.raise_for_status()
                     
+                    self.connected_to_esp32 = True
+                    self.connection_errors = 0  # Reset error count on successful connection
                     logger.info("📷 Connected to ESP32 camera stream")
+                    
                     bytes_data = b""
                     
                     for chunk in stream.iter_content(chunk_size=1024):
@@ -82,43 +132,58 @@ class CameraProxy:
                             jpg = bytes_data[a:b+2]
                             bytes_data = bytes_data[b+2:]
                             
-                            try:
-                                img_array = np.frombuffer(jpg, dtype=np.uint8)
-                                frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                                
-                                if frame is not None:
-                                    # Re-encode frame
-                                    encoded, buffer = cv2.imencode('.jpg', frame, 
-                                        [cv2.IMWRITE_JPEG_QUALITY, 80])
-                                    
-                                    if encoded:
-                                        with self.lock:
-                                            self.frame = buffer.tobytes()
-                                            now = time.time()
-                                            
-                                            if self.last_frame_time:
-                                                delta = now - self.last_frame_time
-                                                if delta > 0.2:  # More than 200ms gap
-                                                    self.dropped_frames += 1
-                                            
-                                            self.last_frame_time = now
-                                            self.frame_count += 1
-                                            
-                            except Exception as e:
-                                logger.debug(f"Frame decode error: {e}")
+                            if self._process_frame(jpg):
                                 continue
                     
                 except requests.exceptions.RequestException as e:
-                    logger.warning(f"📷 Camera connection error: {e}")
-                    time.sleep(5)  # Wait before reconnecting
+                    self.connected_to_esp32 = False
+                    self.connection_errors += 1
+                    logger.warning(f"📷 Camera connection error ({self.connection_errors}/{self.max_connection_errors}): {e}")
+                    time.sleep(self.reconnect_delay)
                 except Exception as e:
+                    self.connected_to_esp32 = False
+                    self.connection_errors += 1
                     logger.error(f"📷 Camera stream error: {e}")
-                    time.sleep(5)
+                    time.sleep(self.reconnect_delay)
                     
+            self.connected_to_esp32 = False
             logger.info("📷 Camera stream thread stopped")
 
         self.stream_thread = threading.Thread(target=fetch_stream, daemon=True, name="CameraStream")
         self.stream_thread.start()
+
+    def _process_frame(self, jpg_data):
+        """Process a single JPEG frame"""
+        try:
+            img_array = np.frombuffer(jpg_data, dtype=np.uint8)
+            frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            
+            if frame is not None:
+                # Re-encode frame with quality setting
+                encoded, buffer = cv2.imencode('.jpg', frame, 
+                    [cv2.IMWRITE_JPEG_QUALITY, self.frame_quality])
+                
+                if encoded:
+                    with self.lock:
+                        self.frame = buffer.tobytes()
+                        now = time.time()
+                        
+                        if self.last_frame_time:
+                            delta = now - self.last_frame_time
+                            if delta > 0.2:  # More than 200ms gap
+                                self.dropped_frames += 1
+                        
+                        self.last_frame_time = now
+                        self.frame_count += 1
+                        
+                return True
+            else:
+                logger.debug("📷 Failed to decode frame")
+                return False
+                
+        except Exception as e:
+            logger.debug(f"📷 Frame processing error: {e}")
+            return False
 
     def generate_stream(self):
         """Generate frames for HTTP streaming"""
@@ -128,14 +193,27 @@ class CameraProxy:
                     yield (b'--frame\r\n'
                            b'Content-Type: image/jpeg\r\n\r\n' + self.frame + b'\r\n')
                 else:
-                    # Send a placeholder frame when no camera data
-                    placeholder = b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00H\x00H\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.\' ",#\x1c\x1c(7),01444\x1f\'9=82<.342\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x01\x01\x11\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00\x15\x00\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08\xff\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00\x3f\x00\xaa\xff\xd9'
+                    # Send a small placeholder frame when no camera data
+                    placeholder = self._create_placeholder_frame()
                     yield (b'--frame\r\n'
                            b'Content-Type: image/jpeg\r\n\r\n' + placeholder + b'\r\n')
             time.sleep(0.033)  # ~30 FPS
 
+    def _create_placeholder_frame(self):
+        """Create a placeholder frame when camera is not available"""
+        # Create a simple black frame with text
+        try:
+            import cv2
+            img = np.zeros((240, 320, 3), dtype=np.uint8)
+            cv2.putText(img, "Camera Offline", (50, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            _, buffer = cv2.imencode('.jpg', img)
+            return buffer.tobytes()
+        except:
+            # Fallback minimal JPEG
+            return b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00H\x00H\x00\x00\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c\x1c $.\' ",#\x1c\x1c(7),01444\x1f\'9=82<.342\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x01\x01\x11\x00\x02\x11\x01\x03\x11\x01\xff\xc4\x00\x15\x00\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x08\xff\xc4\x00\x14\x10\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00\x3f\x00\xaa\xff\xd9'
+
     def get_stats(self):
-        """Get camera statistics"""
+        """Get comprehensive camera statistics"""
         with self.lock:
             now = time.time()
             if self.last_frame_time and self.last_frame_time > 0:
@@ -152,23 +230,47 @@ class CameraProxy:
                 "dropped_frames": self.dropped_frames,
                 "latency": round(latency * 1000, 1),  # ms
                 "has_frame": self.frame is not None,
-                "stream_url": self.esp32_url
+                "stream_url": self.esp32_url,
+                "connected_to_esp32": self.connected_to_esp32,
+                "connection_errors": self.connection_errors,
+                "uptime": round(time.time() - self.start_time, 1),
+                "status": "connected" if self.connected_to_esp32 else "disconnected"
             }
 
+    def get_health(self):
+        """Get health status for monitoring"""
+        return {
+            "status": "healthy" if self.connected_to_esp32 and self.running else "unhealthy",
+            "running": self.running,
+            "connected_to_esp32": self.connected_to_esp32,
+            "has_frame": self.frame is not None,
+            "connection_errors": self.connection_errors,
+            "rebroadcast_port": self.rebroadcast_port,
+            "error_rate": round(self.connection_errors / max(1, self.frame_count), 4)
+        }
+
     def stop(self):
-        """Stop the camera proxy"""
+        """Stop the camera proxy gracefully"""
         logger.info("📷 Stopping camera proxy...")
         self.running = False
+        
+        # Wait for stream thread to finish
+        if self.stream_thread and self.stream_thread.is_alive():
+            self.stream_thread.join(timeout=2.0)
+        
+        logger.info("📷 Camera proxy stopped")
 
-    def run_server(self):
-        """Run the Flask server for camera streaming"""
+    def create_flask_app(self):
+        """Create and configure Flask application"""
         app = Flask(__name__)
         app.logger.setLevel(logging.WARNING)  # Reduce Flask logging
 
         @app.route('/stream')
         def stream():
-            return Response(self.generate_stream(),
-                            mimetype='multipart/x-mixed-replace; boundary=frame')
+            return Response(
+                self.generate_stream(),
+                mimetype='multipart/x-mixed-replace; boundary=frame'
+            )
 
         @app.route('/stats')
         def stats():
@@ -179,17 +281,44 @@ class CameraProxy:
 
         @app.route('/health')
         def health():
+            return jsonify(self.get_health())
+
+        @app.route('/config')
+        def config():
             return jsonify({
-                "status": "ok" if self.running else "stopped",
-                "has_frame": self.frame is not None,
-                "rebroadcast_port": self.rebroadcast_port
+                "esp32_url": self.esp32_url,
+                "rebroadcast_port": self.rebroadcast_port,
+                "enable_stats": self.enable_stats,
+                "frame_quality": self.frame_quality
             })
 
+        @app.route('/')
+        def index():
+            return jsonify({
+                "service": "WALL-E Camera Proxy",
+                "version": "1.1",
+                "endpoints": {
+                    "stream": "/stream",
+                    "stats": "/stats",
+                    "health": "/health",
+                    "config": "/config"
+                }
+            })
+
+        return app
+
+    def run_server(self):
+        """Run the Flask server for camera streaming"""
+        self.start_time = time.time()
+        
         logger.info(f"📷 Starting camera proxy server on port {self.rebroadcast_port}")
         
         try:
             # Start streaming first
             self.start_stream()
+            
+            # Create Flask app
+            app = self.create_flask_app()
             
             # Start Flask server
             app.run(
@@ -205,6 +334,14 @@ class CameraProxy:
             self.stop()
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    # Check if OpenCV is available
+    try:
+        import cv2
+        logger.info(f"📷 OpenCV version: {cv2.__version__}")
+    except ImportError:
+        logger.error("📷 OpenCV not available - camera proxy cannot start")
+        sys.exit(1)
+    
+    # Start camera proxy
     proxy = CameraProxy()
     proxy.run_server()

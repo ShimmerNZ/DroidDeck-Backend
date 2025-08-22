@@ -8,19 +8,19 @@ import websockets
 import json
 import time
 import logging
+import board
+import lgpio
+import os
+import sys
+import logging
+import subprocess
+import signal
+import psutil
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
 import socket
-# Camera proxy import (optional)
-try:
-    from modules.camera_proxy import CameraProxy
-    CAMERA_PROXY_AVAILABLE = True
-except ImportError:
-    CameraProxy = None
-    CAMERA_PROXY_AVAILABLE = False
-    logger.warning("Camera proxy not available")
 
 # Import the shared serial manager components
 from modules.shared_serial_manager import (
@@ -533,15 +533,12 @@ class WALLEBackend:
         self.connected_clients = set()
         self.telemetry_task = None
         
+        #Track Camera Proxy Process
+        self.camera_proxy_pid = None
+        self.load_camera_proxy_pid()
+
         # Shared serial managers
         self.shared_managers = {}
-
-        # Add after self.shared_managers = {}
-        self.camera_proxy = None
-        self.camera_process = None
-
-        # Add after self.setup_safety_systems()
-        self.setup_camera_system()
         
         # Initialize hardware with shared managers
         self.setup_shared_hardware()
@@ -557,6 +554,157 @@ class WALLEBackend:
         
         logger.info("✅ WALL-E Backend with shared serial managers initialized")
     
+    def load_camera_proxy_pid(self):
+            """Load camera proxy PID from file if it exists"""
+            try:
+                if os.path.exists("camera_proxy.pid"):
+                    with open("camera_proxy.pid", "r") as f:
+                        self.camera_proxy_pid = int(f.read().strip())
+                        # Verify process is still running
+                        if not psutil.pid_exists(self.camera_proxy_pid):
+                            self.camera_proxy_pid = None
+                            os.remove("camera_proxy.pid")
+                            logger.warning("Camera proxy PID file found but process not running")
+                        else:
+                            logger.info(f"📷 Found running camera proxy (PID: {self.camera_proxy_pid})")
+            except Exception as e:
+                logger.warning(f"Failed to load camera proxy PID: {e}")
+                self.camera_proxy_pid = None
+
+    async def handle_camera_config_update(self, data: Dict[str, Any]):
+        """Handle camera configuration update from frontend"""
+        esp32_url = data.get("esp32_url")
+        
+        if not esp32_url:
+            logger.warning("No ESP32 URL provided in camera config update")
+            return
+        
+        try:
+            # Update camera_config.json
+            camera_config_path = "configs/camera_config.json"
+            
+            # Load existing config or create default
+            try:
+                with open(camera_config_path, "r") as f:
+                    camera_config = json.load(f)
+            except FileNotFoundError:
+                camera_config = {
+                    "esp32_url": "http://esp32.local:81/stream",
+                    "rebroadcast_port": 8081,
+                    "enable_stats": True,
+                    "connection_timeout": 10,
+                    "reconnect_delay": 5,
+                    "max_connection_errors": 10,
+                    "frame_quality": 80
+                }
+            
+            # Update ESP32 URL
+            old_url = camera_config.get("esp32_url", "")
+            camera_config["esp32_url"] = esp32_url
+            
+            # Save updated config
+            os.makedirs("configs", exist_ok=True)
+            with open(camera_config_path, "w") as f:
+                json.dump(camera_config, f, indent=4)
+            
+            logger.info(f"📷 Updated camera config: {old_url} → {esp32_url}")
+            
+            # Restart camera proxy service
+            await self.restart_camera_proxy()
+            
+            # Broadcast success message
+            await self.broadcast_message({
+                "type": "camera_config_updated",
+                "success": True,
+                "esp32_url": esp32_url,
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            logger.error(f"Failed to update camera config: {e}")
+            await self.broadcast_message({
+                "type": "camera_config_updated",
+                "success": False,
+                "error": str(e),
+                "timestamp": time.time()
+            })
+
+    async def restart_camera_proxy(self):
+        """Restart the camera proxy service"""
+        try:
+            # Stop existing camera proxy
+            if self.camera_proxy_pid:
+                try:
+                    logger.info(f"🛑 Stopping camera proxy (PID: {self.camera_proxy_pid})")
+                    os.kill(self.camera_proxy_pid, signal.SIGTERM)
+                    
+                    # Wait for process to terminate
+                    import time
+                    for _ in range(10):  # Wait up to 5 seconds
+                        if not psutil.pid_exists(self.camera_proxy_pid):
+                            break
+                        await asyncio.sleep(0.5)
+                    
+                    # Force kill if still running
+                    if psutil.pid_exists(self.camera_proxy_pid):
+                        logger.warning("Force killing camera proxy")
+                        os.kill(self.camera_proxy_pid, signal.SIGKILL)
+                        await asyncio.sleep(1)
+                    
+                    logger.info("✅ Camera proxy stopped")
+                except (ProcessLookupError, psutil.NoSuchProcess):
+                    logger.info("Camera proxy was already stopped")
+                except Exception as e:
+                    logger.warning(f"Error stopping camera proxy: {e}")
+                finally:
+                    self.camera_proxy_pid = None
+                    # Remove PID file
+                    try:
+                        if os.path.exists("camera_proxy.pid"):
+                            os.remove("camera_proxy.pid")
+                    except:
+                        pass
+            
+            # Start new camera proxy process
+            logger.info("🚀 Starting camera proxy with new configuration...")
+            
+            # Check if camera_proxy.py exists
+            proxy_script = "modules/camera_proxy.py"
+            if not os.path.exists(proxy_script):
+                proxy_script = "camera_proxy.py"  # Fallback to root directory
+            
+            if not os.path.exists(proxy_script):
+                raise FileNotFoundError("camera_proxy.py not found")
+            
+            # Start the process
+            process = subprocess.Popen(
+                [sys.executable, proxy_script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                preexec_fn=os.setsid  # Create new process group
+            )
+            
+            self.camera_proxy_pid = process.pid
+            
+            # Save PID to file
+            with open("camera_proxy.pid", "w") as f:
+                f.write(str(self.camera_proxy_pid))
+            
+            # Give it time to start
+            await asyncio.sleep(2)
+            
+            # Check if it's still running
+            if psutil.pid_exists(self.camera_proxy_pid):
+                logger.info(f"✅ Camera proxy restarted successfully (PID: {self.camera_proxy_pid})")
+            else:
+                logger.error("❌ Camera proxy failed to start")
+                self.camera_proxy_pid = None
+                
+        except Exception as e:
+            logger.error(f"Failed to restart camera proxy: {e}")
+            self.camera_proxy_pid = None
+
+
     def setup_shared_hardware(self):
         """UPDATED: Initialize hardware controllers using shared serial managers"""
         logger.info("🔧 Initializing shared hardware controllers...")
@@ -938,7 +1086,7 @@ class WALLEBackend:
         return telemetry
     
     async def handle_client_message(self, websocket, message: str):
-        """UPDATED: Handle incoming WebSocket message with shared manager support"""
+        """UPDATED: Handle incoming WebSocket message with camera config support"""
         try:
             data = json.loads(message)
             msg_type = data.get("type")
@@ -972,7 +1120,9 @@ class WALLEBackend:
                 await self.handle_audio_command(data)
             elif msg_type == "system_status":
                 await self.handle_system_status_request(websocket)
-            # Add other handlers as needed...
+            # NEW: Handle camera config updates
+            elif msg_type == "update_camera_config":
+                await self.handle_camera_config_update(data)
             else:
                 logger.debug(f"Unknown message type: {msg_type}")
                 
@@ -1131,8 +1281,25 @@ class WALLEBackend:
             self.cleanup()
     
     def cleanup(self):
-        """UPDATED: Cleanup all resources including shared managers"""
+        """UPDATED: Cleanup all resources including camera proxy"""
         logger.info("🧹 Cleaning up enhanced WALL-E backend...")
+        
+        # Stop camera proxy
+        if self.camera_proxy_pid:
+            try:
+                logger.info(f"🛑 Stopping camera proxy (PID: {self.camera_proxy_pid})")
+                os.kill(self.camera_proxy_pid, signal.SIGTERM)
+                time.sleep(1)
+                if psutil.pid_exists(self.camera_proxy_pid):
+                    os.kill(self.camera_proxy_pid, signal.SIGKILL)
+            except Exception as e:
+                logger.warning(f"Error stopping camera proxy during cleanup: {e}")
+            finally:
+                try:
+                    if os.path.exists("camera_proxy.pid"):
+                        os.remove("camera_proxy.pid")
+                except:
+                    pass
         
         # Stop Maestro controllers
         self.maestro1.stop()
