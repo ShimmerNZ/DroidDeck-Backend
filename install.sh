@@ -236,9 +236,11 @@ install_python_deps() {
         pygame \
         requests \
         flask \
-        numpy==1.21.6\
-        lgpio
-    
+        numpy==1.21.6 \
+        lgpio \
+        adafruit-circuitpython-ads1x15 \
+        adafruit-blinka
+
     # Try to install OpenCV with fallback
     print_status "Installing OpenCV (this may take a while)..."
     if ! pip install opencv-python==4.5.5.64 --no-cache-dir; then
@@ -250,11 +252,6 @@ install_python_deps() {
             ln -sf /usr/lib/python3/dist-packages/cv2 "$SITE_PACKAGES/"
         fi
     fi
-    
-    # ADC libraries (optional)
-    pip install \
-        adafruit-circuitpython-ads1x15 \
-        adafruit-blinka || print_warning "ADC libraries installation failed (optional)"
     
     print_status "Python dependencies installed ✅"
 }

@@ -51,7 +51,7 @@ source venv/bin/activate
 
 # Verify Python version in venv
 VENV_PYTHON_VERSION=$(python --version 2>&1 | cut -d' ' -f2)
-print_status "Using Python $VENV_PYTHON_VERSION in virtual environment"
+print_status "🐍 Using Python $VENV_PYTHON_VERSION in virtual environment"
 
 # Function to check if OpenCV is working
 check_opencv() {
@@ -211,6 +211,7 @@ echo "  🌐 SMB File Shares: \\\\$HOSTNAME\\walle"
 if [ "$CAMERA_STARTED" = true ]; then
     echo "  📷 Camera Stream: http://$IP_ADDRESS:8081/stream"
     echo "  📊 Camera Stats: http://$IP_ADDRESS:8081/stats"
+    echo "  🏥 Camera Health: http://$IP_ADDRESS:8081/health"
 fi
 echo ""
 print_status "Press Ctrl+C to stop all services"

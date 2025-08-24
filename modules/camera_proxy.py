@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-WALL-E Camera Proxy - Enhanced Version
-Proxy ESP32 camera stream with improved error handling and monitoring
+WALL-E Camera Proxy - Enhanced Version with Control Relay
+Proxy ESP32 camera stream and relay control commands
 """
 
 import cv2
@@ -11,7 +11,7 @@ import requests
 import signal
 import sys
 import os
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
 import json
 import numpy as np
 import logging
@@ -39,6 +39,7 @@ class CameraProxy:
         self.lock = threading.Lock()
         self.stream_thread = None
         self.flask_app = None
+        self.esp32_settings = {}  # Cache ESP32 settings
         
         # Setup graceful shutdown
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -55,7 +56,8 @@ class CameraProxy:
     def load_config(self):
         """Load camera configuration with fallback defaults"""
         default_config = {
-            "esp32_url": "http://esp33.local:81/stream",
+            "esp32_url": "http://esp32.local:81/stream",
+            "esp32_base_url": "http://esp32.local:81",  # Base URL for control endpoints
             "rebroadcast_port": 8081,
             "enable_stats": True,
             "connection_timeout": 10,
@@ -85,6 +87,14 @@ class CameraProxy:
         
         # Load config values
         self.esp32_url = config.get("esp32_url", default_config["esp32_url"])
+        
+        # Extract base URL from stream URL if not provided
+        if "esp32_base_url" in config:
+            self.esp32_base_url = config["esp32_base_url"]
+        else:
+            # Extract base URL from stream URL (remove /stream)
+            self.esp32_base_url = self.esp32_url.replace("/stream", "")
+            
         self.rebroadcast_port = config.get("rebroadcast_port", default_config["rebroadcast_port"])
         self.enable_stats = config.get("enable_stats", default_config["enable_stats"])
         self.connection_timeout = config.get("connection_timeout", default_config["connection_timeout"])
@@ -92,12 +102,65 @@ class CameraProxy:
         self.max_connection_errors = config.get("max_connection_errors", default_config["max_connection_errors"])
         self.frame_quality = config.get("frame_quality", default_config["frame_quality"])
         
-        logger.info(f"📷 Camera config - URL: {self.esp32_url}, Port: {self.rebroadcast_port}")
+        logger.info(f"📷 Camera config - Stream URL: {self.esp32_url}, Base URL: {self.esp32_base_url}, Port: {self.rebroadcast_port}")
+
+    def fetch_esp32_settings(self):
+        """Fetch current settings from ESP32"""
+        try:
+            response = requests.get(
+                f"{self.esp32_base_url}/settings",
+                timeout=5
+            )
+            if response.status_code == 200:
+                self.esp32_settings = response.json()
+                logger.info(f"📷 Fetched ESP32 settings: {self.esp32_settings}")
+                return True
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to fetch ESP32 settings: {e}")
+        return False
+
+    def update_esp32_setting(self, setting_name, value):
+        """Update a single setting on the ESP32"""
+        try:
+            params = {setting_name: value}
+            response = requests.post(
+                f"{self.esp32_base_url}/settings",
+                params=params,
+                timeout=5
+            )
+            if response.status_code == 200:
+                logger.info(f"📷 Updated ESP32 setting: {setting_name} = {value}")
+                # Update cache
+                self.esp32_settings[setting_name] = value
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to update ESP32 setting {setting_name}: {e}")
+        return False
+
+    def update_esp32_settings(self, settings):
+        """Update multiple settings on the ESP32"""
+        try:
+            response = requests.post(
+                f"{self.esp32_base_url}/settings",
+                params=settings,
+                timeout=5
+            )
+            if response.status_code == 200:
+                logger.info(f"📷 Updated ESP32 settings: {settings}")
+                # Update cache
+                self.esp32_settings.update(settings)
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to update ESP32 settings: {e}")
+        return False
 
     def start_stream(self):
         """Start the camera stream in a background thread"""
         def fetch_stream():
             logger.info(f"📷 Starting camera stream from {self.esp32_url}")
+            
+            # Try to fetch initial settings
+            self.fetch_esp32_settings()
             
             while self.running:
                 try:
@@ -133,6 +196,7 @@ class CameraProxy:
                             bytes_data = bytes_data[b+2:]
                             
                             if self._process_frame(jpg):
+                                time.sleep(0.033)  # Throttle to ~30 FPS
                                 continue
                     
                 except requests.exceptions.RequestException as e:
@@ -201,10 +265,8 @@ class CameraProxy:
 
     def _create_placeholder_frame(self):
         """Create a placeholder frame when camera is not available"""
-        # Create a simple black frame with text
         try:
-            import cv2
-            img = np.zeros((240, 320, 3), dtype=np.uint8)
+            img = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(img, "Camera Offline", (50, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             _, buffer = cv2.imencode('.jpg', img)
             return buffer.tobytes()
@@ -234,20 +296,9 @@ class CameraProxy:
                 "connected_to_esp32": self.connected_to_esp32,
                 "connection_errors": self.connection_errors,
                 "uptime": round(time.time() - self.start_time, 1),
-                "status": "connected" if self.connected_to_esp32 else "disconnected"
+                "status": "connected" if self.connected_to_esp32 else "disconnected",
+                "esp32_settings": self.esp32_settings  # Include cached settings
             }
-
-    def get_health(self):
-        """Get health status for monitoring"""
-        return {
-            "status": "healthy" if self.connected_to_esp32 and self.running else "unhealthy",
-            "running": self.running,
-            "connected_to_esp32": self.connected_to_esp32,
-            "has_frame": self.frame is not None,
-            "connection_errors": self.connection_errors,
-            "rebroadcast_port": self.rebroadcast_port,
-            "error_rate": round(self.connection_errors / max(1, self.frame_count), 4)
-        }
 
     def stop(self):
         """Stop the camera proxy gracefully"""
@@ -279,29 +330,77 @@ class CameraProxy:
             else:
                 return jsonify({"stats_disabled": True})
 
-        @app.route('/health')
-        def health():
-            return jsonify(self.get_health())
+        @app.route('/camera/settings', methods=['GET'])
+        def get_camera_settings():
+            """Get current camera settings from ESP32"""
+            if self.fetch_esp32_settings():
+                return jsonify(self.esp32_settings)
+            else:
+                return jsonify({"error": "Failed to fetch settings from ESP32"}), 500
 
-        @app.route('/config')
-        def config():
-            return jsonify({
-                "esp32_url": self.esp32_url,
-                "rebroadcast_port": self.rebroadcast_port,
-                "enable_stats": self.enable_stats,
-                "frame_quality": self.frame_quality
-            })
+        @app.route('/camera/settings', methods=['POST'])
+        def set_camera_settings():
+            """Update camera settings on ESP32"""
+            settings = request.get_json(force=True) if request.is_json else request.args.to_dict()
+            
+            if not settings:
+                return jsonify({"error": "No settings provided"}), 400
+            
+            # Convert string values to appropriate types
+            for key, value in settings.items():
+                if key in ['xclk_freq', 'resolution', 'quality', 'brightness', 'contrast', 'saturation']:
+                    try:
+                        settings[key] = int(value)
+                    except ValueError:
+                        pass
+                elif key in ['h_mirror', 'v_flip']:
+                    settings[key] = str(value).lower() in ['true', '1', 'yes']
+            
+            if self.update_esp32_settings(settings):
+                return jsonify({"status": "ok", "updated": settings})
+            else:
+                return jsonify({"error": "Failed to update ESP32 settings"}), 500
+
+        @app.route('/camera/setting/<setting>', methods=['POST'])
+        def set_single_setting(setting):
+            """Update a single camera setting"""
+            value = request.args.get('value') or request.get_json(force=True).get('value')
+            
+            if value is None:
+                return jsonify({"error": "No value provided"}), 400
+            
+            # Convert value to appropriate type
+            if setting in ['xclk_freq', 'resolution', 'quality', 'brightness', 'contrast', 'saturation']:
+                try:
+                    value = int(value)
+                except ValueError:
+                    return jsonify({"error": f"Invalid value for {setting}"}), 400
+            elif setting in ['h_mirror', 'v_flip']:
+                value = str(value).lower() in ['true', '1', 'yes']
+            
+            if self.update_esp32_setting(setting, value):
+                return jsonify({"status": "ok", "setting": setting, "value": value})
+            else:
+                return jsonify({"error": f"Failed to update {setting}"}), 500
+
+        @app.route('/camera/restart', methods=['POST'])
+        def restart_camera():
+            """Restart the camera stream connection"""
+            self.connection_errors = 0
+            return jsonify({"status": "restarting"})
 
         @app.route('/')
         def index():
             return jsonify({
                 "service": "WALL-E Camera Proxy",
-                "version": "1.1",
+                "version": "2.0",
                 "endpoints": {
                     "stream": "/stream",
                     "stats": "/stats",
-                    "health": "/health",
-                    "config": "/config"
+                    "camera_settings_get": "/camera/settings [GET]",
+                    "camera_settings_set": "/camera/settings [POST]",
+                    "camera_single_setting": "/camera/setting/<setting> [POST]",
+                    "camera_restart": "/camera/restart [POST]"
                 }
             })
 
