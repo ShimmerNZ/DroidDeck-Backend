@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WALL-E Backend WebSocket Server - Updated with Shared Serial Manager
+WALL-E Backend WebSocket Server - Fixed WebSocket compatibility issues
 """
 
 import asyncio
@@ -21,6 +21,8 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
 import socket
+from modules.nema23_controller import NEMA23Controller, StepperConfig, StepperControlInterface, MotorState
+
 
 # Import the shared serial manager components
 from modules.shared_serial_manager import (
@@ -542,6 +544,7 @@ class WALLEBackend:
         
         # Initialize hardware with shared managers
         self.setup_shared_hardware()
+        self.setup_stepper_system()
         self.setup_safety_systems()
         
         # Initialize telemetry
@@ -876,9 +879,9 @@ class WALLEBackend:
             
         except Exception as e:
             logger.error(f"❌ Servo acceleration command error: {e}")
-    
+        
     async def handle_get_servo_position(self, websocket, data: Dict[str, Any]):
-        """UPDATED: Handle servo position request using shared manager"""
+        """Handle servo position request using shared manager"""
         channel_key = data.get("channel")
         
         if not channel_key:
@@ -888,15 +891,18 @@ class WALLEBackend:
             maestro_num, channel = self.parse_servo_id(channel_key)
             maestro = self.maestro1 if maestro_num == 1 else self.maestro2
             
-            # Use callback for async response
+            # Use thread-safe callback
             def position_callback(position):
                 response = {
                     "type": "servo_position",
                     "channel": channel_key,
                     "position": position
                 }
-                # Schedule response sending
-                asyncio.create_task(self.send_websocket_message(websocket, response))
+                # Schedule in main event loop
+                asyncio.run_coroutine_threadsafe(
+                    self.send_websocket_message(websocket, response), 
+                    self.loop
+                )
             
             success = maestro.get_position(channel, callback=position_callback)
             if not success:
@@ -904,15 +910,15 @@ class WALLEBackend:
                 
         except Exception as e:
             logger.error(f"❌ Get servo position error: {e}")
-    
+        
     async def handle_get_all_servo_positions(self, websocket, data: Dict[str, Any]):
-        """UPDATED: Handle request for all servo positions using shared manager"""
+        """Handle request for all servo positions using shared manager"""
         maestro_num = data.get("maestro", 1)
         
         try:
             maestro = self.maestro1 if maestro_num == 1 else self.maestro2
             
-            # Use callback for async batch response
+            # Use thread-safe callback with asyncio.run_coroutine_threadsafe
             def batch_callback(positions_dict):
                 response = {
                     "type": "all_servo_positions",
@@ -921,8 +927,11 @@ class WALLEBackend:
                     "total_channels": maestro.channel_count,
                     "successful_reads": len(positions_dict)
                 }
-                # Schedule response sending
-                asyncio.create_task(self.send_websocket_message(websocket, response))
+                # Schedule the coroutine in the main event loop
+                asyncio.run_coroutine_threadsafe(
+                    self.send_websocket_message(websocket, response), 
+                    self.loop
+                )
             
             success = maestro.get_all_positions_batch(callback=batch_callback)
             if success:
@@ -956,6 +965,36 @@ class WALLEBackend:
         except Exception as e:
             logger.error(f"❌ Get Maestro info error: {e}")
     
+    async def handle_stepper_command(self, websocket, data: Dict[str, Any]):
+        """NEW: Handle stepper motor control commands"""
+        try:
+            response = await self.stepper_interface.handle_command(data)
+            
+            # Send response back to requesting client
+            await self.send_websocket_message(websocket, {
+                "type": "stepper_response",
+                "command": data.get("command"),
+                "success": response.get("success", False),
+                "message": response.get("message", ""),
+                "status": response.get("status", {}),
+                "timestamp": time.time()
+            })
+            
+            logger.info(f"🎯 Stepper command '{data.get('command')}': {response.get('message', 'Completed')}")
+            
+        except Exception as e:
+            logger.error(f"❌ Stepper command error: {e}")
+            await self.send_websocket_message(websocket, {
+                "type": "stepper_response",
+                "command": data.get("command"),
+                "success": False,
+                "message": str(e),
+                "timestamp": time.time()
+            })
+
+
+
+
     async def handle_emergency_stop(self):
         """UPDATED: Handle emergency stop using shared managers"""
         logger.critical("🚨 EMERGENCY STOP ACTIVATED")
@@ -965,6 +1004,7 @@ class WALLEBackend:
         self.maestro1.emergency_stop()
         self.maestro2.emergency_stop()
         self.motor.stop()
+        self.stepper_controller.emergency_stop()
         self.audio.stop()
         
         # Broadcast emergency message
@@ -985,29 +1025,37 @@ class WALLEBackend:
             return 1, 0
     
     async def send_websocket_message(self, websocket, message: dict):
-        """Send message to specific websocket client"""
+        """Send message to specific websocket client with error handling"""
         try:
             if websocket in self.connected_clients:
                 await websocket.send(json.dumps(message))
+        except websockets.exceptions.ConnectionClosed:
+            self.connected_clients.discard(websocket)
+            logger.debug("WebSocket client disconnected during message send")
         except Exception as e:
             logger.error(f"Failed to send websocket message: {e}")
+            self.connected_clients.discard(websocket)
     
     async def broadcast_message(self, message: Dict[str, Any]):
-        """Broadcast message to all connected clients"""
-        if self.connected_clients:
-            disconnected_clients = set()
+        """Broadcast message to all connected clients with error handling"""
+        if not self.connected_clients:
+            return
             
-            for client in self.connected_clients:
-                try:
-                    await client.send(json.dumps(message))
-                except websockets.exceptions.ConnectionClosed:
-                    disconnected_clients.add(client)
-                except Exception as e:
-                    logger.warning(f"Failed to send message to client: {e}")
-                    disconnected_clients.add(client)
-            
-            for client in disconnected_clients:
-                self.connected_clients.discard(client)
+        disconnected_clients = set()
+        message_json = json.dumps(message)
+        
+        for client in self.connected_clients.copy():  # Use copy to avoid modification during iteration
+            try:
+                await client.send(message_json)
+            except websockets.exceptions.ConnectionClosed:
+                disconnected_clients.add(client)
+            except Exception as e:
+                logger.warning(f"Failed to send message to client: {e}")
+                disconnected_clients.add(client)
+        
+        # Clean up disconnected clients
+        for client in disconnected_clients:
+            self.connected_clients.discard(client)
     
     async def telemetry_loop(self):
         """UPDATED: Enhanced telemetry loop with shared manager statistics"""
@@ -1052,6 +1100,10 @@ class WALLEBackend:
         for serial_port_name, manager in self.shared_managers.items():
             shared_stats[serial_port_name] = manager.get_stats()
         
+        # Get stepper motor status
+        stepper_status = self.stepper_controller.get_status()
+
+
         telemetry = {
             "timestamp": data.timestamp,
             "cpu": round(data.cpu_percent, 1),
@@ -1080,7 +1132,8 @@ class WALLEBackend:
                 "state": self.state.value,
                 "connected_clients": len(self.connected_clients)
             },
-            "shared_managers": shared_stats
+            "shared_managers": shared_stats,
+            "stepper_motor": stepper_status
         }
         
         return telemetry
@@ -1120,9 +1173,10 @@ class WALLEBackend:
                 await self.handle_audio_command(data)
             elif msg_type == "system_status":
                 await self.handle_system_status_request(websocket)
-            # NEW: Handle camera config updates
             elif msg_type == "update_camera_config":
                 await self.handle_camera_config_update(data)
+            elif msg_type == "stepper":
+                await self.handle_stepper_command(websocket, data)
             else:
                 logger.debug(f"Unknown message type: {msg_type}")
                 
@@ -1131,6 +1185,51 @@ class WALLEBackend:
         except Exception as e:
             logger.error(f"Error handling client message: {e}")
     
+    async def startup_homing_sequence(self):
+        """NEW: Perform homing sequence on startup"""
+        try:
+            # Wait a moment for system to stabilize
+            await asyncio.sleep(2)
+            
+            # Broadcast that homing is starting
+            await self.broadcast_message({
+                "type": "stepper_homing_started",
+                "message": "Starting stepper motor homing sequence...",
+                "timestamp": time.time()
+            })
+            
+            # Perform homing
+            success = await self.stepper_controller.home_motor()
+            
+            if success:
+                logger.info("✅ Startup homing sequence completed successfully")
+                await self.broadcast_message({
+                    "type": "stepper_startup_complete", 
+                    "success": True,
+                    "message": "Stepper motor homed and ready",
+                    "position_cm": self.stepper_controller.config.default_position_cm,
+                    "timestamp": time.time()
+                })
+            else:
+                logger.error("❌ Startup homing sequence failed")
+                await self.broadcast_message({
+                    "type": "stepper_startup_complete",
+                    "success": False, 
+                    "message": "Stepper motor homing failed - manual intervention required",
+                    "timestamp": time.time()
+                })
+                
+        except Exception as e:
+            logger.error(f"❌ Startup homing sequence error: {e}")
+            await self.broadcast_message({
+                "type": "stepper_startup_complete",
+                "success": False,
+                "message": f"Homing error: {str(e)}",
+                "timestamp": time.time()
+            })
+    
+
+
     async def handle_scene_command(self, data: Dict[str, Any]):
         """Handle scene playback command"""
         emotion = data.get("emotion")
@@ -1163,6 +1262,9 @@ class WALLEBackend:
             for serial_port_name, manager in self.shared_managers.items():
                 shared_manager_stats[serial_port_name] = manager.get_stats()
             
+            # Get stepper status
+            stepper_status = self.stepper_controller.get_status()
+
             status = {
                 "type": "system_status",
                 "timestamp": time.time(),
@@ -1176,13 +1278,15 @@ class WALLEBackend:
                     },
                     "motor": {
                         "gpio_setup": self.motor.gpio_setup
-                    }
+                    },
+                    "stepper_motor": stepper_status
                 },
                 "shared_managers": shared_manager_stats,
                 "capabilities": {
                     "shared_serial": True,
                     "priority_commands": True,
                     "async_responses": True,
+                    "stepper_control": True,
                     "gpio": GPIO_AVAILABLE,
                     "adc": ADC_AVAILABLE
                 }
@@ -1194,7 +1298,7 @@ class WALLEBackend:
             logger.error(f"❌ System status error: {e}")
     
     async def handle_client_connect(self, websocket):
-        """Handle client connections"""
+        """Handle client connections with improved error handling"""
         client_ip = "unknown"
         try:
             if hasattr(websocket, 'remote_address') and websocket.remote_address:
@@ -1215,17 +1319,19 @@ class WALLEBackend:
                 
         except websockets.exceptions.ConnectionClosed:
             logger.info(f"Client {client_ip} disconnected normally")
+        except asyncio.CancelledError:
+            logger.info(f"Client {client_ip} connection cancelled")
         except Exception as e:
             logger.error(f"Client {client_ip} connection error: {e}")
         finally:
             try:
-                self.connected_clients.remove(websocket)
+                self.connected_clients.discard(websocket)
                 logger.info(f"🔌 Client {client_ip} disconnected and cleaned up")
-            except KeyError:
+            except:
                 pass
     
     async def start_server(self, host: str = "0.0.0.0", websocket_port: int = 8766):
-        """UPDATED: Start the enhanced WebSocket server"""
+        """FIXED: Enhanced WebSocket server with better compatibility"""
         logger.info(f"🚀 Starting enhanced WALL-E backend server on {host}:{websocket_port}")
         
         # Print system capabilities
@@ -1233,7 +1339,9 @@ class WALLEBackend:
         logger.info(f"  Shared Serial Managers: {len(self.shared_managers)}")
         logger.info(f"  Maestro 1: {'✅ Connected' if self.maestro1.connected else '❌ Not connected'}")
         logger.info(f"  Maestro 2: {'✅ Connected' if self.maestro2.connected else '❌ Not connected'}")
-        
+        logger.info(f"  Stepper Motor: {'✅ Ready' if self.stepper_controller.gpio_initialized else '❌ GPIO unavailable'}")
+
+
         for serial_port_name, manager in self.shared_managers.items():
             stats = manager.get_stats()
             logger.info(f"  {serial_port_name}: {len(stats['registered_devices'])} devices, {stats['commands_processed']} commands processed")
@@ -1246,17 +1354,35 @@ class WALLEBackend:
             # Store event loop reference
             self.loop = asyncio.get_running_loop()
             
-            # Create and start WebSocket server
-            server = await websockets.serve(
-                self.handle_client_connect,
-                host,
-                websocket_port,
-                ping_interval=30,
-                ping_timeout=10,
-                close_timeout=10,
-                max_size=1024*1024,
-                max_queue=32,
-            )
+            if self.stepper_controller.gpio_initialized:
+                logger.info("🏠 Starting stepper motor homing sequence...")
+                try:
+                    # Start homing in background to not block server startup
+                    asyncio.create_task(self.startup_homing_sequence())
+                except Exception as e:
+                    logger.error(f"❌ Failed to start homing sequence: {e}")
+            
+            # Use minimal parameters that work across different websockets library versions
+            try:
+                # Try the more modern approach first
+                server = await websockets.serve(
+                    self.handle_client_connect,
+                    host,
+                    websocket_port,
+                    ping_interval=30,
+                    ping_timeout=20
+                )
+                logger.info("🔧 Using modern websockets server configuration")
+                
+            except TypeError as e:
+                # Fallback to basic configuration if parameters not supported
+                logger.warning(f"Modern websockets config failed: {e}, falling back to basic config")
+                server = await websockets.serve(
+                    self.handle_client_connect,
+                    host,
+                    websocket_port
+                )
+                logger.info("🔧 Using basic websockets server configuration")
             
             logger.info("🚀 Enhanced WALL-E Backend Server is running!")
             logger.info("📡 WebSocket server ready for frontend connections")
@@ -1279,7 +1405,29 @@ class WALLEBackend:
             
             # Stop shared managers
             self.cleanup()
-    
+    def setup_stepper_system(self):
+        """NEW: Setup NEMA 23 stepper motor system"""
+        logger.info("🔧 Initializing NEMA 23 stepper system...")
+        
+        # Create stepper configuration from hardware config
+        stepper_config = StepperConfig(
+            step_pin=self.config.motor_step_pin,
+            dir_pin=self.config.motor_dir_pin,
+            enable_pin=self.config.motor_enable_pin,
+            limit_switch_pin=self.config.limit_switch_pin
+        )
+        
+        # Create stepper controller
+        self.stepper_controller = NEMA23Controller(stepper_config)
+        
+        # Create WebSocket interface
+        self.stepper_interface = StepperControlInterface(self.stepper_controller)
+        self.stepper_interface.websocket_broadcast_callback = self.broadcast_message
+        
+        logger.info("✅ NEMA 23 stepper system initialized")
+
+
+
     def cleanup(self):
         """UPDATED: Cleanup all resources including camera proxy"""
         logger.info("🧹 Cleaning up enhanced WALL-E backend...")
@@ -1305,6 +1453,9 @@ class WALLEBackend:
         self.maestro1.stop()
         self.maestro2.stop()
         
+        # Cleanup stepper motor
+        self.stepper_controller.cleanup()
+
         # Cleanup shared managers
         cleanup_shared_managers()
         

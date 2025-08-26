@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-WALL-E Camera Proxy - Enhanced Version with Control Relay
-Proxy ESP32 camera stream and relay control commands
+WALL-E Camera Proxy - Enhanced Version with Stream Control
+Proxy ESP32 camera stream with manual start/stop control
 """
 
 import cv2
@@ -39,13 +39,18 @@ class CameraProxy:
         self.lock = threading.Lock()
         self.stream_thread = None
         self.flask_app = None
-        self.esp32_settings = {}  # Cache ESP32 settings
+        self.esp32_settings = {}
+        
+        # NEW: Stream control
+        self.streaming_enabled = False
+        self.stream_active = False
         
         # Setup graceful shutdown
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         
         logger.info(f"📷 Camera Proxy initialized - Port: {self.rebroadcast_port}")
+        logger.info(f"🎮 Stream control: Manual start/stop enabled")
 
     def signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
@@ -57,17 +62,17 @@ class CameraProxy:
         """Load camera configuration with fallback defaults"""
         default_config = {
             "esp32_url": "http://esp32.local:81/stream",
-            "esp32_base_url": "http://esp32.local:81",  # Base URL for control endpoints
+            "esp32_base_url": "http://esp32.local:81",
             "rebroadcast_port": 8081,
             "enable_stats": True,
             "connection_timeout": 10,
             "reconnect_delay": 5,
             "max_connection_errors": 10,
-            "frame_quality": 80
+            "frame_quality": 80,
+            "auto_start_stream": False  # NEW: Don't auto-start
         }
         
         try:
-            # Ensure config directory exists
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
             
             if os.path.exists(CONFIG_PATH):
@@ -76,7 +81,6 @@ class CameraProxy:
                 logger.info(f"📷 Loaded camera config from {CONFIG_PATH}")
             else:
                 config = default_config
-                # Create default config file
                 with open(CONFIG_PATH, "w") as f:
                     json.dump(default_config, f, indent=4)
                 logger.info(f"📷 Created default camera config at {CONFIG_PATH}")
@@ -88,11 +92,9 @@ class CameraProxy:
         # Load config values
         self.esp32_url = config.get("esp32_url", default_config["esp32_url"])
         
-        # Extract base URL from stream URL if not provided
         if "esp32_base_url" in config:
             self.esp32_base_url = config["esp32_base_url"]
         else:
-            # Extract base URL from stream URL (remove /stream)
             self.esp32_base_url = self.esp32_url.replace("/stream", "")
             
         self.rebroadcast_port = config.get("rebroadcast_port", default_config["rebroadcast_port"])
@@ -102,10 +104,18 @@ class CameraProxy:
         self.max_connection_errors = config.get("max_connection_errors", default_config["max_connection_errors"])
         self.frame_quality = config.get("frame_quality", default_config["frame_quality"])
         
-        logger.info(f"📷 Camera config - Stream URL: {self.esp32_url}, Base URL: {self.esp32_base_url}, Port: {self.rebroadcast_port}")
+        # NEW: Auto-start control
+        self.auto_start_stream = config.get("auto_start_stream", False)
+        
+        logger.info(f"📷 Config - Stream URL: {self.esp32_url}, Base URL: {self.esp32_base_url}")
+        logger.info(f"🎮 Auto-start stream: {'Enabled' if self.auto_start_stream else 'Disabled'}")
 
     def fetch_esp32_settings(self):
-        """Fetch current settings from ESP32"""
+        """Fetch current settings from ESP32 (only when stream is stopped)"""
+        if self.stream_active:
+            logger.warning("⚠️ Cannot fetch settings while streaming is active")
+            return False
+            
         try:
             response = requests.get(
                 f"{self.esp32_base_url}/settings",
@@ -113,24 +123,27 @@ class CameraProxy:
             )
             if response.status_code == 200:
                 self.esp32_settings = response.json()
-                logger.info(f"📷 Fetched ESP32 settings: {self.esp32_settings}")
+                logger.info(f"📷 Fetched ESP32 settings: {len(self.esp32_settings)} parameters")
                 return True
         except Exception as e:
             logger.warning(f"⚠️ Failed to fetch ESP32 settings: {e}")
         return False
 
     def update_esp32_setting(self, setting_name, value):
-        """Update a single setting on the ESP32"""
+        """Update a single setting on ESP32 (only when stream is stopped)"""
+        if self.stream_active:
+            logger.warning(f"⚠️ Cannot update {setting_name} while streaming is active")
+            return False
+            
         try:
             params = {setting_name: value}
             response = requests.post(
                 f"{self.esp32_base_url}/settings",
                 params=params,
-                timeout=5
+                timeout=10
             )
             if response.status_code == 200:
                 logger.info(f"📷 Updated ESP32 setting: {setting_name} = {value}")
-                # Update cache
                 self.esp32_settings[setting_name] = value
                 return True
         except Exception as e:
@@ -138,16 +151,19 @@ class CameraProxy:
         return False
 
     def update_esp32_settings(self, settings):
-        """Update multiple settings on the ESP32"""
+        """Update multiple settings on ESP32 (only when stream is stopped)"""
+        if self.stream_active:
+            logger.warning(f"⚠️ Cannot update settings while streaming is active")
+            return False
+            
         try:
             response = requests.post(
                 f"{self.esp32_base_url}/settings",
                 params=settings,
-                timeout=5
+                timeout=10
             )
             if response.status_code == 200:
                 logger.info(f"📷 Updated ESP32 settings: {settings}")
-                # Update cache
                 self.esp32_settings.update(settings)
                 return True
         except Exception as e:
@@ -155,66 +171,113 @@ class CameraProxy:
         return False
 
     def start_stream(self):
-        """Start the camera stream in a background thread"""
-        def fetch_stream():
-            logger.info(f"📷 Starting camera stream from {self.esp32_url}")
+        """Start the camera stream manually"""
+        if self.stream_active:
+            logger.info("📷 Stream already active")
+            return True
             
-            # Try to fetch initial settings
-            self.fetch_esp32_settings()
-            
-            while self.running:
-                try:
-                    if self.connection_errors >= self.max_connection_errors:
-                        logger.error(f"📷 Too many connection errors ({self.connection_errors}), giving up")
-                        break
-                    
-                    logger.debug(f"📷 Connecting to ESP32 camera stream...")
-                    stream = requests.get(
-                        self.esp32_url, 
-                        stream=True, 
-                        timeout=self.connection_timeout,
-                        headers={'User-Agent': 'WALL-E-Camera-Proxy/1.0'}
-                    )
-                    stream.raise_for_status()
-                    
-                    self.connected_to_esp32 = True
-                    self.connection_errors = 0  # Reset error count on successful connection
-                    logger.info("📷 Connected to ESP32 camera stream")
-                    
-                    bytes_data = b""
-                    
-                    for chunk in stream.iter_content(chunk_size=1024):
-                        if not self.running:
-                            break
-                            
-                        bytes_data += chunk
-                        a = bytes_data.find(b'\xff\xd8')  # JPEG start
-                        b = bytes_data.find(b'\xff\xd9')  # JPEG end
-                        
-                        if a != -1 and b != -1:
-                            jpg = bytes_data[a:b+2]
-                            bytes_data = bytes_data[b+2:]
-                            
-                            if self._process_frame(jpg):
-                                time.sleep(0.033)  # Throttle to ~30 FPS
-                                continue
-                    
-                except requests.exceptions.RequestException as e:
-                    self.connected_to_esp32 = False
-                    self.connection_errors += 1
-                    logger.warning(f"📷 Camera connection error ({self.connection_errors}/{self.max_connection_errors}): {e}")
-                    time.sleep(self.reconnect_delay)
-                except Exception as e:
-                    self.connected_to_esp32 = False
-                    self.connection_errors += 1
-                    logger.error(f"📷 Camera stream error: {e}")
-                    time.sleep(self.reconnect_delay)
-                    
-            self.connected_to_esp32 = False
-            logger.info("📷 Camera stream thread stopped")
-
-        self.stream_thread = threading.Thread(target=fetch_stream, daemon=True, name="CameraStream")
+        if self.stream_thread and self.stream_thread.is_alive():
+            logger.warning("⚠️ Stream thread already running, stopping first...")
+            self.stop_stream()
+            time.sleep(1)
+        
+        logger.info("🎬 Starting camera stream...")
+        self.streaming_enabled = True
+        self.connection_errors = 0
+        
+        self.stream_thread = threading.Thread(target=self._stream_worker, daemon=True)
         self.stream_thread.start()
+        
+        # Wait a moment to check if stream started successfully
+        time.sleep(2)
+        return self.stream_active
+
+    def stop_stream(self):
+        """Stop the camera stream manually"""
+        if not self.streaming_enabled:
+            logger.info("📷 Stream already stopped")
+            return True
+            
+        logger.info("🛑 Stopping camera stream...")
+        self.streaming_enabled = False
+        
+        # Wait for stream thread to finish
+        if self.stream_thread and self.stream_thread.is_alive():
+            self.stream_thread.join(timeout=3.0)
+            if self.stream_thread.is_alive():
+                logger.warning("⚠️ Stream thread didn't stop gracefully")
+        
+        self.stream_active = False
+        self.connected_to_esp32 = False
+        
+        # Clear current frame
+        with self.lock:
+            self.frame = None
+        
+        logger.info("✅ Camera stream stopped")
+        return True
+
+    def _stream_worker(self):
+        """Background worker for camera streaming"""
+        logger.info(f"📷 Camera stream worker started - URL: {self.esp32_url}")
+        self.stream_active = True
+        
+        # Try to fetch initial settings when stream starts
+        self.fetch_esp32_settings()
+        
+        while self.streaming_enabled and self.running:
+            try:
+                if self.connection_errors >= self.max_connection_errors:
+                    logger.error(f"📷 Too many connection errors ({self.connection_errors}), stopping stream")
+                    break
+                
+                logger.debug(f"📷 Connecting to ESP32 camera stream...")
+                stream = requests.get(
+                    self.esp32_url, 
+                    stream=True, 
+                    timeout=self.connection_timeout,
+                    headers={'User-Agent': 'WALL-E-Camera-Proxy/2.0'}
+                )
+                stream.raise_for_status()
+                
+                self.connected_to_esp32 = True
+                self.connection_errors = 0
+                logger.info("✅ Connected to ESP32 camera stream")
+                
+                bytes_data = b""
+                
+                for chunk in stream.iter_content(chunk_size=1024):
+                    if not self.streaming_enabled or not self.running:
+                        break
+                        
+                    bytes_data += chunk
+                    a = bytes_data.find(b'\xff\xd8')  # JPEG start
+                    b = bytes_data.find(b'\xff\xd9')  # JPEG end
+                    
+                    if a != -1 and b != -1:
+                        jpg = bytes_data[a:b+2]
+                        bytes_data = bytes_data[b+2:]
+                        
+                        if self._process_frame(jpg):
+                            time.sleep(0.033)  # Throttle to ~30 FPS
+                            continue
+                
+            except requests.exceptions.RequestException as e:
+                self.connected_to_esp32 = False
+                self.connection_errors += 1
+                logger.warning(f"📷 Camera connection error ({self.connection_errors}/{self.max_connection_errors}): {e}")
+                if self.streaming_enabled:  # Only sleep if we're supposed to keep trying
+                    time.sleep(self.reconnect_delay)
+            except Exception as e:
+                self.connected_to_esp32 = False
+                self.connection_errors += 1
+                logger.error(f"📷 Camera stream error: {e}")
+                if self.streaming_enabled:
+                    time.sleep(self.reconnect_delay)
+        
+        self.stream_active = False
+        self.connected_to_esp32 = False
+        logger.info("📷 Camera stream worker stopped")
 
     def _process_frame(self, jpg_data):
         """Process a single JPEG frame"""
@@ -223,7 +286,12 @@ class CameraProxy:
             frame = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
             
             if frame is not None:
-                # Re-encode frame with quality setting
+                # FIXED RESOLUTION: Always output 640x480 regardless of ESP32 setting
+                target_width, target_height = 640, 480
+                if frame.shape[1] != target_width or frame.shape[0] != target_height:
+                    frame = cv2.resize(frame, (target_width, target_height), 
+                                    interpolation=cv2.INTER_LINEAR)  # Fast resize
+                    
                 encoded, buffer = cv2.imencode('.jpg', frame, 
                     [cv2.IMWRITE_JPEG_QUALITY, self.frame_quality])
                 
@@ -234,7 +302,7 @@ class CameraProxy:
                         
                         if self.last_frame_time:
                             delta = now - self.last_frame_time
-                            if delta > 0.2:  # More than 200ms gap
+                            if delta > 0.2:
                                 self.dropped_frames += 1
                         
                         self.last_frame_time = now
@@ -253,21 +321,28 @@ class CameraProxy:
         """Generate frames for HTTP streaming"""
         while self.running:
             with self.lock:
-                if self.frame:
+                if self.frame and self.stream_active:
                     yield (b'--frame\r\n'
                            b'Content-Type: image/jpeg\r\n\r\n' + self.frame + b'\r\n')
                 else:
-                    # Send a small placeholder frame when no camera data
+                    # Send placeholder when not streaming
                     placeholder = self._create_placeholder_frame()
                     yield (b'--frame\r\n'
                            b'Content-Type: image/jpeg\r\n\r\n' + placeholder + b'\r\n')
             time.sleep(0.033)  # ~30 FPS
 
     def _create_placeholder_frame(self):
-        """Create a placeholder frame when camera is not available"""
+        """Create placeholder frame when not streaming"""
         try:
             img = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(img, "Camera Offline", (50, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            if not self.streaming_enabled:
+                text = "Stream Stopped"
+                color = (128, 128, 128)
+            else:
+                text = "Connecting..."
+                color = (255, 255, 0)
+                
+            cv2.putText(img, text, (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 2, color, 3)
             _, buffer = cv2.imencode('.jpg', img)
             return buffer.tobytes()
         except:
@@ -290,31 +365,29 @@ class CameraProxy:
                 "fps": round(fps, 2),
                 "frame_count": self.frame_count,
                 "dropped_frames": self.dropped_frames,
-                "latency": round(latency * 1000, 1),  # ms
+                "latency": round(latency * 1000, 1),
                 "has_frame": self.frame is not None,
                 "stream_url": self.esp32_url,
                 "connected_to_esp32": self.connected_to_esp32,
                 "connection_errors": self.connection_errors,
                 "uptime": round(time.time() - self.start_time, 1),
-                "status": "connected" if self.connected_to_esp32 else "disconnected",
-                "esp32_settings": self.esp32_settings  # Include cached settings
+                "streaming_enabled": self.streaming_enabled,
+                "stream_active": self.stream_active,
+                "status": "streaming" if self.stream_active else "stopped",
+                "esp32_settings": self.esp32_settings
             }
 
     def stop(self):
         """Stop the camera proxy gracefully"""
         logger.info("📷 Stopping camera proxy...")
         self.running = False
-        
-        # Wait for stream thread to finish
-        if self.stream_thread and self.stream_thread.is_alive():
-            self.stream_thread.join(timeout=2.0)
-        
+        self.stop_stream()
         logger.info("📷 Camera proxy stopped")
 
     def create_flask_app(self):
-        """Create and configure Flask application"""
+        """Create and configure Flask application with stream control"""
         app = Flask(__name__)
-        app.logger.setLevel(logging.WARNING)  # Reduce Flask logging
+        app.logger.setLevel(logging.WARNING)
 
         @app.route('/stream')
         def stream():
@@ -330,9 +403,47 @@ class CameraProxy:
             else:
                 return jsonify({"stats_disabled": True})
 
+        # NEW: Stream control endpoints
+        @app.route('/stream/start', methods=['POST'])
+        def start_stream():
+            """Start the camera stream"""
+            success = self.start_stream()
+            return jsonify({
+                "success": success,
+                "streaming": self.streaming_enabled,
+                "message": "Stream started" if success else "Failed to start stream"
+            })
+
+        @app.route('/stream/stop', methods=['POST'])
+        def stop_stream():
+            """Stop the camera stream"""
+            success = self.stop_stream()
+            return jsonify({
+                "success": success,
+                "streaming": self.streaming_enabled,
+                "message": "Stream stopped" if success else "Failed to stop stream"
+            })
+
+        @app.route('/stream/status', methods=['GET'])
+        def stream_status():
+            """Get current stream status"""
+            return jsonify({
+                "streaming_enabled": self.streaming_enabled,
+                "stream_active": self.stream_active,
+                "connected_to_esp32": self.connected_to_esp32,
+                "can_change_settings": not self.stream_active
+            })
+
         @app.route('/camera/settings', methods=['GET'])
         def get_camera_settings():
             """Get current camera settings from ESP32"""
+            if self.stream_active:
+                return jsonify({
+                    "error": "Cannot read settings while streaming",
+                    "streaming": True,
+                    "cached_settings": self.esp32_settings
+                }), 400
+            
             if self.fetch_esp32_settings():
                 return jsonify(self.esp32_settings)
             else:
@@ -341,6 +452,12 @@ class CameraProxy:
         @app.route('/camera/settings', methods=['POST'])
         def set_camera_settings():
             """Update camera settings on ESP32"""
+            if self.stream_active:
+                return jsonify({
+                    "error": "Cannot change settings while streaming. Stop stream first.",
+                    "streaming": True
+                }), 400
+            
             settings = request.get_json(force=True) if request.is_json else request.args.to_dict()
             
             if not settings:
@@ -364,6 +481,12 @@ class CameraProxy:
         @app.route('/camera/setting/<setting>', methods=['POST'])
         def set_single_setting(setting):
             """Update a single camera setting"""
+            if self.stream_active:
+                return jsonify({
+                    "error": f"Cannot change {setting} while streaming. Stop stream first.",
+                    "streaming": True
+                }), 400
+            
             value = request.args.get('value') or request.get_json(force=True).get('value')
             
             if value is None:
@@ -386,17 +509,26 @@ class CameraProxy:
         @app.route('/camera/restart', methods=['POST'])
         def restart_camera():
             """Restart the camera stream connection"""
+            if self.stream_active:
+                self.stop_stream()
+                time.sleep(1)
+            
             self.connection_errors = 0
-            return jsonify({"status": "restarting"})
+            return jsonify({"status": "restarted", "streaming": self.streaming_enabled})
 
         @app.route('/')
         def index():
             return jsonify({
                 "service": "WALL-E Camera Proxy",
-                "version": "2.0",
+                "version": "2.1 - Stream Control",
+                "streaming": self.streaming_enabled,
+                "stream_active": self.stream_active,
                 "endpoints": {
                     "stream": "/stream",
                     "stats": "/stats",
+                    "stream_start": "/stream/start [POST]",
+                    "stream_stop": "/stream/stop [POST]",
+                    "stream_status": "/stream/status [GET]",
                     "camera_settings_get": "/camera/settings [GET]",
                     "camera_settings_set": "/camera/settings [POST]",
                     "camera_single_setting": "/camera/setting/<setting> [POST]",
@@ -411,10 +543,15 @@ class CameraProxy:
         self.start_time = time.time()
         
         logger.info(f"📷 Starting camera proxy server on port {self.rebroadcast_port}")
+        logger.info(f"🎮 Stream control: Manual start/stop mode")
         
         try:
-            # Start streaming first
-            self.start_stream()
+            # DON'T auto-start streaming - wait for manual control
+            if self.auto_start_stream:
+                logger.info("🎬 Auto-starting stream (legacy mode)")
+                self.start_stream()
+            else:
+                logger.info("⏸️ Stream control ready - use frontend to start streaming")
             
             # Create Flask app
             app = self.create_flask_app()
@@ -431,6 +568,7 @@ class CameraProxy:
             logger.error(f"📷 Failed to start camera server: {e}")
         finally:
             self.stop()
+
 
 if __name__ == "__main__":
     # Check if OpenCV is available

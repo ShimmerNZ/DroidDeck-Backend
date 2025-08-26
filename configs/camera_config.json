@@ -1,0 +1,12 @@
+{
+    "esp32_ip": "10.1.1.203",
+    "esp32_http_port": 81,
+    "esp32_ws_port": 82,
+    "rebroadcast_port": 8081,
+    "enable_stats": true,
+    "connection_timeout": 10,
+    "max_connection_errors": 10,
+    "frame_quality": 80,
+    "ws_reconnect_delay": 5,
+    "http_reconnect_delay": 3
+}

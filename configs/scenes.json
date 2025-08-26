@@ -1,0 +1,41 @@
+{
+    "happy": {
+        "emoji": "😊",
+        "category": "Happy",
+        "duration": 3.0,
+        "audio_file": "track_002",
+        "servos": {
+            "m1_ch0": {"target": 1500, "speed": 50},
+            "m1_ch1": {"target": 1200, "speed": 30}
+        }
+    },
+    "sad": {
+        "emoji": "😢", 
+        "category": "Sad",
+        "duration": 4.0,
+        "audio_file": "track_004",
+        "servos": {
+            "m1_ch0": {"target": 1000, "speed": 20},
+            "m1_ch1": {"target": 1800, "speed": 20}
+        }
+    },
+    "wave_response": {
+        "emoji": "👋",
+        "category": "Gesture", 
+        "duration": 3.0,
+        "audio_file": "track_008",
+        "servos": {
+            "m1_ch3": {"target": 1200, "speed": 60}
+        }
+    },
+    "excited": {
+        "emoji": "🤩",
+        "category": "Happy",
+        "duration": 2.5,
+        "audio_file": "track_001",
+        "servos": {
+            "m1_ch0": {"target": 1800, "speed": 80},
+            "m1_ch1": {"target": 800, "speed": 80}
+        }
+    }
+}

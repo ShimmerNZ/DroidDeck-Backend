@@ -1,0 +1,33 @@
+{
+    "hardware": {
+        "maestro1": {
+            "port": "/dev/ttyAMA0",
+            "baud_rate": 9600,
+            "device_number": 12
+        },
+        "maestro2": {
+            "port": "/dev/ttyAMA0",
+            "baud_rate": 9600,
+            "device_number": 13
+        },
+        "sabertooth": {
+            "port": "/dev/ttyAMA1",
+            "baud_rate": 9600
+        },
+        "gpio": {
+            "motor_step_pin": 16,
+            "motor_dir_pin": 12,
+            "motor_enable_pin": 13,
+            "limit_switch_pin": 26,
+            "emergency_stop_pin": 25
+        },
+        "timing": {
+            "telemetry_interval": 0.2,
+            "servo_update_rate": 0.02
+        },
+        "audio": {
+            "directory": "audio",
+            "volume": 0.7
+        }
+    }
+}
