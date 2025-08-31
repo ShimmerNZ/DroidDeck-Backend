@@ -136,9 +136,9 @@ class NativeAudioController:
             pygame.mixer.pre_init(frequency=22050, size=-16, channels=2, buffer=512)
             pygame.mixer.init()
             self.connected = True
-            logger.info("✅ Native audio system initialized successfully")
+            logger.info("Native audio system initialized successfully")
         except Exception as e:
-            logger.error(f"❌ Failed to initialize audio system: {e}")
+            logger.error(f"Failed to initialize audio system: {e}")
             self.connected = False
     
     def scan_audio_files(self):
@@ -153,9 +153,10 @@ class NativeAudioController:
         
         for ext in audio_extensions:
             for file_path in self.audio_directory.glob(ext):
-                key = file_path.stem
-                self.audio_files[key] = file_path
-                file_count += 1
+                if not file_path.name.startswith('._') and not file_path.name.startswith('.'):
+                    key = file_path.stem
+                    self.audio_files[key] = file_path
+                    file_count += 1
         
         logger.info(f"Found {file_count} audio files in {self.audio_directory}")
     
@@ -187,7 +188,7 @@ class NativeAudioController:
             
             self.is_playing = True
             self.current_track = track_identifier
-            logger.info(f"🎵 Playing audio: {audio_file.name}")
+            logger.info(f"Playing audio: {audio_file.name}")
             return True
             
         except Exception as e:
@@ -226,7 +227,8 @@ class NativeAudioController:
     
     def get_playlist(self) -> List[str]:
         """Get list of available audio files"""
-        return list(self.audio_files.keys())
+        # Return actual filenames instead of keys for better frontend display
+        return [f"{file_path.name}" for file_path in self.audio_files.values()]
 
 class SafeMotorController:
     """Motor controller with graceful GPIO handling"""
@@ -255,9 +257,9 @@ class SafeMotorController:
             GPIO.setup(self.enable_pin, GPIO.OUT)
             GPIO.output(self.enable_pin, GPIO.LOW)
             self.gpio_setup = True
-            logger.info("✅ Motor controller initialized")
+            logger.info("Motor controller initialized")
         except Exception as e:
-            logger.error(f"❌ Failed to setup motor GPIO: {e}")
+            logger.error(f"Failed to setup motor GPIO: {e}")
             self.gpio_setup = False
     
     def stop(self):
@@ -265,7 +267,7 @@ class SafeMotorController:
         if self.gpio_setup:
             try:
                 GPIO.output(self.enable_pin, GPIO.HIGH)
-                logger.warning("🛑 Motor emergency stop activated")
+                logger.warning("Motor emergency stop activated")
             except Exception as e:
                 logger.error(f"Failed to stop motor: {e}")
     
@@ -308,7 +310,7 @@ class SafeTelemetrySystem:
             adc_available=self.adc_available
         )
         
-        logger.info(f"✅ Telemetry system initialized - ADC: {'Available' if self.adc_available else 'Simulated'}")
+        logger.info(f"Telemetry system initialized - ADC: {'Available' if self.adc_available else 'Simulated'}")
     
     def setup_adc(self):
         """Setup ADC with graceful error handling"""
@@ -322,10 +324,10 @@ class SafeTelemetrySystem:
             self.battery_channel = AnalogIn(self.ads, ADS.P0)
             self.current_channel = AnalogIn(self.ads, ADS.P1)
             self.current_a1_channel = AnalogIn(self.ads, ADS.P2)
-            logger.info("✅ ADC initialized - Real hardware readings enabled")
+            logger.info("ADC initialized - Real hardware readings enabled")
             self.adc_available = True
         except Exception as e:
-            logger.warning(f"❌ Failed to initialize ADC: {e}")
+            logger.warning(f"Failed to initialize ADC: {e}")
             self.adc_available = False
             self.ads = None
     
@@ -427,8 +429,13 @@ class SceneEngine:
     def load_scenes(self):
         """Load scene configurations"""
         try:
-            with open("configs/scenes.json", "r") as f:
-                self.scenes = json.load(f)
+            with open("configs/scenes_config.json", "r") as f:
+                scenes_list = json.load(f)
+                # Convert list to dictionary for backward compatibility
+                if isinstance(scenes_list, list):
+                    self.scenes = {scene["label"]: scene for scene in scenes_list}
+                else:
+                    self.scenes = scenes_list
             logger.info(f"Loaded {len(self.scenes)} scenes")
         except Exception as e:
             logger.warning(f"Failed to load scenes: {e}")
@@ -496,7 +503,7 @@ class SceneEngine:
                     if "target" in settings:
                         maestro.set_target(channel, settings["target"], priority=CommandPriority.NORMAL)
             
-            logger.info(f"🎭 Playing scene: {scene_name}")
+            logger.info(f"Playing scene: {scene_name}")
             return True
             
         except Exception as e:
@@ -555,7 +562,7 @@ class WALLEBackend:
             self.maestro1, self.maestro2, self.audio
         )
         
-        logger.info("✅ WALL-E Backend with shared serial managers initialized")
+        logger.info("WALL-E Backend with shared serial managers initialized")
     
     def load_camera_proxy_pid(self):
             """Load camera proxy PID from file if it exists"""
@@ -569,7 +576,7 @@ class WALLEBackend:
                             os.remove("camera_proxy.pid")
                             logger.warning("Camera proxy PID file found but process not running")
                         else:
-                            logger.info(f"📷 Found running camera proxy (PID: {self.camera_proxy_pid})")
+                            logger.info(f"Found running camera proxy (PID: {self.camera_proxy_pid})")
             except Exception as e:
                 logger.warning(f"Failed to load camera proxy PID: {e}")
                 self.camera_proxy_pid = None
@@ -610,7 +617,7 @@ class WALLEBackend:
             with open(camera_config_path, "w") as f:
                 json.dump(camera_config, f, indent=4)
             
-            logger.info(f"📷 Updated camera config: {old_url} → {esp32_url}")
+            logger.info(f"Updated camera config: {old_url} -> {esp32_url}")
             
             # Restart camera proxy service
             await self.restart_camera_proxy()
@@ -638,7 +645,7 @@ class WALLEBackend:
             # Stop existing camera proxy
             if self.camera_proxy_pid:
                 try:
-                    logger.info(f"🛑 Stopping camera proxy (PID: {self.camera_proxy_pid})")
+                    logger.info(f"Stopping camera proxy (PID: {self.camera_proxy_pid})")
                     os.kill(self.camera_proxy_pid, signal.SIGTERM)
                     
                     # Wait for process to terminate
@@ -654,7 +661,7 @@ class WALLEBackend:
                         os.kill(self.camera_proxy_pid, signal.SIGKILL)
                         await asyncio.sleep(1)
                     
-                    logger.info("✅ Camera proxy stopped")
+                    logger.info("Camera proxy stopped")
                 except (ProcessLookupError, psutil.NoSuchProcess):
                     logger.info("Camera proxy was already stopped")
                 except Exception as e:
@@ -669,7 +676,7 @@ class WALLEBackend:
                         pass
             
             # Start new camera proxy process
-            logger.info("🚀 Starting camera proxy with new configuration...")
+            logger.info("Starting camera proxy with new configuration...")
             
             # Check if camera_proxy.py exists
             proxy_script = "modules/camera_proxy.py"
@@ -698,19 +705,18 @@ class WALLEBackend:
             
             # Check if it's still running
             if psutil.pid_exists(self.camera_proxy_pid):
-                logger.info(f"✅ Camera proxy restarted successfully (PID: {self.camera_proxy_pid})")
+                logger.info(f"Camera proxy restarted successfully (PID: {self.camera_proxy_pid})")
             else:
-                logger.error("❌ Camera proxy failed to start")
+                logger.error("Camera proxy failed to start")
                 self.camera_proxy_pid = None
                 
         except Exception as e:
             logger.error(f"Failed to restart camera proxy: {e}")
             self.camera_proxy_pid = None
 
-
     def setup_shared_hardware(self):
         """UPDATED: Initialize hardware controllers using shared serial managers"""
-        logger.info("🔧 Initializing shared hardware controllers...")
+        logger.info("Initializing shared hardware controllers...")
         
         # Create shared manager for Maestro port
         maestro_manager = get_shared_manager(
@@ -754,14 +760,14 @@ class WALLEBackend:
     def log_hardware_status(self):
         """Log the status of all hardware components"""
         hw_status = {
-            "Maestro 1": f"✅ Connected (device #{self.maestro1.device_number})" if self.maestro1.connected else "❌ Not connected",
-            "Maestro 2": f"✅ Connected (device #{self.maestro2.device_number})" if self.maestro2.connected else "❌ Not connected",
-            "Audio": "✅ Ready" if self.audio.connected else "❌ Failed",
-            "Motor": "✅ Ready" if self.motor.gpio_setup else "❌ GPIO unavailable",
+            "Maestro 1": f"Connected (device #{self.maestro1.device_number})" if self.maestro1.connected else "Not connected",
+            "Maestro 2": f"Connected (device #{self.maestro2.device_number})" if self.maestro2.connected else "Not connected",
+            "Audio": "Ready" if self.audio.connected else "Failed",
+            "Motor": "Ready" if self.motor.gpio_setup else "GPIO unavailable",
             "Shared Managers": len(self.shared_managers)
         }
         
-        logger.info("🔧 Hardware initialization complete:")
+        logger.info("Hardware initialization complete:")
         for device, status in hw_status.items():
             logger.info(f"  {device}: {status}")
         
@@ -787,14 +793,14 @@ class WALLEBackend:
                 bouncetime=300
             )
             
-            logger.info("✅ Safety systems initialized")
+            logger.info("Safety systems initialized")
             
         except Exception as e:
-            logger.error(f"❌ Failed to setup safety systems: {e}")
+            logger.error(f"Failed to setup safety systems: {e}")
     
     def emergency_stop_callback(self, channel):
         """Emergency stop interrupt handler"""
-        logger.critical("🚨 EMERGENCY STOP ACTIVATED")
+        logger.critical("EMERGENCY STOP ACTIVATED")
         self.state = SystemState.EMERGENCY
         
         # Emergency stop with highest priority
@@ -811,6 +817,241 @@ class WALLEBackend:
                     "timestamp": time.time()
                 }), self.loop
             )
+
+    # NEW SCENE MANAGEMENT HANDLERS
+    
+    async def handle_get_audio_files(self, websocket):
+        """Handle request for available audio files"""
+        try:
+            # Get audio files from the audio controller
+            audio_files = self.audio.get_playlist()
+            
+            response = {
+                "type": "audio_files",
+                "files": audio_files,
+                "count": len(audio_files),
+                "timestamp": time.time()
+            }
+            
+            await self.send_websocket_message(websocket, response)
+            logger.info(f"Sent {len(audio_files)} audio files to client")
+            
+        except Exception as e:
+            logger.error(f"Failed to get audio files: {e}")
+            await self.send_websocket_message(websocket, {
+                "type": "audio_files",
+                "files": [],
+                "error": str(e),
+                "timestamp": time.time()
+            })
+
+    async def handle_get_scenes(self, websocket):
+        """Handle request for scene list"""
+        try:
+            # Load scenes from file with fallback
+            scenes = await self.load_scenes_config()
+            
+            response = {
+                "type": "scene_list",
+                "scenes": scenes,
+                "count": len(scenes),
+                "timestamp": time.time()
+            }
+            
+            await self.send_websocket_message(websocket, response)
+            logger.info(f"Sent {len(scenes)} scenes to client")
+            
+        except Exception as e:
+            logger.error(f"Failed to get scenes: {e}")
+            await self.send_websocket_message(websocket, {
+                "type": "scene_list",
+                "scenes": [],
+                "error": str(e),
+                "timestamp": time.time()
+            })
+
+    async def handle_save_scenes(self, websocket, data: Dict[str, Any]):
+        """Handle saving scenes configuration"""
+        try:
+            scenes = data.get("scenes", [])
+            
+            if not isinstance(scenes, list):
+                raise ValueError("Scenes data must be a list")
+            
+            # Validate scenes data
+            for i, scene in enumerate(scenes):
+                if not isinstance(scene, dict):
+                    raise ValueError(f"Scene {i} must be a dictionary")
+                if not scene.get("label", "").strip():
+                    raise ValueError(f"Scene {i} must have a non-empty label")
+            
+            # Save to file
+            success = await self.save_scenes_config(scenes)
+            
+            if success:
+                # Update scene engine with new scenes
+                self.scene_engine.scenes = {scene["label"]: scene for scene in scenes}
+                
+                response = {
+                    "type": "scenes_saved",
+                    "success": True,
+                    "count": len(scenes),
+                    "timestamp": time.time()
+                }
+                logger.info(f"Saved {len(scenes)} scenes successfully")
+            else:
+                response = {
+                    "type": "scenes_saved",
+                    "success": False,
+                    "error": "Failed to write scenes file",
+                    "timestamp": time.time()
+                }
+                
+            await self.send_websocket_message(websocket, response)
+            
+            # Broadcast to all clients that scenes were updated
+            if success:
+                await self.broadcast_message({
+                    "type": "scenes_updated",
+                    "count": len(scenes),
+                    "timestamp": time.time()
+                })
+            
+        except Exception as e:
+            logger.error(f"Failed to save scenes: {e}")
+            await self.send_websocket_message(websocket, {
+                "type": "scenes_saved",
+                "success": False,
+                "error": str(e),
+                "timestamp": time.time()
+            })
+
+    async def handle_test_scene(self, websocket, data: Dict[str, Any]):
+        """Handle scene testing request"""
+        try:
+            scene = data.get("scene", {})
+            scene_name = scene.get("label", "Test Scene")
+            
+            logger.info(f"Testing scene: {scene_name}")
+            
+            # Test audio if enabled
+            if scene.get("audio_enabled") and scene.get("audio_file"):
+                audio_file = scene["audio_file"]
+                self.audio.play_track(audio_file)
+                logger.info(f"Playing audio: {audio_file}")
+            
+            # Test script if enabled
+            if scene.get("script_enabled"):
+                script_num = scene.get("script_name", 0)
+                logger.info(f"Would execute script #{script_num}")
+                # Here you would implement actual script execution
+            
+            # Apply delay if both are enabled
+            if scene.get("audio_enabled") and scene.get("script_enabled") and scene.get("delay", 0) > 0:
+                delay_ms = scene["delay"]
+                logger.info(f"Applied delay: {delay_ms}ms")
+            
+            await self.send_websocket_message(websocket, {
+                "type": "scene_tested",
+                "scene_name": scene_name,
+                "success": True,
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            logger.error(f"Failed to test scene: {e}")
+            await self.send_websocket_message(websocket, {
+                "type": "scene_tested",
+                "success": False,
+                "error": str(e),
+                "timestamp": time.time()
+            })
+
+    async def load_scenes_config(self) -> List[Dict[str, Any]]:
+        """Load scenes configuration from file with fallbacks"""
+        try:
+            # Try to load scenes.json first
+            scenes_path = "configs/scenes_config.json"
+            if os.path.exists(scenes_path):
+                with open(scenes_path, "r") as f:
+                    scenes = json.load(f)
+                    if isinstance(scenes, list):
+                        logger.info(f"Loaded {len(scenes)} scenes from {scenes_path}")
+                        return scenes
+            
+ 
+            
+            # Return default scenes if no config found
+            logger.info("No scene config found, using defaults")
+            return self.get_default_scenes_list()
+            
+        except Exception as e:
+            logger.error(f"Failed to load scenes config: {e}")
+            return self.get_default_scenes_list()
+
+    async def save_scenes_config(self, scenes: List[Dict[str, Any]]) -> bool:
+        """Save scenes configuration to file"""
+        try:
+            # Ensure configs directory exists
+            os.makedirs("configs", exist_ok=True)
+            
+            scenes_path = "configs/scenes_config.json"
+            with open(scenes_path, "w") as f:
+                json.dump(scenes, f, indent=2)
+            
+            logger.info(f"Saved {len(scenes)} scenes to {scenes_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to save scenes config: {e}")
+            return False
+
+    def convert_old_scene_format(self, old_scenes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert old emotion_buttons.json format to new scenes.json format"""
+        converted = []
+        for scene in old_scenes:
+            new_scene = {
+                "label": scene.get("label", ""),
+                "emoji": scene.get("emoji", "🎭"),  # Default emoji
+                "categories": scene.get("categories", []),
+                "audio_enabled": scene.get("audio_enabled", False),
+                "audio_file": scene.get("audio_file", ""),
+                "script_enabled": scene.get("script_enabled", False),
+                "script_name": scene.get("script_name", 0),
+                "duration": scene.get("duration", 1.0),
+                "delay": scene.get("delay", 0)
+            }
+            converted.append(new_scene)
+        return converted
+
+    def get_default_scenes_list(self) -> List[Dict[str, Any]]:
+        """Get default scene configurations as list"""
+        return [
+            {
+                "label": "Happy Greeting",
+                "emoji": "😊",
+                "categories": ["Happy", "Idle"],
+                "audio_enabled": True,
+                "audio_file": "Audio-clip-_CILW-2022_-Greetings.mp3",
+                "script_enabled": True,
+                "script_name": 1,
+                "duration": 3.0,
+                "delay": 0
+            },
+            {
+                "label": "Sad Response",
+                "emoji": "😢", 
+                "categories": ["Sad"],
+                "audio_enabled": True,
+                "audio_file": "Audio-clip-_CILW-2022_-Thank-you.mp3",
+                "script_enabled": True,
+                "script_name": 2,
+                "duration": 4.0,
+                "delay": 500
+            }
+        ]
+    
+    # END SCENE MANAGEMENT HANDLERS
     
     async def handle_servo_command(self, data: Dict[str, Any]):
         """UPDATED: Handle servo control command with priorities"""
@@ -839,10 +1080,10 @@ class WALLEBackend:
             # Send command with appropriate priority
             success = maestro.set_target(channel, position, priority=priority)
             status = "OK" if success else "FAILED"
-            logger.info(f"🎛️ Servo {channel_key} → {position} (priority: {priority.name}): {status}")
+            logger.info(f"Servo {channel_key} -> {position} (priority: {priority.name}): {status}")
             
         except Exception as e:
-            logger.error(f"❌ Servo command error: {e}")
+            logger.error(f"Servo command error: {e}")
     
     async def handle_servo_speed_command(self, data: Dict[str, Any]):
         """UPDATED: Handle servo speed setting command"""
@@ -857,10 +1098,10 @@ class WALLEBackend:
             maestro = self.maestro1 if maestro_num == 1 else self.maestro2
             
             success = maestro.set_speed(channel, speed)
-            logger.info(f"⚙️ Servo speed {channel_key} → {speed}: {'OK' if success else 'FAILED'}")
+            logger.info(f"Servo speed {channel_key} -> {speed}: {'OK' if success else 'FAILED'}")
             
         except Exception as e:
-            logger.error(f"❌ Servo speed command error: {e}")
+            logger.error(f"Servo speed command error: {e}")
     
     async def handle_servo_acceleration_command(self, data: Dict[str, Any]):
         """UPDATED: Handle servo acceleration setting command"""
@@ -875,10 +1116,10 @@ class WALLEBackend:
             maestro = self.maestro1 if maestro_num == 1 else self.maestro2
             
             success = maestro.set_acceleration(channel, acceleration)
-            logger.info(f"⚙️ Servo acceleration {channel_key} → {acceleration}: {'OK' if success else 'FAILED'}")
+            logger.info(f"Servo acceleration {channel_key} -> {acceleration}: {'OK' if success else 'FAILED'}")
             
         except Exception as e:
-            logger.error(f"❌ Servo acceleration command error: {e}")
+            logger.error(f"Servo acceleration command error: {e}")
         
     async def handle_get_servo_position(self, websocket, data: Dict[str, Any]):
         """Handle servo position request using shared manager"""
@@ -909,7 +1150,7 @@ class WALLEBackend:
                 logger.warning(f"Failed to request position for {channel_key}")
                 
         except Exception as e:
-            logger.error(f"❌ Get servo position error: {e}")
+            logger.error(f"Get servo position error: {e}")
         
     async def handle_get_all_servo_positions(self, websocket, data: Dict[str, Any]):
         """Handle request for all servo positions using shared manager"""
@@ -935,12 +1176,12 @@ class WALLEBackend:
             
             success = maestro.get_all_positions_batch(callback=batch_callback)
             if success:
-                logger.info(f"📖 Requested all positions from Maestro {maestro_num}")
+                logger.info(f"Requested all positions from Maestro {maestro_num}")
             else:
                 logger.warning(f"Failed to request batch positions from Maestro {maestro_num}")
                 
         except Exception as e:
-            logger.error(f"❌ Get all servo positions error: {e}")
+            logger.error(f"Get all servo positions error: {e}")
     
     async def handle_get_maestro_info(self, websocket, data: Dict[str, Any]):
         """UPDATED: Handle maestro information request"""
@@ -960,10 +1201,10 @@ class WALLEBackend:
             }
             
             await self.send_websocket_message(websocket, response)
-            logger.info(f"📋 Sent Maestro {maestro_num} info")
+            logger.info(f"Sent Maestro {maestro_num} info")
             
         except Exception as e:
-            logger.error(f"❌ Get Maestro info error: {e}")
+            logger.error(f"Get Maestro info error: {e}")
     
     async def handle_stepper_command(self, websocket, data: Dict[str, Any]):
         """NEW: Handle stepper motor control commands"""
@@ -980,10 +1221,10 @@ class WALLEBackend:
                 "timestamp": time.time()
             })
             
-            logger.info(f"🎯 Stepper command '{data.get('command')}': {response.get('message', 'Completed')}")
+            logger.info(f"Stepper command '{data.get('command')}': {response.get('message', 'Completed')}")
             
         except Exception as e:
-            logger.error(f"❌ Stepper command error: {e}")
+            logger.error(f"Stepper command error: {e}")
             await self.send_websocket_message(websocket, {
                 "type": "stepper_response",
                 "command": data.get("command"),
@@ -992,12 +1233,9 @@ class WALLEBackend:
                 "timestamp": time.time()
             })
 
-
-
-
     async def handle_emergency_stop(self):
         """UPDATED: Handle emergency stop using shared managers"""
-        logger.critical("🚨 EMERGENCY STOP ACTIVATED")
+        logger.critical("EMERGENCY STOP ACTIVATED")
         self.state = SystemState.EMERGENCY
         
         # Emergency stop both Maestros with highest priority
@@ -1059,7 +1297,7 @@ class WALLEBackend:
     
     async def telemetry_loop(self):
         """UPDATED: Enhanced telemetry loop with shared manager statistics"""
-        logger.info("📊 Starting enhanced telemetry loop")
+        logger.info("Starting enhanced telemetry loop")
         
         try:
             while True:
@@ -1077,11 +1315,11 @@ class WALLEBackend:
                     await asyncio.sleep(self.config.telemetry_interval)
                     
                 except Exception as e:
-                    logger.error(f"❌ Telemetry loop error: {e}")
+                    logger.error(f"Telemetry loop error: {e}")
                     await asyncio.sleep(1.0)
                     
         except asyncio.CancelledError:
-            logger.info("🛑 Telemetry loop cancelled")
+            logger.info("Telemetry loop cancelled")
     
     async def collect_telemetry(self) -> Dict[str, Any]:
         """UPDATED: Collect comprehensive telemetry including shared manager stats"""
@@ -1102,7 +1340,6 @@ class WALLEBackend:
         
         # Get stepper motor status
         stepper_status = self.stepper_controller.get_status()
-
 
         telemetry = {
             "timestamp": data.timestamp,
@@ -1139,10 +1376,12 @@ class WALLEBackend:
         return telemetry
     
     async def handle_client_message(self, websocket, message: str):
-        """UPDATED: Handle incoming WebSocket message with camera config support"""
+        """UPDATED: Handle incoming WebSocket message with scene management support"""
         try:
             data = json.loads(message)
             msg_type = data.get("type")
+
+            logger.info(f"Received message type: {msg_type}")  # ADD THIS
             
             # Handle heartbeat
             if msg_type == "heartbeat":
@@ -1177,6 +1416,16 @@ class WALLEBackend:
                 await self.handle_camera_config_update(data)
             elif msg_type == "stepper":
                 await self.handle_stepper_command(websocket, data)
+            # NEW SCENE MANAGEMENT MESSAGE TYPES
+            elif msg_type == "get_audio_files":
+                await self.handle_get_audio_files(websocket)
+            elif msg_type == "get_scenes":
+                await self.handle_get_scenes(websocket)
+            elif msg_type == "save_scenes":
+                logger.info("Routing to handle_save_scenes") 
+                await self.handle_save_scenes(websocket, data)
+            elif msg_type == "test_scene":
+                await self.handle_test_scene(websocket, data)
             else:
                 logger.debug(f"Unknown message type: {msg_type}")
                 
@@ -1202,7 +1451,7 @@ class WALLEBackend:
             success = await self.stepper_controller.home_motor()
             
             if success:
-                logger.info("✅ Startup homing sequence completed successfully")
+                logger.info("Startup homing sequence completed successfully")
                 await self.broadcast_message({
                     "type": "stepper_startup_complete", 
                     "success": True,
@@ -1211,7 +1460,7 @@ class WALLEBackend:
                     "timestamp": time.time()
                 })
             else:
-                logger.error("❌ Startup homing sequence failed")
+                logger.error("Startup homing sequence failed")
                 await self.broadcast_message({
                     "type": "stepper_startup_complete",
                     "success": False, 
@@ -1220,15 +1469,13 @@ class WALLEBackend:
                 })
                 
         except Exception as e:
-            logger.error(f"❌ Startup homing sequence error: {e}")
+            logger.error(f"Startup homing sequence error: {e}")
             await self.broadcast_message({
                 "type": "stepper_startup_complete",
                 "success": False,
                 "message": f"Homing error: {str(e)}",
                 "timestamp": time.time()
             })
-    
-
 
     async def handle_scene_command(self, data: Dict[str, Any]):
         """Handle scene playback command"""
@@ -1287,6 +1534,7 @@ class WALLEBackend:
                     "priority_commands": True,
                     "async_responses": True,
                     "stepper_control": True,
+                    "scene_management": True,
                     "gpio": GPIO_AVAILABLE,
                     "adc": ADC_AVAILABLE
                 }
@@ -1295,7 +1543,7 @@ class WALLEBackend:
             await self.send_websocket_message(websocket, status)
             
         except Exception as e:
-            logger.error(f"❌ System status error: {e}")
+            logger.error(f"System status error: {e}")
     
     async def handle_client_connect(self, websocket):
         """Handle client connections with improved error handling"""
@@ -1307,7 +1555,7 @@ class WALLEBackend:
             pass
             
         self.connected_clients.add(websocket)
-        logger.info(f"🔌 Client connected from {client_ip} (total: {len(self.connected_clients)})")
+        logger.info(f"Client connected from {client_ip} (total: {len(self.connected_clients)})")
         
         try:
             # Send initial status
@@ -1326,21 +1574,20 @@ class WALLEBackend:
         finally:
             try:
                 self.connected_clients.discard(websocket)
-                logger.info(f"🔌 Client {client_ip} disconnected and cleaned up")
+                logger.info(f"Client {client_ip} disconnected and cleaned up")
             except:
                 pass
     
     async def start_server(self, host: str = "0.0.0.0", websocket_port: int = 8766):
         """FIXED: Enhanced WebSocket server with better compatibility"""
-        logger.info(f"🚀 Starting enhanced WALL-E backend server on {host}:{websocket_port}")
+        logger.info(f"Starting enhanced WALL-E backend server on {host}:{websocket_port}")
         
         # Print system capabilities
-        logger.info("🤖 Enhanced WALL-E Backend System Status:")
+        logger.info("Enhanced WALL-E Backend System Status:")
         logger.info(f"  Shared Serial Managers: {len(self.shared_managers)}")
-        logger.info(f"  Maestro 1: {'✅ Connected' if self.maestro1.connected else '❌ Not connected'}")
-        logger.info(f"  Maestro 2: {'✅ Connected' if self.maestro2.connected else '❌ Not connected'}")
-        logger.info(f"  Stepper Motor: {'✅ Ready' if self.stepper_controller.gpio_initialized else '❌ GPIO unavailable'}")
-
+        logger.info(f"  Maestro 1: {'Connected' if self.maestro1.connected else 'Not connected'}")
+        logger.info(f"  Maestro 2: {'Connected' if self.maestro2.connected else 'Not connected'}")
+        logger.info(f"  Stepper Motor: {'Ready' if self.stepper_controller.gpio_initialized else 'GPIO unavailable'}")
 
         for serial_port_name, manager in self.shared_managers.items():
             stats = manager.get_stats()
@@ -1349,18 +1596,18 @@ class WALLEBackend:
         try:
             # Start telemetry loop
             self.telemetry_task = asyncio.create_task(self.telemetry_loop())
-            logger.info("✅ Telemetry task started")
+            logger.info("Telemetry task started")
             
             # Store event loop reference
             self.loop = asyncio.get_running_loop()
             
             if self.stepper_controller.gpio_initialized:
-                logger.info("🏠 Starting stepper motor homing sequence...")
+                logger.info("Starting stepper motor homing sequence...")
                 try:
                     # Start homing in background to not block server startup
                     asyncio.create_task(self.startup_homing_sequence())
                 except Exception as e:
-                    logger.error(f"❌ Failed to start homing sequence: {e}")
+                    logger.error(f"Failed to start homing sequence: {e}")
             
             # Use minimal parameters that work across different websockets library versions
             try:
@@ -1372,7 +1619,7 @@ class WALLEBackend:
                     ping_interval=30,
                     ping_timeout=20
                 )
-                logger.info("🔧 Using modern websockets server configuration")
+                logger.info("Using modern websockets server configuration")
                 
             except TypeError as e:
                 # Fallback to basic configuration if parameters not supported
@@ -1382,17 +1629,17 @@ class WALLEBackend:
                     host,
                     websocket_port
                 )
-                logger.info("🔧 Using basic websockets server configuration")
+                logger.info("Using basic websockets server configuration")
             
-            logger.info("🚀 Enhanced WALL-E Backend Server is running!")
-            logger.info("📡 WebSocket server ready for frontend connections")
-            logger.info(f"🌐 Connect frontend to: ws://{host}:{websocket_port}")
+            logger.info("Enhanced WALL-E Backend Server is running!")
+            logger.info("WebSocket server ready for frontend connections")
+            logger.info(f"Connect frontend to: ws://{host}:{websocket_port}")
             
             # Keep the server running
             await server.wait_closed()
             
         except Exception as e:
-            logger.error(f"❌ Server startup error: {e}")
+            logger.error(f"Server startup error: {e}")
             raise
         finally:
             # Cleanup
@@ -1405,9 +1652,10 @@ class WALLEBackend:
             
             # Stop shared managers
             self.cleanup()
+    
     def setup_stepper_system(self):
         """NEW: Setup NEMA 23 stepper motor system"""
-        logger.info("🔧 Initializing NEMA 23 stepper system...")
+        logger.info("Initializing NEMA 23 stepper system...")
         
         # Create stepper configuration from hardware config
         stepper_config = StepperConfig(
@@ -1424,18 +1672,16 @@ class WALLEBackend:
         self.stepper_interface = StepperControlInterface(self.stepper_controller)
         self.stepper_interface.websocket_broadcast_callback = self.broadcast_message
         
-        logger.info("✅ NEMA 23 stepper system initialized")
-
-
+        logger.info("NEMA 23 stepper system initialized")
 
     def cleanup(self):
         """UPDATED: Cleanup all resources including camera proxy"""
-        logger.info("🧹 Cleaning up enhanced WALL-E backend...")
+        logger.info("Cleaning up enhanced WALL-E backend...")
         
         # Stop camera proxy
         if self.camera_proxy_pid:
             try:
-                logger.info(f"🛑 Stopping camera proxy (PID: {self.camera_proxy_pid})")
+                logger.info(f"Stopping camera proxy (PID: {self.camera_proxy_pid})")
                 os.kill(self.camera_proxy_pid, signal.SIGTERM)
                 time.sleep(1)
                 if psutil.pid_exists(self.camera_proxy_pid):
@@ -1459,7 +1705,7 @@ class WALLEBackend:
         # Cleanup shared managers
         cleanup_shared_managers()
         
-        logger.info("✅ Cleanup complete")
+        logger.info("Cleanup complete")
 
 
 # Configuration loading
@@ -1513,9 +1759,9 @@ def main():
         asyncio.run(backend.start_server())
         
     except KeyboardInterrupt:
-        logger.info("🛑 Shutting down enhanced WALL-E backend...")
+        logger.info("Shutting down enhanced WALL-E backend...")
     except Exception as e:
-        logger.critical(f"💥 Fatal error: {e}")
+        logger.critical(f"Fatal error: {e}")
     finally:
         # Final cleanup
         cleanup_shared_managers()
@@ -1536,7 +1782,7 @@ def main():
         except:
             pass
         
-        logger.info("👋 Enhanced WALL-E backend shutdown complete")
+        logger.info("Enhanced WALL-E backend shutdown complete")
 
 
 if __name__ == "__main__":

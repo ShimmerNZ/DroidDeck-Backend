@@ -19,10 +19,11 @@ from pathlib import Path
 
 # Setup logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
 CONFIG_PATH = "configs/camera_config.json"
 
@@ -413,6 +414,24 @@ class CameraProxy:
                 "streaming": self.streaming_enabled,
                 "message": "Stream started" if success else "Failed to start stream"
             })
+
+        @app.route('/bandwidth_test', methods=['GET'])
+        def bandwidth_test():
+            """Generate test data for bandwidth measurement"""
+            size = int(request.args.get('size', 5 * 1024 * 1024))
+            
+            def generate_test_data():
+                chunk_size = 8192
+                sent = 0
+                while sent < size:
+                    remaining = min(chunk_size, size - sent)
+                    yield b'A' * remaining
+                    sent += remaining
+            
+            return Response(generate_test_data(), 
+                        mimetype='application/octet-stream',
+                        headers={'Content-Length': str(size)})
+
 
         @app.route('/stream/stop', methods=['POST'])
         def stop_stream():

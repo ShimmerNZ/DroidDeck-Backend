@@ -1,0 +1,511 @@
+[
+  {
+    "label": "Excited Greeting",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Happy",
+      "Idle"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Audio-clip-_CILW-2022_-Greetings.mp3",
+    "script_enabled": true,
+    "script_name": 1,
+    "duration": 2.5,
+    "delay": 0
+  },
+  {
+    "label": "Cheerful Dance",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Happy"
+    ],
+    "audio_enabled": true,
+    "audio_file": "SPK1950 - Spark Spotify 30sec Radio Dad Rock -14LKFS Radio Mix 05-08-25.mp3",
+    "script_enabled": true,
+    "script_name": 2,
+    "duration": 3.2,
+    "delay": 500
+  },
+  {
+    "label": "Joy Bounce",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Happy"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 3,
+    "duration": 1.8,
+    "delay": 0
+  },
+  {
+    "label": "Happy Wiggle",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Happy"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Audio-clip-_CILW-2022_-Thank-you.mp3",
+    "script_enabled": true,
+    "script_name": 4,
+    "duration": 2.1,
+    "delay": 200
+  },
+  {
+    "label": "Celebration",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Happy"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Call1-8d855208-7523-4181-ba90-0844bd0386e3 (1).MP3",
+    "script_enabled": true,
+    "script_name": 5,
+    "duration": 4.0,
+    "delay": 0
+  },
+  {
+    "label": "Lonely Sigh",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Sad"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Audio-clip-_CILW-2022_-Goodbye-I_m-off-now.mp3",
+    "script_enabled": true,
+    "script_name": 10,
+    "duration": 3.5,
+    "delay": 0
+  },
+  {
+    "label": "Dejected Slump",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Sad"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 11,
+    "duration": 2.8,
+    "delay": 0
+  },
+  {
+    "label": "Melancholy Look",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Sad"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Call1-8d855208-7523-4181-ba90-0844bd0386e3 (1).MP3",
+    "script_enabled": true,
+    "script_name": 12,
+    "duration": 2.2,
+    "delay": 300
+  },
+  {
+    "label": "Head Tilt Wonder",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Curious"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 20,
+    "duration": 1.5,
+    "delay": 0
+  },
+  {
+    "label": "Investigating",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Curious"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Audio-clip-_CILW-2022_-Greetings.mp3",
+    "script_enabled": true,
+    "script_name": 21,
+    "duration": 3.0,
+    "delay": 100
+  },
+  {
+    "label": "Scanning Around",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Curious"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 22,
+    "duration": 2.5,
+    "delay": 0
+  },
+  {
+    "label": "What's That?",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Curious"
+    ],
+    "audio_enabled": true,
+    "audio_file": "SPK1950 - Spark Spotify 30sec Radio Dad Rock -14LKFS Radio Mix 05-08-25.mp3",
+    "script_enabled": true,
+    "script_name": 23,
+    "duration": 1.8,
+    "delay": 0
+  },
+  {
+    "label": "Furious Shake",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Angry"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Call1-8d855208-7523-4181-ba90-0844bd0386e3 (1).MP3",
+    "script_enabled": true,
+    "script_name": 30,
+    "duration": 2.3,
+    "delay": 0
+  },
+  {
+    "label": "Frustrated Gesture",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Angry"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 31,
+    "duration": 1.7,
+    "delay": 0
+  },
+  {
+    "label": "Mad Stomp",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Angry"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Audio-clip-_CILW-2022_-Goodbye-I_m-off-now.mp3",
+    "script_enabled": true,
+    "script_name": 32,
+    "duration": 2.8,
+    "delay": 400
+  },
+  {
+    "label": "Startled Jump",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Surprise"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Audio-clip-_CILW-2022_-Greetings.mp3",
+    "script_enabled": true,
+    "script_name": 40,
+    "duration": 1.2,
+    "delay": 0
+  },
+  {
+    "label": "Eyes Wide Open",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Surprise"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 41,
+    "duration": 1.8,
+    "delay": 0
+  },
+  {
+    "label": "Wow Reaction",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Surprise"
+    ],
+    "audio_enabled": true,
+    "audio_file": "SPK1950 - Spark Spotify 30sec Radio Dad Rock -14LKFS Radio Mix 05-08-25.mp3",
+    "script_enabled": true,
+    "script_name": 42,
+    "duration": 2.1,
+    "delay": 200
+  },
+  {
+    "label": "Heart Eyes",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Love"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Audio-clip-_CILW-2022_-Thank-you.mp3",
+    "script_enabled": true,
+    "script_name": 50,
+    "duration": 3.5,
+    "delay": 0
+  },
+  {
+    "label": "Affectionate Lean",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Love"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 51,
+    "duration": 2.8,
+    "delay": 0
+  },
+  {
+    "label": "Loving Gaze",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Love"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Call1-8d855208-7523-4181-ba90-0844bd0386e3 (1).MP3",
+    "script_enabled": true,
+    "script_name": 52,
+    "duration": 4.2,
+    "delay": 600
+  },
+  {
+    "label": "Peaceful Stance",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Calm"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 60,
+    "duration": 3.0,
+    "delay": 0
+  },
+  {
+    "label": "Gentle Sway",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Calm"
+    ],
+    "audio_enabled": true,
+    "audio_file": "SPK1950 - Spark Spotify 30sec Radio Dad Rock -14LKFS Radio Mix 05-08-25.mp3",
+    "script_enabled": true,
+    "script_name": 61,
+    "duration": 5.0,
+    "delay": 1000
+  },
+  {
+    "label": "Meditative Pose",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Calm"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 62,
+    "duration": 4.5,
+    "delay": 0
+  },
+  {
+    "label": "Beep Sound",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Sound Effect"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Call1-8d855208-7523-4181-ba90-0844bd0386e3 (1).MP3",
+    "script_enabled": false,
+    "script_name": 0,
+    "duration": 0.5,
+    "delay": 0
+  },
+  {
+    "label": "Whistle Effect",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Sound Effect"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Audio-clip-_CILW-2022_-Greetings.mp3",
+    "script_enabled": false,
+    "script_name": 0,
+    "duration": 1.2,
+    "delay": 0
+  },
+  {
+    "label": "Alert Chime",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Sound Effect"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Audio-clip-_CILW-2022_-Thank-you.mp3",
+    "script_enabled": false,
+    "script_name": 0,
+    "duration": 0.8,
+    "delay": 0
+  },
+  {
+    "label": "Power Down Sound",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Sound Effect"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Audio-clip-_CILW-2022_-Goodbye-I_m-off-now.mp3",
+    "script_enabled": false,
+    "script_name": 0,
+    "duration": 2.0,
+    "delay": 0
+  },
+  {
+    "label": "Random Gesture",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Misc"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 70,
+    "duration": 1.5,
+    "delay": 0
+  },
+  {
+    "label": "Test Animation",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Misc"
+    ],
+    "audio_enabled": true,
+    "audio_file": "SPK1950 - Spark Spotify 30sec Radio Dad Rock -14LKFS Radio Mix 05-08-25.mp3",
+    "script_enabled": true,
+    "script_name": 71,
+    "duration": 2.5,
+    "delay": 300
+  },
+  {
+    "label": "Demo Sequence",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Misc"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Call1-8d855208-7523-4181-ba90-0844bd0386e3 (1).MP3",
+    "script_enabled": true,
+    "script_name": 72,
+    "duration": 6.0,
+    "delay": 500
+  },
+  {
+    "label": "Sleepy Wave",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Idle",
+      "Sleepy"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 80,
+    "duration": 1.8,
+    "delay": 0
+  },
+  {
+    "label": "Casual Look Around",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Idle"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 81,
+    "duration": 2.2,
+    "delay": 0
+  },
+  {
+    "label": "Standby Mode",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Idle"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Audio-clip-_CILW-2022_-Goodbye-I_m-off-now.mp3",
+    "script_enabled": true,
+    "script_name": 82,
+    "duration": 3.0,
+    "delay": 0
+  },
+  {
+    "label": "Waiting Animation",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Idle"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 83,
+    "duration": 4.0,
+    "delay": 0
+  },
+  {
+    "label": "Yawn",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Sleepy"
+    ],
+    "audio_enabled": true,
+    "audio_file": "Audio-clip-_CILW-2022_-Goodbye-I_m-off-now.mp3",
+    "script_enabled": true,
+    "script_name": 90,
+    "duration": 2.5,
+    "delay": 0
+  },
+  {
+    "label": "Drowsy Nod",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Sleepy"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 91,
+    "duration": 3.2,
+    "delay": 0
+  },
+  {
+    "label": "Almost Sleeping",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Sleepy"
+    ],
+    "audio_enabled": true,
+    "audio_file": "SPK1950 - Spark Spotify 30sec Radio Dad Rock -14LKFS Radio Mix 05-08-25.mp3",
+    "script_enabled": true,
+    "script_name": 92,
+    "duration": 4.5,
+    "delay": 800
+  },
+  {
+    "label": "Wake Up Stretch",
+    "emoji": "\ud83c\udfad",
+    "categories": [
+      "Sleepy"
+    ],
+    "audio_enabled": false,
+    "audio_file": "",
+    "script_enabled": true,
+    "script_name": 93,
+    "duration": 2.8,
+    "delay": 0
+  }
+]

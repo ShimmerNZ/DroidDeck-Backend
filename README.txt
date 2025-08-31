@@ -1,4 +1,4 @@
-Start by enable SSH
+Start by enable SSH, I2C and Serial
 sudo nano smb.sh
 copy contents across 
 chmod +x smb.sh
