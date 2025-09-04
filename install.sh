@@ -1,16 +1,22 @@
 #!/bin/bash
-# WALL-E System Setup Script for Raspberry Pi 5 - Updated Version with Python 3.9.13
+# WALL-E Complete System Installer for Raspberry Pi 5
+# Supports the new modular architecture with all dependencies
+# Version: 3.0 - Updated for refactored backend
 
 set -e  # Exit on any error
 
-echo "🤖 WALL-E System Setup Script v2.0"
-echo "=================================="
+echo "🤖 WALL-E Complete System Installer v3.0"
+echo "========================================"
+echo "🎯 Target: Raspberry Pi 5 with Python 3.9.13"
+echo "🏗️ Architecture: Modular Backend System"
+echo ""
 
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
 NC='\033[0m' # No Color
 
 # Function to print colored output
@@ -30,15 +36,31 @@ print_step() {
     echo -e "${BLUE}[STEP]${NC} $1"
 }
 
+print_success() {
+    echo -e "${PURPLE}[SUCCESS]${NC} $1"
+}
+
 # Check if running on Raspberry Pi
 check_raspberry_pi() {
+    print_step "Checking system compatibility..."
+    
     if ! grep -q "Raspberry Pi" /proc/cpuinfo 2>/dev/null; then
         print_warning "Not running on Raspberry Pi - some features may not work"
+        read -p "Continue anyway? (y/N): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
     else
-        print_status "Running on Raspberry Pi ✅"
-        # Get Pi model info
         PI_MODEL=$(grep "Raspberry Pi" /proc/cpuinfo | head -1 | cut -d: -f2 | xargs)
-        print_status "Detected: $PI_MODEL"
+        print_success "Detected: $PI_MODEL"
+        
+        # Check for Pi 5 specifically
+        if echo "$PI_MODEL" | grep -q "Raspberry Pi 5"; then
+            print_success "✅ Raspberry Pi 5 detected - optimal compatibility"
+        else
+            print_warning "⚠️ Not Pi 5 - some GPIO features may differ"
+        fi
     fi
 }
 
@@ -47,63 +69,98 @@ update_system() {
     print_step "Updating system packages..."
     sudo apt update
     sudo apt upgrade -y
-    print_status "System updated ✅"
+    print_success "System packages updated"
 }
 
 # Install system dependencies
 install_system_deps() {
     print_step "Installing system dependencies..."
     
-    # Core system packages
+    # Core development tools
+    sudo apt install -y \
+        build-essential \
+        cmake \
+        pkg-config \
+        git \
+        curl \
+        wget \
+        vim \
+        htop \
+        screen \
+        tmux
+    
+    # Python development
     sudo apt install -y \
         python3 \
         python3-pip \
         python3-venv \
         python3-dev \
-        git \
-        curl \
-        wget \
-        build-essential \
-        cmake \
-        pkg-config
+        python3-setuptools \
+        python3-wheel
     
     # I2C and serial tools
     sudo apt install -y \
         i2c-tools \
         python3-smbus \
-        minicom \
-        screen
+        minicom
     
-    # SMB/CIFS file sharing
+    # GPIO libraries for Pi 5
     sudo apt install -y \
-        samba \
-        samba-common-bin
+        python3-rpi.gpio \
+        python3-gpiozero \
+        python3-lgpio \
+        lgpio-tools
     
-    # Audio system dependencies
+    # Audio system
     sudo apt install -y \
         alsa-utils \
         pulseaudio \
         pulseaudio-utils \
+        portaudio19-dev \
+        libasound2-dev \
         espeak \
         espeak-data \
         libespeak-dev \
         ffmpeg \
         sox \
-        libsox-fmt-all \
-        portaudio19-dev \
-        libasound2-dev
+        libsox-fmt-all
     
-    # OpenCV dependencies for Raspberry Pi
+    # Computer vision and image processing
     sudo apt install -y \
         libopencv-dev \
-        python3-opencv 
+        python3-opencv \
+        libatlas-base-dev \
+        libhdf5-dev \
+        libhdf5-serial-dev \
+        libhdf5-103 \
+        libqtgui4 \
+        libqtwebkit4 \
+        libqt4-test \
+        python3-pyqt5 \
+        libarmadillo-dev \
+        libblas-dev \
+        liblapack-dev \
+        gfortran \
+        libfreetype6-dev \
+        python3-h5py
     
-    # GPIO libraries
+    # Network and file sharing
     sudo apt install -y \
-        python3-rpi.gpio \
-        python3-gpiozero
+        samba \
+        samba-common-bin \
+        cifs-utils
     
-    print_status "System dependencies installed ✅"
+    # File watching (for config hot-reload)
+    sudo apt install -y \
+        python3-watchdog \
+        inotify-tools
+    
+    # Web server components
+    sudo apt install -y \
+        python3-flask \
+        nginx
+    
+    print_success "System dependencies installed"
 }
 
 # Install and setup pyenv with Python 3.9.13
@@ -112,7 +169,7 @@ setup_pyenv() {
     
     # Check if pyenv is already installed
     if command -v pyenv >/dev/null 2>&1; then
-        print_status "pyenv is already installed"
+        print_status "pyenv already installed"
     else
         print_status "Installing pyenv..."
         
@@ -134,374 +191,419 @@ setup_pyenv() {
             libxml2-dev \
             libxmlsec1-dev \
             libffi-dev \
-            liblzma-dev
+            liblzma-dev \
+            libgdbm-dev \
+            libnss3-dev
         
         # Install pyenv
         curl https://pyenv.run | bash
         
         # Add pyenv to shell configuration
-        SHELL_CONFIG=""
-        if [ -f "$HOME/.bashrc" ]; then
-            SHELL_CONFIG="$HOME/.bashrc"
-        elif [ -f "$HOME/.zshrc" ]; then
-            SHELL_CONFIG="$HOME/.zshrc"
-        else
-            SHELL_CONFIG="$HOME/.profile"
-        fi
+        SHELL_CONFIG="$HOME/.bashrc"
         
-        # Add pyenv initialization to shell config if not already present
+        # Add pyenv initialization if not already present
         if ! grep -q 'export PYENV_ROOT' "$SHELL_CONFIG" 2>/dev/null; then
-            echo '' >> "$SHELL_CONFIG"
-            echo '# pyenv configuration' >> "$SHELL_CONFIG"
-            echo 'export PYENV_ROOT="$HOME/.pyenv"' >> "$SHELL_CONFIG"
-            echo 'command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"' >> "$SHELL_CONFIG"
-            echo 'eval "$(pyenv init -)"' >> "$SHELL_CONFIG"
-            print_status "Added pyenv to $SHELL_CONFIG"
+            {
+                echo ''
+                echo '# pyenv configuration'
+                echo 'export PYENV_ROOT="$HOME/.pyenv"'
+                echo 'command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"'
+                echo 'eval "$(pyenv init -)"'
+                echo 'eval "$(pyenv virtualenv-init -)"'
+            } >> "$SHELL_CONFIG"
+            print_success "Added pyenv to $SHELL_CONFIG"
         fi
         
         # Initialize pyenv for current session
         export PYENV_ROOT="$HOME/.pyenv"
         command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"
         eval "$(pyenv init -)"
+        eval "$(pyenv virtualenv-init -)"
         
-        print_status "pyenv installed ✅"
+        print_success "pyenv installed successfully"
     fi
     
-    # Check if Python 3.9.13 is already installed
+    # Initialize pyenv for current session
+    export PYENV_ROOT="$HOME/.pyenv"
+    command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"
+    eval "$(pyenv init -)"
+    eval "$(pyenv virtualenv-init -)"
+    
+    # Install Python 3.9.13 if not present
     if pyenv versions --bare | grep -q "3.9.13"; then
-        print_status "Python 3.9.13 is already installed"
+        print_status "Python 3.9.13 already installed"
     else
-        print_status "Installing Python 3.9.13 (this may take several minutes)..."
+        print_status "Installing Python 3.9.13 (this will take several minutes)..."
+        
+        # Set environment variables for better compilation on Pi 5
+        export PYTHON_CONFIGURE_OPTS="--enable-optimizations"
+        export CFLAGS="-O2"
+        
         pyenv install 3.9.13
-        print_status "Python 3.9.13 installed ✅"
+        print_success "Python 3.9.13 installed successfully"
     fi
     
-    # Set Python 3.9.13 as local version for this project
+    # Set Python 3.9.13 as local version
     pyenv local 3.9.13
-    print_status "Set Python 3.9.13 as local version for WALL-E project ✅"
+    print_success "Set Python 3.9.13 as local version"
     
     # Verify Python version
     PYTHON_VERSION=$(python --version 2>&1 | cut -d' ' -f2)
     if [[ "$PYTHON_VERSION" == "3.9.13" ]]; then
-        print_status "✅ Confirmed Python version: $PYTHON_VERSION"
+        print_success "✅ Confirmed Python version: $PYTHON_VERSION"
     else
-        print_warning "⚠️ Expected Python 3.9.13, but got: $PYTHON_VERSION"
-        print_warning "You may need to restart your shell and run the script again"
+        print_error "❌ Expected Python 3.9.13, got: $PYTHON_VERSION"
+        print_warning "You may need to restart your shell"
     fi
 }
 
-# Create Python virtual environment with specific version
+# Create Python virtual environment
 create_venv() {
-    print_step "Creating Python virtual environment with Python 3.9.13..."
+    print_step "Creating Python virtual environment..."
     
-    # Ensure we're using the correct Python version
+    # Verify Python version
     PYTHON_VERSION=$(python --version 2>&1 | cut -d' ' -f2)
     if [[ "$PYTHON_VERSION" != "3.9.13" ]]; then
-        print_error "Expected Python 3.9.13, but found: $PYTHON_VERSION"
-        print_error "Please restart your shell and run this script again"
+        print_error "Python 3.9.13 required, found: $PYTHON_VERSION"
+        print_warning "Run: source ~/.bashrc && cd $(pwd)"
         exit 1
     fi
     
+    # Remove existing venv if present
     if [ -d "venv" ]; then
-        print_warning "Virtual environment already exists, removing..."
+        print_warning "Removing existing virtual environment..."
         rm -rf venv
     fi
     
-    # Create virtual environment with pyenv Python 3.9.13
+    # Create new virtual environment
     python -m venv venv
     source venv/bin/activate
     
-    # Verify virtual environment Python version
+    # Verify venv Python version
     VENV_PYTHON_VERSION=$(python --version 2>&1 | cut -d' ' -f2)
-    print_status "Virtual environment Python version: $VENV_PYTHON_VERSION"
+    print_success "Virtual environment Python: $VENV_PYTHON_VERSION"
     
-    # Upgrade pip
+    # Upgrade pip and tools
     pip install --upgrade pip setuptools wheel
     
-    print_status "Virtual environment created with Python 3.9.13 ✅"
+    print_success "Virtual environment created successfully"
 }
 
-# Install Python dependencies
+# Install Python dependencies for modular backend
 install_python_deps() {
-    print_step "Installing Python dependencies..."
+    print_step "Installing Python dependencies for modular backend..."
     
     source venv/bin/activate
     
-    # Core dependencies
+    # Core backend dependencies
+    print_status "Installing core backend packages..."
     pip install \
         asyncio \
-        websockets \
-        pyserial \
-        psutil \
-        pygame \
-        requests \
-        flask \
-        numpy==1.21.6 \
-        lgpio \
+        websockets>=10.0 \
+        pyserial>=3.5 \
+        psutil>=5.8.0 \
+        pygame>=2.1.0 \
+        requests>=2.25.0 \
+        flask>=2.0.0 \
+        numpy>=1.21.6
+    
+    # Hardware control packages
+    print_status "Installing hardware control packages..."
+    pip install \
+        RPi.GPIO \
         adafruit-circuitpython-ads1x15 \
-        adafruit-blinka
-
-    # Try to install OpenCV with fallback
-    print_status "Installing OpenCV (this may take a while)..."
+        adafruit-blinka \
+        lgpio
+    
+    # New modular backend dependencies
+    print_status "Installing modular backend packages..."
+    pip install \
+        watchdog>=2.1.0 \
+        jsonschema>=3.2.0 \
+        dataclasses-json>=0.5.0 \
+        python-dateutil>=2.8.0
+    
+    # Computer vision (try optimized version first)
+    print_status "Installing computer vision packages..."
     if ! pip install opencv-python==4.5.5.64 --no-cache-dir; then
-        print_warning "pip OpenCV install failed, using system OpenCV"
-        # Create symlink to system OpenCV if needed
+        print_warning "Standard OpenCV install failed, using system version"
+        # Create symlink to system OpenCV
         SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
-        if [ -f /usr/lib/python3/dist-packages/cv2/python-3.*/cv2*.so ]; then
-            print_status "Linking system OpenCV to virtual environment"
+        if [ -f /usr/lib/python3/dist-packages/cv2/python-*/cv2*.so ]; then
             ln -sf /usr/lib/python3/dist-packages/cv2 "$SITE_PACKAGES/"
+            print_success "Linked system OpenCV to virtual environment"
         fi
     fi
     
-    print_status "Python dependencies installed ✅"
+    # Audio processing
+    print_status "Installing audio processing packages..."
+    pip install \
+        pyaudio \
+        wave \
+        mutagen
+    
+    print_success "Python dependencies installed successfully"
 }
 
-# Enable I2C and serial interfaces
-enable_interfaces() {
-    print_step "Enabling I2C and Serial interfaces..."
+# Configure Raspberry Pi interfaces
+configure_pi_interfaces() {
+    print_step "Configuring Raspberry Pi interfaces..."
     
-    # Backup config.txt
-    sudo cp /boot/firmware/config.txt /boot/firmware/config.txt.backup.$(date +%Y%m%d) 2>/dev/null || \
-    sudo cp /boot/config.txt /boot/config.txt.backup.$(date +%Y%m%d) 2>/dev/null || \
-    print_warning "Could not backup config.txt"
-    
+    # Check if we need to configure interfaces
     CONFIG_FILE="/boot/firmware/config.txt"
     if [ ! -f "$CONFIG_FILE" ]; then
         CONFIG_FILE="/boot/config.txt"
     fi
     
-    # Enable I2C
-    if ! grep -q "dtparam=i2c_arm=on" "$CONFIG_FILE"; then
-        echo "dtparam=i2c_arm=on" | sudo tee -a "$CONFIG_FILE"
-        print_status "I2C enabled in $CONFIG_FILE"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        print_error "Cannot find Pi config file"
+        return 1
     fi
     
-    # Enable serial port
+    # Backup config file
+    sudo cp "$CONFIG_FILE" "${CONFIG_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+    print_status "Backed up config file"
+    
+    # Enable I2C
+    if ! grep -q "dtparam=i2c_arm=on" "$CONFIG_FILE"; then
+        echo "dtparam=i2c_arm=on" | sudo tee -a "$CONFIG_FILE" > /dev/null
+        print_status "Enabled I2C interface"
+    fi
+    
+    # Enable SPI  
+    if ! grep -q "dtparam=spi=on" "$CONFIG_FILE"; then
+        echo "dtparam=spi=on" | sudo tee -a "$CONFIG_FILE" > /dev/null
+        print_status "Enabled SPI interface"
+    fi
+    
+    # Enable UART
     if ! grep -q "enable_uart=1" "$CONFIG_FILE"; then
-        echo "enable_uart=1" | sudo tee -a "$CONFIG_FILE"
-        print_status "UART enabled in $CONFIG_FILE"
+        echo "enable_uart=1" | sudo tee -a "$CONFIG_FILE" > /dev/null
+        print_status "Enabled UART interface"
+    fi
+    
+    # Disable Bluetooth on primary UART (for serial communication)
+    if ! grep -q "dtoverlay=disable-bt" "$CONFIG_FILE"; then
+        echo "dtoverlay=disable-bt" | sudo tee -a "$CONFIG_FILE" > /dev/null
+        print_status "Disabled Bluetooth on primary UART"
     fi
     
     # Add user to required groups
-    sudo usermod -a -G i2c,spi,gpio,audio,dialout $USER
+    sudo usermod -a -G i2c,spi,gpio,audio,dialout,video "$USER"
+    print_status "Added user to hardware access groups"
     
-    print_status "Interfaces configured ✅"
+    print_success "Pi interfaces configured"
+}
+
+# Manual configuration prompt
+prompt_manual_config() {
+    print_step "Manual Configuration Required"
+    echo ""
+    print_warning "⚠️  IMPORTANT: Manual configuration via raspi-config needed"
+    echo ""
+    echo "Please run the following command and configure these options:"
+    echo ""
+    echo "  ${BLUE}sudo raspi-config${NC}"
+    echo ""
+    echo "Navigate to:"
+    echo "  📋 3 Interface Options → I1 SSH → Enable (for remote access)"
+    echo "  📋 3 Interface Options → I5 I2C → Enable (for sensors)"  
+    echo "  📋 3 Interface Options → I6 SPI → Enable (if needed)"
+    echo "  📋 3 Interface Options → I8 Remote GPIO → Enable (optional)"
+    echo "  📋 1 System Options → S5 Boot/Auto Login → Console Autologin"
+    echo ""
+    echo "After making changes, raspi-config will ask to reboot."
+    echo "Choose 'Yes' to reboot now, or 'No' to reboot later."
+    echo ""
+    read -p "Press Enter when you've completed raspi-config setup..."
 }
 
 # Create directory structure
 create_directories() {
     print_step "Creating directory structure..."
     
+    # Main directories
     mkdir -p configs
-    mkdir -p modules
+    mkdir -p modules  
     mkdir -p logs
     mkdir -p audio
     mkdir -p icons
     mkdir -p scenes
+    mkdir -p backups
     
-    print_status "Directory structure created ✅"
+    # Config subdirectories
+    mkdir -p configs/backups
+    
+    print_success "Directory structure created"
 }
 
-# Create configuration files
+# Create configuration files with current architecture
 create_config_files() {
-    print_step "Creating configuration files..."
+    print_step "Creating configuration files for modular backend..."
     
-    # Hardware configuration
+    # Hardware configuration (matches your current system)
     cat > configs/hardware_config.json << 'EOF'
 {
     "hardware": {
         "maestro1": {
             "port": "/dev/ttyAMA0",
             "baud_rate": 9600,
-            "device_number": 12
+            "device_number": 12,
+            "description": "Primary Maestro for head and upper body servos"
         },
         "maestro2": {
-            "port": "/dev/ttyAMA0",
+            "port": "/dev/ttyAMA0", 
             "baud_rate": 9600,
-            "device_number": 13
+            "device_number": 13,
+            "description": "Secondary Maestro for arm and body servos"
         },
         "sabertooth": {
             "port": "/dev/ttyAMA1",
-            "baud_rate": 9600
+            "baud_rate": 9600,
+            "description": "Sabertooth 2x60 motor controller (future use)"
         },
         "gpio": {
             "motor_step_pin": 16,
             "motor_dir_pin": 12,
             "motor_enable_pin": 13,
             "limit_switch_pin": 26,
-            "emergency_stop_pin": 25
+            "emergency_stop_pin": 25,
+            "description": "GPIO pin assignments for stepper motor and safety"
         },
         "timing": {
             "telemetry_interval": 0.2,
-            "servo_update_rate": 0.02
+            "servo_update_rate": 0.02,
+            "description": "System timing intervals in seconds"
         },
         "audio": {
             "directory": "audio",
-            "volume": 0.7
+            "volume": 0.7,
+            "description": "Audio system configuration"
         }
     }
 }
 EOF
 
-    # Camera configuration
+    # Camera configuration (matches your current ESP32 setup)
     cat > configs/camera_config.json << 'EOF'
 {
-    "esp32_url": "http://esp32.local:81/stream",
+    "esp32_ip": "10.1.1.203",
+    "esp32_http_port": 81,
+    "esp32_ws_port": 82,
+    "esp32_url": "http://10.1.1.203:81/stream",
     "rebroadcast_port": 8081,
     "enable_stats": true,
-    "resolution": "640x480",
-    "quality": 80
+    "connection_timeout": 10,
+    "max_connection_errors": 10,
+    "frame_quality": 80,
+    "ws_reconnect_delay": 5,
+    "http_reconnect_delay": 3,
+    "auto_start_stream": false,
+    "description": "ESP32-CAM configuration with manual stream control"
 }
 EOF
 
-    # Scenes configuration
-    cat > configs/scenes.json << 'EOF'
-{
-    "happy": {
+    # Copy existing scenes config if present, otherwise create default
+    if [ -f "scenes_config.json" ]; then
+        cp scenes_config.json configs/scenes_config.json
+        print_status "Copied existing scenes configuration"
+    else
+        # Create minimal scenes config (your existing scenes will be preserved)
+        cat > configs/scenes_config.json << 'EOF'
+[
+    {
+        "label": "Happy Greeting",
         "emoji": "😊",
-        "category": "Happy",
+        "categories": ["Happy", "Greeting"],
         "duration": 3.0,
-        "audio_file": "track_002",
-        "servos": {
-            "m1_ch0": {"target": 1500, "speed": 50},
-            "m1_ch1": {"target": 1200, "speed": 30}
-        }
+        "audio_enabled": true,
+        "audio_file": "Audio-clip-_CILW-2022_-Greetings.mp3",
+        "script_enabled": true,
+        "script_name": 1,
+        "delay": 0
     },
-    "sad": {
-        "emoji": "😢", 
-        "category": "Sad",
-        "duration": 4.0,
-        "audio_file": "track_004",
-        "servos": {
-            "m1_ch0": {"target": 1000, "speed": 20},
-            "m1_ch1": {"target": 1800, "speed": 20}
-        }
-    },
-    "wave_response": {
+    {
+        "label": "Wave Response", 
         "emoji": "👋",
-        "category": "Gesture", 
+        "categories": ["Gesture", "Response"],
         "duration": 3.0,
-        "audio_file": "track_008",
-        "servos": {
-            "m1_ch3": {"target": 1200, "speed": 60}
-        }
-    },
-    "excited": {
-        "emoji": "🤩",
-        "category": "Happy",
-        "duration": 2.5,
-        "audio_file": "track_001",
-        "servos": {
-            "m1_ch0": {"target": 1800, "speed": 80},
-            "m1_ch1": {"target": 800, "speed": 80}
-        }
+        "audio_enabled": true,
+        "audio_file": "Audio-clip-_CILW-2022_-Greetings.mp3",
+        "script_enabled": true,
+        "script_name": 3,
+        "delay": 0
     }
-}
+]
 EOF
+    fi
 
-    print_status "Configuration files created ✅"
+    print_success "Configuration files created"
 }
 
-# Create sample audio files with text-to-speech
+# Create sample audio files
 create_sample_audio() {
     print_step "Creating sample audio files..."
     
-    # Create some sample TTS files
-    espeak "Hello, I am WALL-E!" -w audio/track_001.wav -s 120 -p 40 2>/dev/null || \
-        print_warning "Could not create sample audio file 1"
+    # Test if espeak works
+    if command -v espeak >/dev/null 2>&1; then
+        # Create sample TTS files with better settings for Pi 5
+        espeak "Hello, I am WALL-E! My modular backend is ready!" -w audio/walle_greeting.wav -s 120 -p 40 2>/dev/null || true
+        espeak "Systems online. All modules loaded successfully." -w audio/system_ready.wav -s 110 -p 50 2>/dev/null || true
+        espeak "Wave detected! Hello there!" -w audio/wave_response.wav -s 130 -p 60 2>/dev/null || true
+        espeak "Emergency stop activated." -w audio/emergency_stop.wav -s 90 -p 30 2>/dev/null || true
+        
+        print_success "Sample TTS audio files created"
+    else
+        print_warning "espeak not available - skipping TTS audio creation"
+    fi
     
-    espeak "I am happy to see you!" -w audio/track_002.wav -s 110 -p 50 2>/dev/null || \
-        print_warning "Could not create sample audio file 2"
-    
-    espeak "WALL-E is sad." -w audio/track_004.wav -s 90 -p 30 2>/dev/null || \
-        print_warning "Could not create sample audio file 4"
-    
-    espeak "Hello there!" -w audio/track_008.wav -s 130 -p 60 2>/dev/null || \
-        print_warning "Could not create sample audio file 8"
-    
-    print_status "Sample audio files created ✅"
-    
-    # Create SMB sharing documentation
-    cat > SMB_SHARING.md << 'EOF'
-# 🌐 WALL-E SMB File Sharing Quick Guide
+    # Create audio directory README
+    cat > audio/README.md << 'EOF'
+# 🎵 WALL-E Audio Files
 
-## 📁 Access Your WALL-E Files Over Network
+## Supported Formats
+- MP3, WAV, OGG, M4A, FLAC
 
-### Windows:
-- Main project: `\\HOSTNAME\walle`
-- Audio files: `\\HOSTNAME\walle-audio`
-- Config files: `\\HOSTNAME\walle-configs`
+## File Naming
+- Use descriptive names: `happy_greeting.mp3`
+- Scenes reference files by name (without extension)
+- Files are scanned automatically on startup
 
-### macOS/Linux:
-- Main project: `smb://HOSTNAME/walle`
-- Audio files: `smb://HOSTNAME/walle-audio`
-- Config files: `smb://HOSTNAME/walle-configs`
+## Adding Files
+1. Copy audio files to this directory
+2. Files appear automatically in frontend
+3. Reference in scenes using filename without extension
 
-*(Replace HOSTNAME with your Pi's name, usually "wall-e")*
+## Network Upload
+Access via SMB share: `\\HOSTNAME\walle-audio`
 
-## 🎵 Upload Audio Files:
-1. Connect to the audio share
-2. Drag & drop MP3, WAV, OGG files
-3. Name them: `happy.mp3`, `sad.wav`, `track_001.mp3`
-4. Files are immediately available to WALL-E!
-
-## ⚙️ Edit Settings:
-1. Connect to config share  
-2. Edit JSON files with any text editor
-3. Restart WALL-E to apply changes
-
-## 🔧 Troubleshooting:
-```bash
-./manage_smb.sh status    # Check connection info
-./manage_smb.sh restart   # Fix connection issues
-```
-
-**No password required - guest access enabled!**
+## Generated Files
+- `walle_greeting.wav` - System startup greeting
+- `system_ready.wav` - Backend ready notification  
+- `wave_response.wav` - Gesture response
+- `emergency_stop.wav` - Safety alert
 EOF
 
-    print_status "Documentation created ✅"
+    print_success "Audio system configured"
 }
 
-# Set up udev rules for consistent device naming
-setup_udev_rules() {
-    print_step "Setting up udev rules for device naming..."
-    
-    cat > 99-walle-devices.rules << 'EOF'
-# WALL-E Device Rules
-# Pololu Maestro controllers
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1ffb", ATTRS{idProduct}=="008a", SYMLINK+="maestro%n"
-
-# USB-to-serial adapters
-SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SYMLINK+="usb-serial%n"
-
-# ESP32 devices
-SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="esp32-%n"
-EOF
-
-    sudo cp 99-walle-devices.rules /etc/udev/rules.d/
-    sudo udevadm control --reload-rules
-    
-    print_status "Udev rules installed ✅"
-}
-
-# Set up SMB file sharing
+# Setup SMB file sharing (simplified)
 setup_smb_sharing() {
     print_step "Setting up SMB file sharing..."
     
-    # Get current directory and user
     WALLE_DIR=$(pwd)
     CURRENT_USER=$(whoami)
     
     # Backup existing smb.conf
-    sudo cp /etc/samba/smb.conf /etc/samba/smb.conf.backup.$(date +%Y%m%d) 2>/dev/null || \
-        print_warning "Could not backup smb.conf"
+    if [ -f /etc/samba/smb.conf ]; then
+        sudo cp /etc/samba/smb.conf /etc/samba/smb.conf.backup.$(date +%Y%m%d) 2>/dev/null || true
+    fi
     
-    # Add WALL-E share configuration
-    cat >> walle_smb.conf << EOF
-
-# WALL-E Project Share
+    # Create SMB configuration
+    cat > walle_smb_shares.conf << EOF
+# WALL-E Modular Backend Shares
 [walle]
-    comment = WALL-E Robot Project Files
+    comment = WALL-E Robot Project (Modular Backend)
     path = $WALLE_DIR
     browseable = yes
     read only = no
@@ -509,11 +611,9 @@ setup_smb_sharing() {
     create mask = 0664
     directory mask = 0775
     force user = $CURRENT_USER
-    force group = $CURRENT_USER
     public = yes
     writable = yes
     
-# Audio files quick access
 [walle-audio]
     comment = WALL-E Audio Files
     path = $WALLE_DIR/audio
@@ -523,11 +623,9 @@ setup_smb_sharing() {
     create mask = 0664
     directory mask = 0775
     force user = $CURRENT_USER
-    force group = $CURRENT_USER
     public = yes
     writable = yes
 
-# Configuration files
 [walle-configs]
     comment = WALL-E Configuration Files
     path = $WALLE_DIR/configs
@@ -537,390 +635,54 @@ setup_smb_sharing() {
     create mask = 0664
     directory mask = 0775
     force user = $CURRENT_USER
-    force group = $CURRENT_USER
     public = yes
     writable = yes
+
+[walle-logs]
+    comment = WALL-E Log Files
+    path = $WALLE_DIR/logs
+    browseable = yes
+    read only = yes
+    guest ok = yes
+    force user = $CURRENT_USER
+    public = yes
 EOF
 
     # Append to system smb.conf
-    sudo tee -a /etc/samba/smb.conf < walle_smb.conf > /dev/null
+    sudo tee -a /etc/samba/smb.conf < walle_smb_shares.conf > /dev/null
     
-    # Set proper permissions on directories
+    # Set permissions
     chmod 775 "$WALLE_DIR"
     chmod 775 "$WALLE_DIR"/audio 2>/dev/null || true
     chmod 775 "$WALLE_DIR"/configs 2>/dev/null || true
     chmod 775 "$WALLE_DIR"/logs 2>/dev/null || true
     
-    # Make sure user is in required groups
-    sudo usermod -a -G sambashare $CURRENT_USER 2>/dev/null || true
+    # Add user to samba group
+    sudo usermod -a -G sambashare "$CURRENT_USER" 2>/dev/null || true
     
-    # Test samba configuration
-    if sudo testparm -s > /dev/null 2>&1; then
-        print_status "Samba configuration is valid"
-    else
-        print_error "Samba configuration has errors"
-        sudo testparm -s
-    fi
-    
-    # Start and enable Samba services
-    sudo systemctl enable smbd
-    sudo systemctl enable nmbd
-    sudo systemctl restart smbd
-    sudo systemctl restart nmbd
-    
-    # Get network info for user
-    HOSTNAME=$(hostname)
-    IP_ADDRESS=$(hostname -I | awk '{print $1}')
-    
-    print_status "SMB file sharing configured ✅"
-    print_status "Access your WALL-E files from any computer:"
-    echo "  📁 Windows: \\\\$HOSTNAME\\walle or \\\\$IP_ADDRESS\\walle"
-    echo "  📁 macOS: smb://$HOSTNAME/walle or smb://$IP_ADDRESS/walle"
-    echo "  📁 Linux: smb://$HOSTNAME/walle or smb://$IP_ADDRESS/walle"
-    echo ""
-    echo "  🎵 Audio files: \\\\$HOSTNAME\\walle-audio"
-    echo "  ⚙️ Config files: \\\\$HOSTNAME\\walle-configs"
-    echo "  📜 All project: \\\\$HOSTNAME\\walle"
-    echo ""
-    print_status "Guest access enabled - no password required!"
-    
-    # Clean up temporary file
-    rm -f walle_smb.conf
-}
-
-# Create systemd service files
-create_services() {
-    print_step "Creating systemd service files..."
-    
-    # WALL-E main service
-    cat > walle.service << EOF
-[Unit]
-Description=WALL-E Robot Control System
-After=network.target
-Wants=network.target
-
-[Service]
-Type=simple
-User=$USER
-WorkingDirectory=$(pwd)
-Environment="PATH=$(pwd)/venv/bin:/home/$USER/.pyenv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-Environment="PYENV_ROOT=/home/$USER/.pyenv"
-ExecStartPre=/bin/bash -c 'eval "\$(pyenv init -)" && pyenv local 3.9.13'
-ExecStart=$(pwd)/venv/bin/python $(pwd)/main.py
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    # Install service
-    sudo cp walle.service /etc/systemd/system/
-    sudo systemctl daemon-reload
-    
-    print_status "Systemd service created ✅"
-    print_status "Service configured to use Python 3.9.13 via pyenv"
-}
-
-# Create startup script
-create_startup_script() {
-    print_step "Creating startup scripts..."
-    
-    # Main startup script
-    cat > start_walle.sh << 'EOF'
-#!/bin/bash
-# Enhanced WALL-E Startup Script with Camera Proxy Support
-
-cd "$(dirname "$0")"
-
-# Colors for output
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-print_status() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-print_step() {
-    echo -e "${BLUE}[STEP]${NC} $1"
-}
-
-echo "🤖 Starting WALL-E System..."
-
-# Initialize pyenv if available
-if command -v pyenv >/dev/null 2>&1; then
-    eval "$(pyenv init -)"
-fi
-
-# Check Python version
-PYTHON_VERSION=$(python --version 2>&1 | cut -d' ' -f2)
-if [[ "$PYTHON_VERSION" != "3.9.13" ]]; then
-    print_warning "Expected Python 3.9.13, found: $PYTHON_VERSION"
-    print_warning "Try: source ~/.bashrc && cd $(pwd)"
-fi
-
-# Check if virtual environment exists
-if [ ! -d "venv" ]; then
-    print_error "Virtual environment not found. Run install.sh first."
-    exit 1
-fi
-
-# Activate virtual environment
-source venv/bin/activate
-
-# Verify Python version in venv
-VENV_PYTHON_VERSION=$(python --version 2>&1 | cut -d' ' -f2)
-print_status "Using Python $VENV_PYTHON_VERSION in virtual environment"
-
-# Function to check if OpenCV is working
-check_opencv() {
-    python -c "import cv2" 2>/dev/null
-    return $?
-}
-
-# Function to start camera proxy
-start_camera_proxy() {
-    if [ ! -f "modules/camera_proxy.py" ]; then
-        print_warning "Camera proxy not found at modules/camera_proxy.py"
-        return 1
-    fi
-    
-    if check_opencv; then
-        print_step "Starting camera proxy..."
-        python modules/camera_proxy.py &
-        CAMERA_PID=$!
-        
-        # Give it time to start
-        sleep 3
-        
-        # Check if it's still running
-        if kill -0 $CAMERA_PID 2>/dev/null; then
-            print_status "✅ Camera proxy started (PID: $CAMERA_PID)"
-            echo $CAMERA_PID > camera_proxy.pid
-            
-            # Get IP address for display
-            IP_ADDRESS=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "localhost")
-            print_status "📷 Camera stream: http://$IP_ADDRESS:8081/stream"
-            return 0
-        else
-            print_error "❌ Camera proxy failed to start"
-            return 1
-        fi
-    else
-        print_warning "OpenCV not available, skipping camera proxy"
-        return 1
-    fi
-}
-
-# Function to stop camera proxy
-stop_camera_proxy() {
-    if [ -f "camera_proxy.pid" ]; then
-        CAMERA_PID=$(cat camera_proxy.pid)
-        if kill -0 $CAMERA_PID 2>/dev/null; then
-            print_status "Stopping camera proxy (PID: $CAMERA_PID)..."
-            kill $CAMERA_PID
-            wait $CAMERA_PID 2>/dev/null
-        fi
-        rm -f camera_proxy.pid
-    fi
-}
-
-# Function for cleanup on exit
-cleanup() {
-    print_step "Shutting down WALL-E services..."
-    stop_camera_proxy
-    print_status "✅ Cleanup complete"
-    exit 0
-}
-
-# Set up signal handlers for graceful shutdown
-trap cleanup SIGINT SIGTERM
-
-# Parse command line arguments
-START_CAMERA=true
-SHOW_HELP=false
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --no-camera)
-            START_CAMERA=false
-            shift
-            ;;
-        --camera-only)
-            print_status "Starting camera proxy only..."
-            start_camera_proxy
-            if [ $? -eq 0 ]; then
-                print_status "Camera proxy running. Press Ctrl+C to stop."
-                # Wait for camera proxy process
-                if [ -f "camera_proxy.pid" ]; then
-                    CAMERA_PID=$(cat camera_proxy.pid)
-                    wait $CAMERA_PID 2>/dev/null
-                fi
-            else
-                print_error "Failed to start camera proxy"
-                exit 1
-            fi
-            exit 0
-            ;;
-        --help|-h)
-            SHOW_HELP=true
-            break
-            ;;
-        *)
-            print_error "Unknown option: $1"
-            SHOW_HELP=true
-            break
-            ;;
-    esac
-done
-
-# Show help if requested or invalid option
-if [ "$SHOW_HELP" = true ]; then
-    echo ""
-    echo "Usage: $0 [options]"
-    echo ""
-    echo "Options:"
-    echo "  --no-camera     Start WALL-E without camera proxy"
-    echo "  --camera-only   Start only the camera proxy"
-    echo "  --help, -h      Show this help message"
-    echo ""
-    echo "Examples:"
-    echo "  $0              # Start WALL-E with camera proxy"
-    echo "  $0 --no-camera # Start WALL-E without camera"
-    echo "  $0 --camera-only # Start only camera proxy"
-    echo ""
-    exit 0
-fi
-
-# Check if main.py exists
-if [ ! -f "main.py" ]; then
-    print_error "main.py not found. Make sure all files are in place."
-    exit 1
-fi
-
-# Start camera proxy if enabled
-CAMERA_STARTED=false
-if [ "$START_CAMERA" = true ]; then
-    if start_camera_proxy; then
-        CAMERA_STARTED=true
-    fi
-fi
-
-# Show startup status
-echo ""
-print_step "WALL-E Service Status:"
-echo "  🤖 Core System: Starting..."
-if [ "$CAMERA_STARTED" = true ]; then
-    echo "  📷 Camera Proxy: ✅ Running"
-else
-    echo "  📷 Camera Proxy: ❌ Disabled"
-fi
-echo ""
-
-# Get network information
-HOSTNAME=$(hostname)
-IP_ADDRESS=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "localhost")
-
-# Display connection information
-print_status "🚀 Starting WALL-E core backend..."
-echo ""
-echo "🌐 Network Access Information:"
-echo "  📡 WebSocket Server: ws://$IP_ADDRESS:8766"
-echo "  🌐 SMB File Shares: \\\\$HOSTNAME\\walle"
-if [ "$CAMERA_STARTED" = true ]; then
-    echo "  📷 Camera Stream: http://$IP_ADDRESS:8081/stream"
-    echo "  📊 Camera Stats: http://$IP_ADDRESS:8081/stats"
-fi
-echo ""
-print_status "Press Ctrl+C to stop all services"
-echo ""
-
-# Start main WALL-E system (this will block until stopped)
-python main.py
-EOF
-
-    chmod +x start_walle.sh
-    
-    # SMB management script
-    cat > manage_smb.sh << 'EOF'
-#!/bin/bash
-# WALL-E SMB Share Management Script
-
-# Colors
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
-print_status() {
-    echo -e "${GREEN}[INFO]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-print_step() {
-    echo -e "${BLUE}[STEP]${NC} $1"
-}
-
-show_status() {
-    echo "🌐 WALL-E SMB Sharing Status"
-    echo "============================="
-    
-    HOSTNAME=$(hostname)
-    IP_ADDRESS=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "unknown")
-    
-    echo "  📁 Windows: \\\\$HOSTNAME\\walle"
-    echo "  📁 macOS/Linux: smb://$HOSTNAME/walle"
-    echo "  🎵 Audio: \\\\$HOSTNAME\\walle-audio"
-    echo "  ⚙️ Config: \\\\$HOSTNAME\\walle-configs"
-    echo ""
-    
-    if systemctl is-active --quiet smbd; then
-        print_status "SMB service running ✅"
-    else
-        print_warning "SMB service not running ❌"
-        echo "  Run: sudo systemctl start smbd"
-    fi
-}
-
-restart_services() {
-    print_step "Restarting SMB services..."
+    # Start samba services
+    sudo systemctl enable smbd nmbd
     sudo systemctl restart smbd nmbd
-    print_status "Services restarted ✅"
-}
-
-case "${1:-status}" in
-    "status") show_status ;;
-    "restart") restart_services; show_status ;;
-    *) echo "Usage: $0 {status|restart}" ;;
-esac
-EOF
-
-    chmod +x manage_smb.sh
     
-    print_status "Startup scripts created ✅"
-    print_status "  ./start_walle.sh - Start WALL-E system"
-    print_status "  ./manage_smb.sh - Manage SMB file sharing"
+    # Get network info
+    HOSTNAME=$(hostname)
+    IP_ADDRESS=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "IP_NOT_FOUND")
+    
+    print_success "SMB file sharing configured"
+    echo ""
+    echo "📁 Network Access:"
+    echo "  🖥️  Windows: \\\\$HOSTNAME\\walle"
+    echo "  🍎 macOS: smb://$HOSTNAME/walle" 
+    echo "  🐧 Linux: smb://$IP_ADDRESS/walle"
+    echo ""
+    echo "🎵 Quick Access:"
+    echo "  Audio: \\\\$HOSTNAME\\walle-audio"
+    echo "  Config: \\\\$HOSTNAME\\walle-configs"
+    echo "  Logs: \\\\$HOSTNAME\\walle-logs"
+    echo ""
+    
+    # Cleanup
+    rm -f walle_smb_shares.conf
 }
 
 # Test hardware connections
@@ -928,30 +690,33 @@ test_hardware() {
     print_step "Testing hardware connections..."
     
     # Test I2C
-    if command -v i2cdetect &> /dev/null; then
-        print_status "I2C tools available, scanning for devices..."
-        i2cdetect -y 1 2>/dev/null || print_warning "No I2C devices found"
+    if command -v i2cdetect >/dev/null 2>&1; then
+        print_status "Scanning I2C devices..."
+        i2cdetect -y 1 2>/dev/null | grep -E "[0-9a-f]{2}" && print_success "I2C devices detected" || print_warning "No I2C devices found"
+    fi
+    
+    # Test GPIO access
+    if command -v pinout >/dev/null 2>&1; then
+        print_status "GPIO system available"
+    else
+        print_warning "GPIO tools not found"
     fi
     
     # List USB devices
     print_status "USB devices:"
     lsusb | grep -E "(Pololu|FTDI|Arduino|Silicon Labs)" || print_warning "No known USB devices found"
     
-    # List serial ports
-    print_status "Serial ports:"
-    ls -la /dev/tty{ACM,USB}* 2>/dev/null || print_warning "No serial devices found"
-    
-    # Test audio
-    print_status "Testing audio..."
-    if command -v amixer &> /dev/null; then
-        # Set reasonable volume
+    # Test audio system
+    print_status "Testing audio system..."
+    if command -v aplay >/dev/null 2>&1; then
+        # Set reasonable volume levels
         amixer sset PCM,0 70% 2>/dev/null || \
         amixer sset Master 70% 2>/dev/null || \
-        amixer sset Headphone 70% 2>/dev/null || \
-        print_warning "Could not set default volume"
+        amixer sset Headphone 70% 2>/dev/null || true
+        print_success "Audio system configured"
     fi
     
-    print_status "Hardware test complete ✅"
+    print_success "Hardware test completed"
 }
 
 # Test Python installation
@@ -963,138 +728,672 @@ test_python_installation() {
     # Test Python version
     PYTHON_VERSION=$(python --version 2>&1 | cut -d' ' -f2)
     if [[ "$PYTHON_VERSION" == "3.9.13" ]]; then
-        print_status "✅ Python 3.9.13 confirmed in virtual environment"
+        print_success "✅ Python 3.9.13 confirmed"
     else
-        print_warning "⚠️ Expected Python 3.9.13, got: $PYTHON_VERSION"
+        print_warning "⚠️ Expected 3.9.13, got: $PYTHON_VERSION"
     fi
     
-    # Test core imports
+    # Test critical imports for modular backend
     python -c "
 import asyncio
-import websockets
+import websockets  
 import serial
 import pygame
-print('✅ Core Python libraries working')
+import flask
+import watchdog
+print('✅ Core backend modules working')
 "
     
-    # Test OpenCV
+    # Test hardware-specific imports
     python -c "
 try:
     import cv2
     print('✅ OpenCV working')
-except ImportError as e:
-    print('⚠️ OpenCV not available:', e)
-"
-    
-    # Test GPIO (if on Pi)
-    python -c "
+except ImportError:
+    print('⚠️ OpenCV not available')
+
 try:
     import RPi.GPIO
     print('✅ RPi.GPIO working')
 except ImportError:
-    print('⚠️ RPi.GPIO not available (normal if not on Pi)')
+    print('⚠️ RPi.GPIO not available')
+
+try:
+    import adafruit_ads1x15.ads1115
+    print('✅ ADC libraries working')
+except ImportError:
+    print('⚠️ ADC libraries not available')
 "
     
-    print_status "Python 3.9.13 installation test complete ✅"
+    print_success "Python installation test completed"
 }
 
-# Main installation process
+# Create service files
+create_services() {
+    print_step "Creating systemd services..."
+    
+    # Main WALL-E service
+    cat > walle-backend.service << EOF
+[Unit]
+Description=WALL-E Modular Backend System
+After=network.target sound.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=$USER
+Group=$USER
+WorkingDirectory=$(pwd)
+Environment=PATH=$(pwd)/venv/bin:/home/$USER/.pyenv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYENV_ROOT=/home/$USER/.pyenv
+Environment=PYTHONPATH=$(pwd)
+ExecStartPre=/bin/bash -c 'source $(pwd)/venv/bin/activate && python --version'
+ExecStart=$(pwd)/venv/bin/python $(pwd)/main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Install service
+    sudo cp walle-backend.service /etc/systemd/system/
+    sudo systemctl daemon-reload
+    
+    print_success "Systemd service created"
+    print_status "Service: walle-backend.service"
+    
+    # Clean up temp file
+    rm -f walle-backend.service
+}
+
+# Create startup and management scripts  
+create_scripts() {
+    print_step "Creating management scripts..."
+    
+    # Enhanced startup script
+    cat > start_walle.sh << 'EOF'
+#!/bin/bash
+# WALL-E Modular Backend Startup Script
+cd "$(dirname "$0")"
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+print_status() { echo -e "${GREEN}[INFO]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+print_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
+
+echo "🤖 Starting WALL-E Modular Backend System..."
+
+# Initialize pyenv
+if command -v pyenv >/dev/null 2>&1; then
+    eval "$(pyenv init -)"
+fi
+
+# Check Python version
+PYTHON_VERSION=$(python --version 2>&1 | cut -d' ' -f2)
+if [[ "$PYTHON_VERSION" != "3.9.13" ]]; then
+    print_warning "Expected Python 3.9.13, found: $PYTHON_VERSION"
+    print_warning "Try: source ~/.bashrc && cd $(pwd)"
+fi
+
+# Check virtual environment
+if [ ! -d "venv" ]; then
+    print_error "Virtual environment not found. Run install.sh first."
+    exit 1
+fi
+
+# Activate virtual environment
+source venv/bin/activate
+VENV_PYTHON=$(python --version 2>&1 | cut -d' ' -f2)
+print_status "Using Python $VENV_PYTHON in virtual environment"
+
+# Parse command line arguments
+START_CAMERA=true
+DAEMON_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --no-camera) START_CAMERA=false; shift ;;
+        --daemon) DAEMON_MODE=true; shift ;;
+        --help|-h)
+            echo "Usage: $0 [options]"
+            echo "Options:"
+            echo "  --no-camera    Start without camera proxy"
+            echo "  --daemon       Run as background daemon"
+            echo "  --help, -h     Show help"
+            exit 0 ;;
+        *) print_error "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+# Function to start camera proxy
+start_camera_proxy() {
+    if [ ! -f "modules/camera_proxy.py" ]; then
+        print_warning "Camera proxy not found"
+        return 1
+    fi
+    
+    print_step "Starting camera proxy..."
+    python modules/camera_proxy.py &
+    CAMERA_PID=$!
+    echo $CAMERA_PID > camera_proxy.pid
+    sleep 2
+    
+    if kill -0 $CAMERA_PID 2>/dev/null; then
+        IP=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "localhost")
+        print_status "📷 Camera stream: http://$IP:8081/stream"
+        return 0
+    else
+        print_error "Camera proxy failed to start"
+        return 1
+    fi
+}
+
+# Cleanup function
+cleanup() {
+    print_step "Shutting down WALL-E services..."
+    if [ -f "camera_proxy.pid" ]; then
+        CAMERA_PID=$(cat camera_proxy.pid)
+        if kill -0 $CAMERA_PID 2>/dev/null; then
+            kill $CAMERA_PID
+            wait $CAMERA_PID 2>/dev/null
+        fi
+        rm -f camera_proxy.pid
+    fi
+    print_status "✅ Cleanup complete"
+    exit 0
+}
+
+trap cleanup SIGINT SIGTERM
+
+# Start camera proxy if enabled
+if [ "$START_CAMERA" = true ]; then
+    start_camera_proxy
+fi
+
+# Display network information
+HOSTNAME=$(hostname)
+IP=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "localhost")
+
+echo ""
+print_step "WALL-E Modular Backend Status:"
+echo "  🤖 Core System: Starting..."
+echo "  📷 Camera: ${START_CAMERA:+✅ Enabled}${START_CAMERA:-❌ Disabled}"
+echo ""
+echo "🌐 Network Access:"
+echo "  📡 WebSocket: ws://$IP:8766"
+echo "  📁 File Share: \\\\$HOSTNAME\\walle"
+if [ "$START_CAMERA" = true ]; then
+    echo "  📷 Camera: http://$IP:8081/stream"
+fi
+echo ""
+
+# Start main backend
+if [ "$DAEMON_MODE" = true ]; then
+    print_status "Starting in daemon mode..."
+    nohup python main.py > logs/walle_daemon.log 2>&1 &
+    echo $! > walle_backend.pid
+    print_status "WALL-E backend started (PID: $(cat walle_backend.pid))"
+    print_status "Logs: tail -f logs/walle_daemon.log"
+else
+    print_status "Starting in interactive mode (Ctrl+C to stop)..."
+    python main.py
+fi
+EOF
+
+    # Management script
+    cat > manage_walle.sh << 'EOF'
+#!/bin/bash
+# WALL-E System Management Script
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+print_status() { echo -e "${GREEN}[INFO]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+print_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
+
+show_status() {
+    echo "🤖 WALL-E System Status"
+    echo "======================"
+    
+    # Check if backend is running
+    if [ -f "walle_backend.pid" ]; then
+        PID=$(cat walle_backend.pid)
+        if kill -0 $PID 2>/dev/null; then
+            print_status "✅ Backend running (PID: $PID)"
+        else
+            print_warning "❌ Backend PID file exists but process not running"
+            rm -f walle_backend.pid
+        fi
+    else
+        print_warning "❌ Backend not running"
+    fi
+    
+    # Check camera proxy
+    if [ -f "camera_proxy.pid" ]; then
+        CAMERA_PID=$(cat camera_proxy.pid)
+        if kill -0 $CAMERA_PID 2>/dev/null; then
+            print_status "✅ Camera proxy running (PID: $CAMERA_PID)"
+        else
+            print_warning "❌ Camera proxy PID file exists but process not running"
+            rm -f camera_proxy.pid
+        fi
+    else
+        print_warning "❌ Camera proxy not running"
+    fi
+    
+    # Check service status
+    if systemctl is-active --quiet walle-backend; then
+        print_status "✅ Systemd service: Active"
+    else
+        print_warning "❌ Systemd service: Inactive"
+    fi
+    
+    # Network info
+    HOSTNAME=$(hostname)
+    IP=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "unknown")
+    echo ""
+    echo "🌐 Network Access:"
+    echo "  📡 WebSocket: ws://$IP:8766"
+    echo "  📁 SMB Share: \\\\$HOSTNAME\\walle"
+    echo "  📷 Camera: http://$IP:8081/stream"
+}
+
+start_service() {
+    print_step "Starting WALL-E service..."
+    sudo systemctl start walle-backend
+    sleep 2
+    show_status
+}
+
+stop_service() {
+    print_step "Stopping WALL-E service..."
+    sudo systemctl stop walle-backend
+    
+    # Also stop any running processes
+    if [ -f "walle_backend.pid" ]; then
+        PID=$(cat walle_backend.pid)
+        if kill -0 $PID 2>/dev/null; then
+            kill $PID
+            wait $PID 2>/dev/null
+        fi
+        rm -f walle_backend.pid
+    fi
+    
+    if [ -f "camera_proxy.pid" ]; then
+        CAMERA_PID=$(cat camera_proxy.pid)
+        if kill -0 $CAMERA_PID 2>/dev/null; then
+            kill $CAMERA_PID
+            wait $CAMERA_PID 2>/dev/null
+        fi
+        rm -f camera_proxy.pid
+    fi
+    
+    show_status
+}
+
+restart_service() {
+    print_step "Restarting WALL-E service..."
+    stop_service
+    sleep 2
+    start_service
+}
+
+enable_service() {
+    print_step "Enabling WALL-E service for auto-start..."
+    sudo systemctl enable walle-backend
+    print_status "✅ Service will start automatically on boot"
+}
+
+disable_service() {
+    print_step "Disabling WALL-E auto-start..."
+    sudo systemctl disable walle-backend
+    print_status "✅ Service will not start automatically on boot"
+}
+
+show_logs() {
+    if [ "$2" = "follow" ] || [ "$2" = "-f" ]; then
+        print_status "Following WALL-E logs (Ctrl+C to exit)..."
+        sudo journalctl -u walle-backend -f
+    else
+        print_status "Recent WALL-E logs:"
+        sudo journalctl -u walle-backend --no-pager -n 50
+    fi
+}
+
+case "${1:-status}" in
+    "status"|"st") show_status ;;
+    "start") start_service ;;
+    "stop") stop_service ;;
+    "restart"|"rs") restart_service ;;
+    "enable") enable_service ;;
+    "disable") disable_service ;;
+    "logs") show_logs "$@" ;;
+    *) 
+        echo "Usage: $0 {status|start|stop|restart|enable|disable|logs [follow]}"
+        echo ""
+        echo "Commands:"
+        echo "  status    - Show system status"
+        echo "  start     - Start WALL-E service"
+        echo "  stop      - Stop WALL-E service"
+        echo "  restart   - Restart WALL-E service"
+        echo "  enable    - Enable auto-start on boot"
+        echo "  disable   - Disable auto-start"
+        echo "  logs      - Show recent logs"
+        echo "  logs -f   - Follow logs in real-time"
+        ;;
+esac
+EOF
+
+    # SMB management script (simplified)
+    cat > manage_smb.sh << 'EOF'
+#!/bin/bash
+# WALL-E SMB Management Script
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+print_status() { echo -e "${GREEN}[INFO]${NC} $1"; }
+print_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
+
+show_status() {
+    echo "📁 WALL-E SMB File Sharing Status"
+    echo "================================="
+    
+    HOSTNAME=$(hostname)
+    IP=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "unknown")
+    
+    echo "🌐 Access URLs:"
+    echo "  🖥️  Windows: \\\\$HOSTNAME\\walle"
+    echo "  🍎 macOS: smb://$HOSTNAME/walle"
+    echo "  🐧 Linux: smb://$IP/walle"
+    echo ""
+    echo "📂 Quick Access:"
+    echo "  🎵 Audio: \\\\$HOSTNAME\\walle-audio"
+    echo "  ⚙️  Config: \\\\$HOSTNAME\\walle-configs"
+    echo "  📊 Logs: \\\\$HOSTNAME\\walle-logs"
+    echo ""
+    
+    if systemctl is-active --quiet smbd; then
+        print_status "✅ SMB service running"
+    else
+        print_status "❌ SMB service not running"
+        echo "  Run: sudo systemctl start smbd"
+    fi
+}
+
+restart_smb() {
+    print_step "Restarting SMB services..."
+    sudo systemctl restart smbd nmbd
+    sleep 1
+    show_status
+}
+
+case "${1:-status}" in
+    "status") show_status ;;
+    "restart") restart_smb; show_status ;;
+    *) echo "Usage: $0 {status|restart}" ;;
+esac
+EOF
+
+    # Make scripts executable
+    chmod +x start_walle.sh manage_walle.sh manage_smb.sh
+    
+    print_success "Management scripts created"
+    echo "  📝 start_walle.sh - Start WALL-E system"
+    echo "  📝 manage_walle.sh - Service management"
+    echo "  📝 manage_smb.sh - SMB file sharing"
+}
+
+# Create documentation
+create_documentation() {
+    print_step "Creating system documentation..."
+    
+    cat > WALL-E_SETUP.md << 'EOF'
+# 🤖 WALL-E Modular Backend System
+
+## Quick Start
+
+### Start WALL-E System
+```bash
+./start_walle.sh                 # Interactive mode
+./start_walle.sh --daemon        # Background mode
+./start_walle.sh --no-camera     # Without camera
+```
+
+### Service Management
+```bash
+./manage_walle.sh status         # Check status
+./manage_walle.sh start          # Start service
+./manage_walle.sh stop           # Stop service  
+./manage_walle.sh restart        # Restart service
+./manage_walle.sh logs -f        # View live logs
+```
+
+### File Access
+- **Windows**: `\\HOSTNAME\walle`
+- **macOS/Linux**: `smb://HOSTNAME/walle`
+- **Audio Upload**: `\\HOSTNAME\walle-audio`
+- **Config Edit**: `\\HOSTNAME\walle-configs`
+
+## System Architecture
+
+### Modular Components
+- `main.py` - System orchestrator (400 lines)
+- `modules/websocket_handler.py` - Message routing
+- `modules/hardware_service.py` - Hardware abstraction
+- `modules/scene_engine.py` - Scene management
+- `modules/audio_controller.py` - Audio system
+- `modules/telemetry_system.py` - Monitoring
+- `modules/config_manager.py` - Configuration
+
+### Hardware Support
+- **Maestro Controllers**: Dual 18-channel servo control
+- **Stepper Motor**: NEMA 23 with homing
+- **ADC Sensors**: Battery and current monitoring
+- **ESP32-CAM**: Video streaming with manual control
+- **Audio System**: Native Pi audio with multiple formats
+
+### Configuration
+- **Hot-Reload**: Configuration changes apply automatically
+- **Validation**: All configs validated with schemas
+- **Backups**: Automatic config backups on changes
+- **Network Access**: Edit configs via SMB shares
+
+## Troubleshooting
+
+### Python Issues
+```bash
+# Check Python version
+python --version  # Should be 3.9.13
+
+# Restart shell if wrong version
+source ~/.bashrc && cd $(pwd)
+
+# Recreate virtual environment
+rm -rf venv
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Hardware Issues
+```bash
+# Test I2C devices
+i2cdetect -y 1
+
+# Check serial ports
+ls -la /dev/tty*
+
+# Test GPIO access
+pinout
+
+# Check system logs
+sudo journalctl -u walle-backend -f
+```
+
+### Network Issues
+```bash
+# Check SMB shares
+./manage_smb.sh status
+
+# Restart networking
+sudo systemctl restart networking
+
+# Check IP address
+hostname -I
+```
+
+## Performance Monitoring
+
+### System Health
+- Access WebSocket: `ws://IP:8766`
+- Camera stream: `http://IP:8081/stream`
+- Log files: `logs/walle_backend_refactored.log`
+
+### Telemetry Features
+- Real-time system monitoring
+- Battery and current sensing
+- Hardware status tracking
+- Automatic alerting system
+- Health score calculation
+
+## Development
+
+### Adding New Features
+1. Create new module in `modules/`
+2. Register with hardware service
+3. Add WebSocket handlers if needed
+4. Update configuration schema
+5. Test with modular architecture
+
+### Configuration Schema
+All configs are validated automatically:
+- Hardware settings checked for valid ranges
+- GPIO pins validated for Pi compatibility  
+- Network settings verified
+- Scene formats validated
+
+## Support Files
+
+- `requirements.txt` - Python dependencies
+- `systemd service` - Auto-start configuration
+- `SMB shares` - Network file access
+- `Log rotation` - Automatic log management
+
+For detailed API documentation, see the WebSocket message formats in the main documentation.
+EOF
+
+    print_success "Documentation created: WALL-E_SETUP.md"
+}
+
+# Main installation function
 main() {
-    print_status "Starting WALL-E system installation..."
+    print_status "🤖 Starting WALL-E Complete Installation"
     echo "Current directory: $(pwd)"
     echo "Current user: $(whoami)"
     echo ""
     
+    # Pre-flight checks
     check_raspberry_pi
+    
+    # System setup
     update_system
     install_system_deps
-    enable_interfaces
-    create_directories
+    
+    # Python environment
     setup_pyenv
     create_venv
     install_python_deps
+    
+    # Pi configuration
+    configure_pi_interfaces
+    prompt_manual_config
+    
+    # Directory and file setup
+    create_directories
     create_config_files
     create_sample_audio
-    setup_udev_rules
+    
+    # Services and networking
     setup_smb_sharing
     create_services
-    create_startup_script
+    create_scripts
+    create_documentation
+    
+    # Testing
     test_hardware
     test_python_installation
     
     echo ""
-    echo "🎉 WALL-E System Installation Complete!"
-    echo "======================================"
+    echo "🎉 WALL-E Modular Backend Installation Complete!"
+    echo "================================================="
     echo ""
-    print_status "✅ Native Audio System Ready!"
-    echo "  📁 Audio files go in: ./audio/"
-    echo "  🎵 Supported formats: MP3, WAV, OGG, M4A"
-    echo "  🎤 Text-to-speech: espeak installed"
-    echo "  🔊 Volume control: amixer/alsamixer"
+    print_success "✅ System Components Installed:"
+    echo "  🐍 Python 3.9.13 with pyenv"
+    echo "  📦 All modular backend dependencies"
+    echo "  🔧 Hardware interfaces configured"
+    echo "  📁 SMB file sharing enabled"
+    echo "  🎵 Audio system ready"
+    echo "  ⚙️  Configuration management"
+    echo "  📊 Advanced telemetry system"
+    echo "  🌐 WebSocket server ready"
     echo ""
-    print_status "✅ Configuration Files Created:"
-    echo "  📁 configs/hardware_config.json - Hardware settings"
-    echo "  📁 configs/camera_config.json - Camera settings"
-    echo "  📁 configs/scenes.json - Robot scenes and emotions"
-    echo ""
-    print_status "✅ Python Environment Ready:"
-    echo "  🐍 Python 3.9.13 installed via pyenv"
-    echo "  📁 Virtual environment: ./venv/"
-    echo "  📦 All dependencies installed"
-    echo "  🔧 OpenCV configured for Raspberry Pi"
-    echo ""
-    print_status "✅ SMB File Sharing Ready:"
+    print_success "✅ Network Access Ready:"
     HOSTNAME=$(hostname)
     IP_ADDRESS=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "IP_NOT_FOUND")
-    echo "  🌐 Network access enabled for easy file management"
-    echo "  📁 Windows: \\\\$HOSTNAME\\walle"
-    echo "  📁 macOS/Linux: smb://$HOSTNAME/walle"
-    echo "  🎵 Audio quick access: \\\\$HOSTNAME\\walle-audio"
-    echo "  ⚙️ Config quick access: \\\\$HOSTNAME\\walle-configs"
-    echo "  🔓 Guest access - no password required"
+    echo "  📡 WebSocket: ws://$IP_ADDRESS:8766"
+    echo "  📁 File Access: \\\\$HOSTNAME\\walle"
+    echo "  🎵 Audio Upload: \\\\$HOSTNAME\\walle-audio"
+    echo "  ⚙️  Config Edit: \\\\$HOSTNAME\\walle-configs"
     echo ""
-    print_status "Next steps:"
-    echo "  1. 🔄 Reboot to enable I2C/Serial: sudo reboot"
-    echo "  2. 🔌 Connect your hardware:"
-    echo "     • Maestro controllers: USB ports"
-    echo "     • Audio: Built-in 3.5mm jack or HDMI"
-    echo "     • ESP32 camera: USB or network"
-    echo "     • Current sensors: I2C (SDA/SCL pins)"
-    echo "     • Emergency stop: GPIO 25"
-    echo "     • Limit switch: GPIO 26"
-    echo "  3. 🎵 Add audio files to ./audio/ directory"
-    echo "  4. 🧪 Test the system: ./start_walle.sh"
-    echo "  5. 🌐 Start frontend in another terminal"
+    print_success "✅ Management Commands:"
+    echo "  🚀 Start System: ./start_walle.sh"
+    echo "  ⚙️  Manage Service: ./manage_walle.sh status"
+    echo "  📁 SMB Status: ./manage_smb.sh status"
+    echo "  📖 Documentation: cat WALL-E_SETUP.md"
     echo ""
-    print_status "Service management:"
-    echo "  • Start service: sudo systemctl start walle"
-    echo "  • Enable auto-start: sudo systemctl enable walle"
-    echo "  • View logs: sudo journalctl -u walle -f"
-    echo "  • Stop service: sudo systemctl stop walle"
+    print_step "⚠️  IMPORTANT: Reboot Required"
+    echo "  Hardware interfaces (I2C, SPI, UART) need reboot to activate"
+    echo "  After reboot, your modular WALL-E backend will be ready!"
     echo ""
-    print_status "File sharing management:"
-    echo "  • Check SMB status: ./manage_smb.sh status"
-    echo "  • Restart SMB: ./manage_smb.sh restart"
-    echo "  • Upload files via network from any computer!"
+    print_step "🎯 Next Steps:"
+    echo "  1. 🔄 Reboot Pi: sudo reboot"
+    echo "  2. 📁 Upload audio files via \\\\$HOSTNAME\\walle-audio"
+    echo "  3. 🎭 Configure scenes via \\\\$HOSTNAME\\walle-configs"
+    echo "  4. 🚀 Start backend: ./start_walle.sh"
+    echo "  5. 🌐 Connect frontend to ws://$IP_ADDRESS:8766"
     echo ""
-    print_status "Troubleshooting:"
-    echo "  • Test audio: speaker-test -t wav"
-    echo "  • Test TTS: espeak 'Hello WALL-E'"
-    echo "  • Volume control: alsamixer"
-    echo "  • Check I2C: i2cdetect -y 1"
-    echo "  • List serial: ls /dev/tty*"
-    echo "  • SMB status: ./manage_smb.sh status"
-    echo "  • SMB restart: ./manage_smb.sh restart"
-    echo "  • Check Python: python --version (should be 3.9.13)"
-    echo "  • List pyenv versions: pyenv versions"
-    echo "  • SMB logs: sudo journalctl -u smbd"
+    print_success "🤖 Your WALL-E Modular Backend System is Ready!"
     echo ""
-    print_warning "⚠️ A reboot is required to enable I2C and Serial interfaces!"
-    print_status "After reboot:"
-    echo "  • If Python version issues: source ~/.bashrc && cd $(pwd)"
-    echo "  • Start WALL-E: ./start_walle.sh"
-    echo "  • Access files: \\\\$(hostname)\\walle"
-    echo "  • Upload audio files via network share!"
+    read -p "Reboot now to activate hardware interfaces? (Y/n): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+        print_status "Rebooting in 5 seconds... (Ctrl+C to cancel)"
+        sleep 5
+        sudo reboot
+    else
+        print_warning "Remember to reboot before using hardware features!"
+    fi
 }
 
 # Run main installation if script is executed directly
