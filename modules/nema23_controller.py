@@ -13,15 +13,17 @@ from enum import Enum
 from dataclasses import dataclass
 import json
 
+logger = logging.getLogger(__name__)
+
 # GPIO handling with fallbacks
 GPIO_AVAILABLE = False
 try:
     import RPi.GPIO as GPIO
     GPIO_AVAILABLE = True
+    logger.info("✅ GPIO library imported successfully")
 except ImportError:
-    print("RPi.GPIO not available - stepper control disabled")
+    logger.warning("⚠️ RPi.GPIO not available - GPIO features disabled")
 
-logger = logging.getLogger(__name__)
 
 class MotorState(Enum):
     DISABLED = "disabled"

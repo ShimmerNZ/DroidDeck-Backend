@@ -21,15 +21,13 @@ try:
     import websockets.server
     WEBSOCKETS_VERSION = websockets.__version__
     WEBSOCKETS_MAJOR = int(WEBSOCKETS_VERSION.split('.')[0])
-    logger = logging.getLogger(__name__)
-    logger.info(f"📦 Using websockets version: {WEBSOCKETS_VERSION}")
 except ImportError as e:
     print(f"❌ Failed to import websockets: {e}")
     sys.exit(1)
 
 # Import modular components
 from modules.websocket_handler import WebSocketMessageHandler
-from modules.scene_engine import SceneEngine
+from modules.scene_engine import EnhancedSceneEngine as SceneEngine
 from modules.audio_controller import NativeAudioController
 from modules.telemetry_system import SafeTelemetrySystem
 from modules.hardware_service import HardwareService, create_hardware_service
@@ -55,6 +53,7 @@ class WALLEBackend:
         self.websocket_server = None
         self.loop = None
         self.running = False
+        self.start_time = 0
         
         # Camera proxy tracking
         self.camera_proxy_pid = None
@@ -126,8 +125,17 @@ class WALLEBackend:
         """Setup graceful shutdown signal handlers"""
         def signal_handler(signum, frame):
             logger.info(f"🛑 Received signal {signum}, starting graceful shutdown...")
-            if self.loop:
-                self.loop.create_task(self.shutdown())
+            if self.loop and self.running:
+                # Create shutdown task
+                shutdown_task = self.loop.create_task(self.shutdown())
+                
+                # Set a timeout for the entire shutdown process
+                def force_exit():
+                    logger.warning("⚠️ Shutdown timeout exceeded - forcing exit")
+                    os._exit(1)
+                
+                # Force exit after 10 seconds max
+                self.loop.call_later(10.0, force_exit)
         
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
@@ -162,59 +170,41 @@ class WALLEBackend:
                 logger.info(f"🔌 Client {client_info} connection closed normally")
             except websockets.exceptions.ConnectionClosedOK:
                 logger.info(f"🔌 Client {client_info} disconnected cleanly")
-            except Exception as e:
-                logger.error(f"❌ Unexpected error with client {client_info}: {e}")
                 
         except Exception as e:
-            logger.error(f"❌ Client connection error: {e}")
+            logger.error(f"❌ WebSocket connection error for {client_info}: {e}")
         finally:
-            # Clean up client connection
-            self.connected_clients.discard(websocket)
-            if client_info:
-                logger.info(f"🔌 Client {client_info} removed from active connections")
+            # Clean up
+            if websocket in self.connected_clients:
+                self.connected_clients.remove(websocket)
+                logger.info(f"🔌 Client {client_info} removed from connected clients")
     
     async def send_initial_status(self, websocket):
         """Send initial system status to newly connected client"""
         try:
-            # Get comprehensive system status
             status = await self.get_system_status()
-            
-            # Send welcome message with system status
-            welcome_message = {
-                "type": "welcome",
-                "system_status": status,
-                "connected_clients": len(self.connected_clients),
-                "timestamp": time.time()
-            }
-            
-            await websocket.send(json.dumps(welcome_message))
-            logger.debug(f"📤 Sent initial status to client")
-            
+            await websocket.send(json.dumps({
+                "type": "initial_status",
+                "data": status
+            }))
         except Exception as e:
             logger.error(f"❌ Failed to send initial status: {e}")
     
     async def broadcast_message(self, message: Dict[str, Any]):
-        """Broadcast message to all connected WebSocket clients"""
+        """Broadcast message to all connected clients"""
         if not self.connected_clients:
             return
         
-        # Convert message to JSON
-        try:
-            json_message = json.dumps(message)
-        except (TypeError, ValueError) as e:
-            logger.error(f"❌ Failed to serialize broadcast message: {e}")
-            return
-        
-        # Send to all connected clients
+        message_json = json.dumps(message)
         disconnected_clients = set()
         
-        for websocket in self.connected_clients.copy():
+        for websocket in list(self.connected_clients):
             try:
-                await websocket.send(json_message)
+                await websocket.send(message_json)
             except websockets.exceptions.ConnectionClosed:
                 disconnected_clients.add(websocket)
             except Exception as e:
-                logger.error(f"❌ Failed to broadcast to client: {e}")
+                logger.debug(f"Error broadcasting to client: {e}")
                 disconnected_clients.add(websocket)
         
         # Remove disconnected clients
@@ -224,179 +214,100 @@ class WALLEBackend:
         if disconnected_clients:
             logger.debug(f"🔌 Removed {len(disconnected_clients)} disconnected clients")
     
-    # ==================== CALLBACK HANDLERS ====================
-    
-    async def handle_telemetry_alert(self, alert, reading):
-        """Handle telemetry alerts"""
-        await self.broadcast_message({
-            "type": "telemetry_alert",
-            "alert": {
-                "name": alert.name,
-                "level": alert.level,
-                "message": alert.message,
-                "triggered_at": alert.first_triggered
-            },
-            "reading": {
-                "battery_voltage": reading.battery_voltage,
-                "current": reading.current,
-                "temperature": reading.temperature
-            },
-            "timestamp": time.time()
-        })
-    
-    async def handle_emergency_stop_event(self):
-        """Handle emergency stop events from hardware"""
-        self.state = SystemState.EMERGENCY
-        
-        await self.broadcast_message({
-            "type": "emergency_stop",
-            "source": "hardware_interrupt",
-            "timestamp": time.time()
-        })
-    
-    async def handle_hardware_status_change(self, component: str, status: Dict[str, Any]):
-        """Handle hardware status changes"""
-        await self.broadcast_message({
-            "type": "hardware_status_changed",
-            "component": component,
-            "status": status,
-            "timestamp": time.time()
-        })
-    
-    async def handle_scene_started(self, scene_name: str, scene_data: Dict[str, Any]):
-        """Handle scene started event"""
-        await self.broadcast_message({
-            "type": "scene_started",
-            "scene_name": scene_name,
-            "duration": scene_data.get("duration", 2.0),
-            "timestamp": time.time()
-        })
-    
-    async def handle_scene_completed(self, scene_name: str, scene_data: Dict[str, Any], success: bool):
-        """Handle scene completed event"""
-        await self.broadcast_message({
-            "type": "scene_completed",
-            "scene_name": scene_name,
-            "success": success,
-            "timestamp": time.time()
-        })
-    
-    async def handle_scene_error(self, scene_name: str, scene_data: Dict[str, Any], error: str):
-        """Handle scene error event"""
-        await self.broadcast_message({
-            "type": "scene_error",
-            "scene_name": scene_name,
-            "error": error,
-            "timestamp": time.time()
-        })
-    
-    async def handle_track_started(self, track_name: str, file_path: str):
-        """Handle audio track started event"""
-        await self.broadcast_message({
-            "type": "audio_track_started",
-            "track_name": track_name,
-            "file_path": file_path,
-            "timestamp": time.time()
-        })
-    
-    async def handle_track_finished(self, track_name: str, reason: str):
-        """Handle audio track finished event"""
-        await self.broadcast_message({
-            "type": "audio_track_finished",
-            "track_name": track_name,
-            "reason": reason,
-            "timestamp": time.time()
-        })
-    
-    async def handle_volume_changed(self, new_volume: float):
-        """Handle volume change event"""
-        await self.broadcast_message({
-            "type": "audio_volume_changed",
-            "volume": new_volume,
-            "timestamp": time.time()
-        })
-    
     # ==================== CAMERA PROXY MANAGEMENT ====================
     
     def load_camera_proxy_pid(self):
-        """Load camera proxy PID from file if it exists"""
+        """Load camera proxy PID from file"""
         try:
-            pid_file = Path("camera_proxy.pid")
-            if pid_file.exists():
-                with open(pid_file, "r") as f:
-                    pid = int(f.read().strip())
+            if os.path.exists("camera_proxy.pid"):
+                with open("camera_proxy.pid", "r") as f:
+                    self.camera_proxy_pid = int(f.read().strip())
                     
                 # Check if process is still running
-                if psutil.pid_exists(pid):
-                    try:
-                        process = psutil.Process(pid)
-                        if "camera_proxy" in process.name().lower():
-                            self.camera_proxy_pid = pid
-                            logger.info(f"📷 Found running camera proxy (PID: {pid})")
-                        else:
-                            logger.warning(f"⚠️ PID {pid} exists but not camera proxy")
-                            pid_file.unlink(missing_ok=True)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        logger.warning(f"⚠️ Camera proxy PID {pid} not accessible")
-                        pid_file.unlink(missing_ok=True)
-                else:
-                    logger.info("📷 Camera proxy not currently running")
-                    pid_file.unlink(missing_ok=True)
+                try:
+                    os.kill(self.camera_proxy_pid, 0)
+                    logger.info(f"📷 Camera proxy found running (PID: {self.camera_proxy_pid})")
+                except ProcessLookupError:
+                    self.camera_proxy_pid = None
+                    os.remove("camera_proxy.pid")
+                    logger.info("📷 Camera proxy PID file stale, removed")
         except Exception as e:
-            logger.error(f"❌ Failed to load camera proxy PID: {e}")
+            logger.debug(f"Camera proxy PID check: {e}")
+            self.camera_proxy_pid = None
     
     def get_camera_proxy_status(self) -> Dict[str, Any]:
         """Get camera proxy status"""
-        status = {
-            "running": False,
-            "pid": self.camera_proxy_pid,
-            "stream_url": None,
-            "uptime": None
-        }
-        
-        if self.camera_proxy_pid and psutil.pid_exists(self.camera_proxy_pid):
+        if self.camera_proxy_pid:
             try:
-                process = psutil.Process(self.camera_proxy_pid)
-                status["running"] = True
-                status["uptime"] = time.time() - process.create_time()
-                
-                # Get IP for stream URL
-                import socket
-                hostname = socket.gethostname()
-                ip = socket.gethostbyname(hostname)
-                status["stream_url"] = f"http://{ip}:8081/stream"
-                
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                # Check if process exists
+                os.kill(self.camera_proxy_pid, 0)
+                return {
+                    "running": True,
+                    "pid": self.camera_proxy_pid,
+                    "port": 8081
+                }
+            except ProcessLookupError:
                 self.camera_proxy_pid = None
-                status["running"] = False
+                return {"running": False}
         
-        return status
+        return {"running": False}
     
-    # ==================== TELEMETRY SYSTEM ====================
+    async def handle_camera_config_update(self, data: Dict[str, Any]):
+        """Handle camera configuration updates from WebSocket"""
+        try:
+            config_updates = data.get("config", {})
+            logger.info(f"📷 Updating camera config: {list(config_updates.keys())}")
+            
+            # Apply camera configuration updates
+            # This would typically update camera_config.json and notify camera proxy
+            camera_config_path = Path("configs/camera_config.json")
+            
+            if camera_config_path.exists():
+                with open(camera_config_path, "r") as f:
+                    current_config = json.load(f)
+            else:
+                current_config = {}
+            
+            # Update configuration
+            current_config.update(config_updates)
+            
+            # Save updated configuration
+            with open(camera_config_path, "w") as f:
+                json.dump(current_config, f, indent=2)
+            
+            # Broadcast update to all clients
+            await self.broadcast_message({
+                "type": "camera_config_updated",
+                "config": current_config,
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to update camera config: {e}")
+    
+    # ==================== TELEMETRY LOOP ====================
     
     async def telemetry_loop(self):
-        """Main telemetry collection and broadcasting loop"""
+        """Background telemetry data collection and broadcasting"""
         logger.info("📊 Starting telemetry loop")
         
-        telemetry_interval = self.config.get("hardware", {}).get("timing", {}).get("telemetry_interval", 0.2)
+        # Get telemetry interval from config
+        telemetry_interval = self.config.get("hardware", {}).get("timing", {}).get("telemetry_interval", 1.0)
         
         while self.running:
             try:
-                # Get hardware status for telemetry
+
+                # Get hardware status
                 hardware_status = await self.hardware_service.get_comprehensive_status()
                 
-                # Update telemetry with hardware info
-                reading = await self.telemetry_system.update({
-                    "maestro1_connected": hardware_status.get("hardware", {}).get("maestro1", {}).get("connected", False),
-                    "maestro2_connected": hardware_status.get("hardware", {}).get("maestro2", {}).get("connected", False),
-                    "maestro1_status": hardware_status.get("hardware", {}).get("maestro1", {}),
-                    "maestro2_status": hardware_status.get("hardware", {}).get("maestro2", {}),
-                    "stepper_motor_status": hardware_status.get("hardware", {}).get("stepper_motor", {}),
-                    "audio_system_ready": self.audio_controller.connected,
-                    "stream_fps": 0.0,  # TODO: Get from camera proxy
-                    "stream_resolution": "640x480",  # TODO: Get from camera proxy
+                # Add camera status
+                hardware_status.update({
+                    "camera_proxy": self.get_camera_proxy_status(),
                     "stream_latency": 0.0  # TODO: Get from camera proxy
                 })
+
+                # Collect telemetry data
+                reading = await self.telemetry_system.update(hardware_status)
                 
                 # Broadcast telemetry data
                 telemetry_message = {
@@ -537,45 +448,160 @@ class WALLEBackend:
         self.running = False
         
         try:
-            # Stop telemetry loop
-            if self.telemetry_task:
-                self.telemetry_task.cancel()
-                try:
-                    await self.telemetry_task
-                except asyncio.CancelledError:
-                    pass
-            
-            # Close WebSocket server
-            if self.websocket_server:
-                self.websocket_server.close()
-                await self.websocket_server.wait_closed()
-            
-            # Notify clients of shutdown
+            # 1. First notify clients BEFORE closing connections
+            logger.info("📢 Notifying clients of shutdown...")
             await self.broadcast_message({
                 "type": "system_shutdown",
                 "timestamp": time.time()
             })
             
-            # Close client connections
+            # Give clients time to receive the message
+            await asyncio.sleep(0.5)
+            
+            # 2. Stop telemetry loop
+            if self.telemetry_task:
+                logger.info("⏹️ Stopping telemetry task...")
+                self.telemetry_task.cancel()
+                try:
+                    await asyncio.wait_for(self.telemetry_task, timeout=2.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    logger.info("✅ Telemetry task stopped")
+            
+            # 3. Close client connections first
             if self.connected_clients:
-                await asyncio.gather(
-                    *[client.close() for client in self.connected_clients],
-                    return_exceptions=True
-                )
+                logger.info(f"🔌 Closing {len(self.connected_clients)} client connections...")
+                close_tasks = []
+                for client in list(self.connected_clients):
+                    try:
+                        close_tasks.append(client.close())
+                    except Exception as e:
+                        logger.debug(f"Error closing client: {e}")
+                
+                if close_tasks:
+                    await asyncio.gather(*close_tasks, return_exceptions=True)
+                
+                self.connected_clients.clear()
             
-            # Cleanup hardware
-            self.hardware_service.cleanup()
+            # 4. Close WebSocket server
+            if self.websocket_server:
+                logger.info("🌐 Shutting down WebSocket server...")
+                self.websocket_server.close()
+                await asyncio.wait_for(self.websocket_server.wait_closed(), timeout=3.0)
             
-            # Cleanup audio
+            # 5. Stop scene engine and audio
+            logger.info("🎭 Stopping scene engine...")
+            await self.scene_engine.stop_current_scene()
+            
+            logger.info("🔊 Cleaning up audio controller...")
             self.audio_controller.cleanup()
             
-            # Cleanup telemetry
+            # 6. Cleanup hardware (this should be fast)
+            logger.info("🔧 Cleaning up hardware service...")
+            self.hardware_service.cleanup()
+            
+            # 7. Cleanup telemetry
+            logger.info("📊 Cleaning up telemetry system...")
             self.telemetry_system.cleanup()
             
             logger.info("✅ WALL-E Backend shutdown complete")
             
+        except asyncio.TimeoutError:
+            logger.warning("⚠️ Shutdown timeout - forcing exit")
         except Exception as e:
             logger.error(f"❌ Error during shutdown: {e}")
+        finally:
+            # Force exit if we're still hanging
+            await asyncio.sleep(0.1)
+    
+    # ==================== CALLBACK HANDLERS ====================
+    
+    async def handle_telemetry_alert(self, alert, reading):
+        """Handle telemetry alerts"""
+        await self.broadcast_message({
+            "type": "telemetry_alert",
+            "alert": {
+                "name": alert.name,
+                "level": alert.level,
+                "message": alert.message,
+                "triggered_at": alert.first_triggered
+            },
+            "reading": {
+                "battery_voltage": reading.battery_voltage,
+                "current": reading.current,
+                "temperature": reading.temperature
+            },
+            "timestamp": time.time()
+        })
+    
+    async def handle_emergency_stop_event(self):
+        """Handle emergency stop events from hardware"""
+        self.state = SystemState.EMERGENCY
+        
+        await self.broadcast_message({
+            "type": "emergency_stop",
+            "source": "hardware_interrupt",
+            "timestamp": time.time()
+        })
+    
+    async def handle_hardware_status_change(self, component: str, status: Dict[str, Any]):
+        """Handle hardware status changes"""
+        await self.broadcast_message({
+            "type": "hardware_status_changed",
+            "component": component,
+            "status": status,
+            "timestamp": time.time()
+        })
+    
+    async def handle_scene_started(self, scene_name: str, scene_data: Dict[str, Any]):
+        """Handle scene started event"""
+        await self.broadcast_message({
+            "type": "scene_started",
+            "scene_name": scene_name,
+            "duration": scene_data.get("duration", 2.0),
+            "timestamp": time.time()
+        })
+    
+    async def handle_scene_completed(self, scene_name: str, scene_data: Dict[str, Any], success: bool):
+        """Handle scene completed event"""
+        await self.broadcast_message({
+            "type": "scene_completed",
+            "scene_name": scene_name,
+            "success": success,
+            "timestamp": time.time()
+        })
+    
+    async def handle_scene_error(self, scene_name: str, scene_data: Dict[str, Any], error: str):
+        """Handle scene error event"""
+        await self.broadcast_message({
+            "type": "scene_error",
+            "scene_name": scene_name,
+            "error": error,
+            "timestamp": time.time()
+        })
+    
+    async def handle_track_started(self, track_name: str):
+        """Handle audio track started"""
+        await self.broadcast_message({
+            "type": "audio_track_started",
+            "track_name": track_name,
+            "timestamp": time.time()
+        })
+    
+    async def handle_track_finished(self, track_name: str):
+        """Handle audio track finished"""
+        await self.broadcast_message({
+            "type": "audio_track_finished",
+            "track_name": track_name,
+            "timestamp": time.time()
+        })
+    
+    async def handle_volume_changed(self, volume: float):
+        """Handle volume change"""
+        await self.broadcast_message({
+            "type": "audio_volume_changed",
+            "volume": volume,
+            "timestamp": time.time()
+        })
 
 
 # ==================== CONFIGURATION LOADING ====================
@@ -634,11 +660,8 @@ def setup_logging():
 # ==================== MAIN ENTRY POINT ====================
 
 async def main():
-    """Main entry point"""
-    # Setup logging
-    setup_logging()
-    
-    logger.info("🤖 WALL-E Backend System Starting...")
+    """Main entry point with proper error handling and cleanup"""
+    backend = None
     
     try:
         # Load configuration
@@ -649,23 +672,37 @@ async def main():
         await backend.start()
         
     except KeyboardInterrupt:
-        logger.info("🔑 Keyboard interrupt received")
+        logger.info("🛑 Received keyboard interrupt")
     except Exception as e:
-        logger.error(f"❌ Fatal error: {e}")
+        logger.error(f"❌ Fatal error in main: {e}")
         import traceback
         traceback.print_exc()
-        return 1
-    
-    return 0
-
+    finally:
+        # Ensure cleanup happens
+        if backend:
+            try:
+                logger.info("🧹 Running final cleanup...")
+                await asyncio.wait_for(backend.shutdown(), timeout=8.0)
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ Final cleanup timeout - forcing exit")
+            except Exception as e:
+                logger.error(f"❌ Error in final cleanup: {e}")
+        
+        # Final log message
+        logger.info("👋 WALL-E Backend exit complete")
 
 if __name__ == "__main__":
+    # Setup logging first
+    setup_logging()
+    
     try:
-        exit_code = asyncio.run(main())
-        sys.exit(exit_code)
+        # Run the main coroutine
+        asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n🛑 WALL-E Backend stopped by user")
-        sys.exit(0)
+        print("\n🛑 WALL-E Backend interrupted by user")
     except Exception as e:
         print(f"❌ Fatal error: {e}")
-        sys.exit(1)
+    finally:
+        # Force exit to ensure we don't hang
+        print("👋 Goodbye!")
+        os._exit(0)

@@ -310,7 +310,7 @@ install_python_deps() {
     # Hardware control packages
     print_status "Installing hardware control packages..."
     pip install \
-        RPi.GPIO \
+        rpi-lgpio \
         adafruit-circuitpython-ads1x15 \
         adafruit-blinka \
         lgpio

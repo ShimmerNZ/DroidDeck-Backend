@@ -34,7 +34,7 @@ GPIO_AVAILABLE = False
 try:
     import RPi.GPIO as GPIO
     GPIO_AVAILABLE = True
-    logger.info("✅ RPi.GPIO imported successfully")
+    logger.info("✅ GPIO library imported successfully")
 except ImportError:
     logger.warning("⚠️ RPi.GPIO not available - GPIO features disabled")
 
