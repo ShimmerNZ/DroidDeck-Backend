@@ -9,6 +9,9 @@ import logging
 import time
 from typing import Dict, List, Any, Optional, Callable, Tuple
 from dataclasses import dataclass
+import threading
+from enum import Enum
+import json
 
 # Import hardware modules
 from modules.shared_serial_manager import (
@@ -22,15 +25,18 @@ from modules.nema23_controller import NEMA23Controller, StepperConfig, StepperCo
 
 logger = logging.getLogger(__name__)
 
-# GPIO handling with fallbacks
-GPIO_AVAILABLE = False
-try:
-    import RPi.GPIO as GPIO
-    GPIO_AVAILABLE = True
-    logger.info("✅ GPIO library imported successfully")
-except ImportError:
-    logger.warning("⚠️ RPi.GPIO not available - GPIO features disabled")
-
+# Import our new GPIO compatibility layer
+from modules.gpio_compat import (
+    setup_output_pin, 
+    setup_input_pin, 
+    set_output, 
+    read_input, 
+    pulse_pin,
+    setup_button_callback,
+    cleanup_gpio,
+    is_gpio_available,
+    get_gpio_library
+)
 
 
 @dataclass
@@ -58,7 +64,7 @@ class HardwareConfig:
     servo_update_rate: float = 0.02
 
 class SafeMotorController:
-    """Safe motor controller with GPIO fallback"""
+    """Safe motor controller with modern GPIO compatibility"""
     
     def __init__(self, step_pin: int, dir_pin: int, enable_pin: int):
         self.step_pin = step_pin
@@ -68,40 +74,58 @@ class SafeMotorController:
         self.setup_gpio()
     
     def setup_gpio(self):
-        """Setup GPIO pins with error handling"""
-        if not GPIO_AVAILABLE:
-            logger.warning("⚠️ GPIO not available - motor control disabled")
+        """Setup GPIO pins using compatibility layer"""
+        if not is_gpio_available():
+            logger.warning("GPIO not available - motor control disabled")
             return
             
         try:
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(self.step_pin, GPIO.OUT)
-            GPIO.setup(self.dir_pin, GPIO.OUT)
-            GPIO.setup(self.enable_pin, GPIO.OUT)
-            GPIO.output(self.enable_pin, GPIO.LOW)
-            self.gpio_setup = True
-            logger.info("✅ Motor controller GPIO initialized")
+            step_ok = setup_output_pin(self.step_pin)
+            dir_ok = setup_output_pin(self.dir_pin)
+            enable_ok = setup_output_pin(self.enable_pin, initial_state=True)  # Start disabled
+            
+            if all([step_ok, dir_ok, enable_ok]):
+                self.gpio_setup = True
+                logger.info(f"Motor controller GPIO setup complete using {get_gpio_library()}")
+            else:
+                logger.error("Failed to setup motor controller GPIO pins")
+            
         except Exception as e:
-            logger.error(f"❌ Failed to setup motor GPIO: {e}")
+            logger.error(f"Motor controller GPIO setup failed: {e}")
             self.gpio_setup = False
-    
-    def emergency_stop(self):
-        """Emergency stop motor"""
-        if self.gpio_setup:
-            try:
-                GPIO.output(self.enable_pin, GPIO.HIGH)
-                logger.warning("🚨 Motor emergency stop activated")
-            except Exception as e:
-                logger.error(f"❌ Failed to stop motor: {e}")
     
     def enable(self):
         """Enable motor"""
         if self.gpio_setup:
-            try:
-                GPIO.output(self.enable_pin, GPIO.LOW)
-                logger.info("🔋 Motor enabled")
-            except Exception as e:
-                logger.error(f"❌ Failed to enable motor: {e}")
+            return set_output(self.enable_pin, False)  # Enable on LOW
+        return False
+    
+    def disable(self):
+        """Disable motor"""
+        if self.gpio_setup:
+            return set_output(self.enable_pin, True)   # Disable on HIGH
+        return False
+    
+    def step(self):
+        """Send single step pulse"""
+        if self.gpio_setup:
+            success = set_output(self.step_pin, True)
+            if success:
+                time.sleep(0.000005)  # 5 microsecond pulse
+                return set_output(self.step_pin, False)
+        return False
+    
+    def set_direction(self, forward: bool):
+        """Set direction"""
+        if self.gpio_setup:
+            return set_output(self.dir_pin, forward)
+        return False
+    
+    def cleanup(self):
+        """Cleanup resources"""
+        if self.gpio_setup:
+            self.disable()
+
 
 class HardwareService:
     """
@@ -111,18 +135,17 @@ class HardwareService:
     
     def __init__(self, config: HardwareConfig):
         self.config = config
+        self.initialization_complete = False
+        self.emergency_stop_active = False
         
         # Hardware components
-        self.shared_managers: Dict[str, EnhancedSharedSerialPortManager] = {}
         self.maestro1: Optional[EnhancedMaestroControllerShared] = None
         self.maestro2: Optional[EnhancedMaestroControllerShared] = None
         self.stepper_controller: Optional[NEMA23Controller] = None
         self.stepper_interface: Optional[StepperControlInterface] = None
         self.motor: Optional[SafeMotorController] = None
         
-        # Status tracking
-        self.initialization_complete = False
-        self.emergency_stop_active = False
+        self.shared_managers: Dict[str, EnhancedSharedSerialPortManager] = {}
         
         # Performance metrics for batch commands
         self.batch_stats = {
@@ -134,18 +157,18 @@ class HardwareService:
         }
         
         # Callbacks for hardware events
-        self.emergency_stop_callbacks: List[Callable] = []
-        self.hardware_status_callbacks: List[Callable] = []
+        self.emergency_stop_callbacks = []
+        self.hardware_status_callbacks = []
         
         # Initialize hardware
         self.initialize_hardware()
         
-        logger.info("🔧 Enhanced Hardware service initialized with batch command support")
+        logger.info("Enhanced Hardware service initialized with batch command support")
     
     def initialize_hardware(self) -> bool:
         """Initialize all hardware components"""
         try:
-            logger.info("🔧 Initializing hardware components...")
+            logger.info("Initializing hardware components...")
             
             # Initialize shared serial managers
             success = self.setup_shared_serial()
@@ -154,29 +177,21 @@ class HardwareService:
             if success:
                 success = self.setup_stepper_system()
             
-            # Initialize basic motor controller
-            if success:
-                success = self.setup_motor_controller()
-            
             # Setup safety systems
             if success:
                 success = self.setup_safety_systems()
             
-            # Test batch command functionality
-            if success:
-                asyncio.create_task(self._test_batch_functionality_on_startup())
-            
             self.initialization_complete = success
             
             if success:
-                logger.info("✅ Enhanced hardware initialization complete with batch command support")
+                logger.info("Hardware initialization complete with batch command support")
             else:
-                logger.error("❌ Hardware initialization failed")
+                logger.error("Hardware initialization failed")
             
             return success
             
         except Exception as e:
-            logger.error(f"❌ Hardware initialization error: {e}")
+            logger.error(f"Hardware initialization error: {e}")
             return False
     
     async def _test_batch_functionality_on_startup(self):
@@ -185,67 +200,67 @@ class HardwareService:
             # Wait for initialization to complete
             await asyncio.sleep(2.0)
             
-            logger.info("🧪 Testing batch command functionality...")
+            logger.info("Testing batch command functionality...")
             test_results = await self.test_batch_command_functionality()
             
             if test_results["overall_result"] == "EXCELLENT":
-                logger.info("✅ Batch commands fully operational")
+                logger.info("Batch commands fully operational")
             elif test_results["overall_result"] == "PARTIAL":
-                logger.warning("⚠️ Batch commands partially operational")
+                logger.warning("Batch commands partially operational")
             else:
-                logger.warning("⚠️ Batch commands not available - using individual command fallback")
+                logger.warning("Batch commands not available - using individual command fallback")
             
         except Exception as e:
-            logger.error(f"❌ Batch functionality test failed: {e}")
+            logger.error(f"Batch functionality test failed: {e}")
 
     def setup_shared_serial(self) -> bool:
-            """Setup shared serial port managers"""
-            try:
-                logger.info("📡 Setting up enhanced shared serial communication...")
-                
-                # Create shared manager for Maestro port
-                maestro_manager = get_shared_manager(
-                    self.config.maestro_port, 
-                    self.config.maestro_baud_rate
-                )
-                self.shared_managers["maestro_port"] = maestro_manager
-                
-                # Create Maestro controllers sharing the same serial port (using enhanced classes)
-                self.maestro1 = EnhancedMaestroControllerShared(
-                    device_id="maestro1",
-                    device_number=self.config.maestro1_device_number,
-                    shared_manager=maestro_manager
-                )
-                
-                self.maestro2 = EnhancedMaestroControllerShared(
-                    device_id="maestro2", 
-                    device_number=self.config.maestro2_device_number,
-                    shared_manager=maestro_manager
-                )
-                
-                # Start the controllers
-                maestro1_started = self.maestro1.start()
-                maestro2_started = self.maestro2.start()
-                
-                success = maestro1_started and maestro2_started
-                
-                if success:
-                    logger.info("✅ Enhanced shared serial communication setup complete")
-                    logger.info(f"🎛️ Maestro 1: Device #{self.config.maestro1_device_number} - Batch commands: ✅")
-                    logger.info(f"🎛️ Maestro 2: Device #{self.config.maestro2_device_number} - Batch commands: ✅")
-                else:
-                    logger.error("❌ Failed to start Maestro controllers")
-                
-                return success
-                
-            except Exception as e:
-                logger.error(f"❌ Shared serial setup error: {e}")
-                return False
+        """Setup shared serial port managers"""
+        try:
+            logger.info("Setting up enhanced shared serial communication...")
+            
+            # Create shared manager for Maestro port
+            maestro_manager = get_shared_manager(
+                self.config.maestro_port, 
+                self.config.maestro_baud_rate
+            )
+            self.shared_managers["maestro_port"] = maestro_manager
+            
+            # Create Maestro controllers sharing the same serial port (using enhanced classes)
+            self.maestro1 = EnhancedMaestroControllerShared(
+                device_id="maestro1",
+                device_number=self.config.maestro1_device_number,
+                shared_manager=maestro_manager
+            )
+            
+            self.maestro2 = EnhancedMaestroControllerShared(
+                device_id="maestro2", 
+                device_number=self.config.maestro2_device_number,
+                shared_manager=maestro_manager
+            )
+            
+            # Start the controllers
+            maestro1_started = self.maestro1.start()
+            maestro2_started = self.maestro2.start()
+            
+            success = maestro1_started and maestro2_started
+            
+            if success:
+                logger.info("Enhanced shared serial communication setup complete")
+                logger.info(f"Maestro 1: Device #{self.config.maestro1_device_number} - Batch commands: enabled")
+                logger.info(f"Maestro 2: Device #{self.config.maestro2_device_number} - Batch commands: enabled")
+            else:
+                logger.error("Failed to start Maestro controllers")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Shared serial setup error: {e}")
+            return False
 
     def setup_stepper_system(self) -> bool:
         """Setup NEMA 23 stepper motor system"""
         try:
-            logger.info("🔄 Setting up NEMA 23 stepper system...")
+            logger.info("Setting up NEMA 23 stepper system...")
             
             # Create stepper configuration
             stepper_config = StepperConfig(
@@ -261,73 +276,62 @@ class HardwareService:
             # Create WebSocket interface
             self.stepper_interface = StepperControlInterface(self.stepper_controller)
             
-            logger.info("✅ NEMA 23 stepper system initialized")
-            return True
+            if self.stepper_controller.gpio_initialized:
+                logger.info("NEMA 23 stepper system initialized")
+                return True
+            else:
+                logger.warning("NEMA 23 stepper system initialized but GPIO unavailable")
+                return True  # Don't fail - system can run without stepper
             
         except Exception as e:
-            logger.error(f"❌ Stepper system setup failed: {e}")
-            return False
-    
-    def setup_motor_controller(self) -> bool:
-        """Setup basic motor controller"""
-        try:
-            self.motor = SafeMotorController(
-                self.config.motor_step_pin,
-                self.config.motor_dir_pin,
-                self.config.motor_enable_pin
-            )
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Motor controller setup failed: {e}")
+            logger.error(f"Stepper system setup failed: {e}")
             return False
     
     def setup_safety_systems(self) -> bool:
         """Setup emergency stop and safety systems"""
-        if not GPIO_AVAILABLE:
-            logger.warning("⚠️ GPIO not available - safety systems disabled")
+        if not is_gpio_available():
+            logger.warning("GPIO not available - safety systems disabled")
             return True  # Don't fail initialization
             
         try:
-            GPIO.setup(self.config.emergency_stop_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            GPIO.setup(self.config.limit_switch_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            
-            # Add interrupt handler for emergency stop
-            GPIO.add_event_detect(
-                self.config.emergency_stop_pin, 
-                GPIO.FALLING, 
-                callback=self._emergency_stop_interrupt,
-                bouncetime=300
+            # Setup emergency stop button (normally closed, active low)
+            estop_ok = setup_button_callback(
+                self.config.emergency_stop_pin,
+                self._emergency_stop_triggered,
+                edge="falling"  # Trigger when button pressed (goes LOW)
             )
             
-            logger.info("✅ Safety systems initialized")
+            if estop_ok:
+                logger.info("Emergency stop system configured")
+            
+            logger.info("Limit switch handled by stepper controller")
+            
+            logger.info(f"Safety systems initialized using {get_gpio_library()}")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to setup safety systems: {e}")
+            logger.error(f"Failed to setup safety systems: {e}")
             return False
     
-    def _emergency_stop_interrupt(self, channel):
-        """GPIO interrupt handler for emergency stop"""
-        logger.critical("🚨 HARDWARE EMERGENCY STOP TRIGGERED")
+    def _emergency_stop_triggered(self):
+        """Handle emergency stop button press"""
+        logger.critical("EMERGENCY STOP ACTIVATED!")
         self.emergency_stop_active = True
         
-        # Immediate hardware stop
-        self.emergency_stop_all_sync()
+        # Stop all motors immediately
+        if self.stepper_controller:
+            self.stepper_controller.emergency_stop()
         
-        # Notify callbacks asynchronously
-        for callback in self.emergency_stop_callbacks:
-            try:
-                # Schedule callback in event loop if available
+        if self.motor:
+            self.motor.disable()
+        
+        # Trigger callback if registered
+        if hasattr(self, 'emergency_stop_callbacks'):
+            for callback in self.emergency_stop_callbacks:
                 try:
-                    loop = asyncio.get_running_loop()
-                    asyncio.run_coroutine_threadsafe(callback(), loop)
-                except RuntimeError:
-                    # No event loop running, call directly (may block)
-                    asyncio.run(callback())
-            except Exception as e:
-                logger.error(f"Emergency stop callback error: {e}")
+                    callback()
+                except Exception as e:
+                    logger.error(f"Emergency stop callback error: {e}")
     
     # ==================== ENHANCED BATCH SERVO CONTROL METHODS ====================
     
@@ -344,17 +348,9 @@ class HardwareService:
             
         Returns:
             bool: True if batch command sent successfully
-            
-        Example:
-            servo_configs = [
-                {"channel": 0, "target": 1500, "speed": 50},
-                {"channel": 1, "target": 1200, "speed": 30, "acceleration": 20},
-                {"channel": 2, "target": 1800}
-            ]
-            success = await hardware_service.set_multiple_servo_targets("maestro1", servo_configs)
         """
         if not servo_configs:
-            logger.warning("⚠️ No servo configurations provided for batch command")
+            logger.warning("No servo configurations provided for batch command")
             return False
         
         try:
@@ -376,11 +372,11 @@ class HardwareService:
             elif maestro_id == "maestro2":
                 maestro = self.maestro2
             else:
-                logger.error(f"❌ Unknown maestro ID: {maestro_id}")
+                logger.error(f"Unknown maestro ID: {maestro_id}")
                 return False
             
             if not maestro or not maestro.connected:
-                logger.error(f"❌ Maestro {maestro_id} not connected")
+                logger.error(f"Maestro {maestro_id} not connected")
                 return False
             
             # Check if enhanced maestro supports batch commands
@@ -401,20 +397,18 @@ class HardwareService:
                     actual_batch_time = execution_time * 1000
                     self.batch_stats["time_saved_ms"] += max(0, estimated_individual_time - actual_batch_time)
                     
-                    logger.debug(f"🎯 Sent batch command to {maestro_id}: {servo_count} servos in {execution_time*1000:.1f}ms")
-                    servo_list = [f"ch{c['channel']}→{c['target']}" for c in servo_configs]
-                    logger.debug(f"   Servos: {servo_list}")
+                    logger.debug(f"Sent batch command to {maestro_id}: {servo_count} servos in {execution_time*1000:.1f}ms")
                     return True
                 else:
-                    logger.warning(f"⚠️ Enhanced batch command failed for {maestro_id}, falling back to individual commands")
+                    logger.warning(f"Enhanced batch command failed for {maestro_id}, falling back to individual commands")
                     self.batch_stats["batch_command_errors"] += 1
             
             # Fallback: Send individual commands if batch not supported
-            logger.debug(f"📤 Using individual commands for {maestro_id}: {len(servo_configs)} servos")
+            logger.debug(f"Using individual commands for {maestro_id}: {len(servo_configs)} servos")
             return await self._send_individual_servo_commands(maestro_id, servo_configs, priority)
             
         except Exception as e:
-            logger.error(f"❌ Batch servo command error for {maestro_id}: {e}")
+            logger.error(f"Batch servo command error for {maestro_id}: {e}")
             self.batch_stats["batch_command_errors"] += 1
             return False
     
@@ -433,7 +427,7 @@ class HardwareService:
                 acceleration = config.get('acceleration')
                 
                 if channel is None or target is None:
-                    logger.error(f"❌ Invalid servo config: {config}")
+                    logger.error(f"Invalid servo config: {config}")
                     success = False
                     continue
                 
@@ -444,20 +438,20 @@ class HardwareService:
                 if speed is not None:
                     speed_success = await self.set_servo_speed(channel_key, speed)
                     if not speed_success:
-                        logger.warning(f"⚠️ Failed to set speed for {channel_key}")
+                        logger.warning(f"Failed to set speed for {channel_key}")
                         success = False
                 
                 # Set acceleration if specified
                 if acceleration is not None:
                     accel_success = await self.set_servo_acceleration(channel_key, acceleration)
                     if not accel_success:
-                        logger.warning(f"⚠️ Failed to set acceleration for {channel_key}")
+                        logger.warning(f"Failed to set acceleration for {channel_key}")
                         success = False
                 
                 # Set target position
                 pos_success = await self.set_servo_position(channel_key, target, priority)
                 if not pos_success:
-                    logger.warning(f"⚠️ Failed to set position for {channel_key}")
+                    logger.warning(f"Failed to set position for {channel_key}")
                     success = False
                 
                 # Update individual command statistics
@@ -466,7 +460,7 @@ class HardwareService:
             return success
             
         except Exception as e:
-            logger.error(f"❌ Individual servo commands error: {e}")
+            logger.error(f"Individual servo commands error: {e}")
             return False
     
     async def set_scene_servo_positions(self, scene_servos: Dict[str, Dict[str, Any]], 
@@ -481,17 +475,9 @@ class HardwareService:
             
         Returns:
             bool: True if all servo movements were sent successfully
-            
-        Example:
-            scene_servos = {
-                "m1_ch0": {"target": 1500, "speed": 50, "acceleration": 30},
-                "m1_ch1": {"target": 1200, "speed": 40},
-                "m2_ch0": {"target": 1800, "speed": 60}
-            }
-            success = await hardware_service.set_scene_servo_positions(scene_servos)
         """
         if not scene_servos:
-            logger.debug("ℹ️ No servo movements in scene")
+            logger.debug("No servo movements in scene")
             return True
         
         try:
@@ -523,10 +509,10 @@ class HardwareService:
                     elif maestro_num == 2:
                         maestro2_servos.append(servo_config)
                     else:
-                        logger.warning(f"⚠️ Invalid maestro number in servo ID: {servo_id}")
+                        logger.warning(f"Invalid maestro number in servo ID: {servo_id}")
                         
                 except Exception as e:
-                    logger.error(f"❌ Failed to parse servo {servo_id}: {e}")
+                    logger.error(f"Failed to parse servo {servo_id}: {e}")
                     return False
             
             # Send batch commands to each Maestro
@@ -539,9 +525,9 @@ class HardwareService:
                 success &= maestro1_success
                 
                 if maestro1_success:
-                    logger.debug(f"🎯 Maestro 1 batch: {len(maestro1_servos)} servos")
+                    logger.debug(f"Maestro 1 batch: {len(maestro1_servos)} servos")
                 else:
-                    logger.warning(f"⚠️ Maestro 1 batch failed")
+                    logger.warning("Maestro 1 batch failed")
             
             if maestro2_servos:
                 maestro2_success = await self.set_multiple_servo_targets(
@@ -550,23 +536,23 @@ class HardwareService:
                 success &= maestro2_success
                 
                 if maestro2_success:
-                    logger.debug(f"🎯 Maestro 2 batch: {len(maestro2_servos)} servos")
+                    logger.debug(f"Maestro 2 batch: {len(maestro2_servos)} servos")
                 else:
-                    logger.warning(f"⚠️ Maestro 2 batch failed")
+                    logger.warning("Maestro 2 batch failed")
             
             total_servos = len(maestro1_servos) + len(maestro2_servos)
             batch_count = (1 if maestro1_servos else 0) + (1 if maestro2_servos else 0)
             execution_time = time.time() - start_time
             
             if success:
-                logger.info(f"✅ Scene servos: {total_servos} servos via {batch_count} batch commands in {execution_time*1000:.1f}ms")
+                logger.info(f"Scene servos: {total_servos} servos via {batch_count} batch commands in {execution_time*1000:.1f}ms")
             else:
-                logger.warning(f"⚠️ Scene servos partially failed: {total_servos} servos")
+                logger.warning(f"Scene servos partially failed: {total_servos} servos")
             
             return success
             
         except Exception as e:
-            logger.error(f"❌ Scene servo positioning error: {e}")
+            logger.error(f"Scene servo positioning error: {e}")
             return False
     
     def _parse_servo_id(self, servo_id: str) -> Tuple[int, int]:
@@ -608,7 +594,7 @@ class HardwareService:
             return maestro_num, channel
             
         except (ValueError, IndexError) as e:
-            logger.error(f"❌ Failed to parse servo ID '{servo_id}': {e}")
+            logger.error(f"Failed to parse servo ID '{servo_id}': {e}")
             raise ValueError(f"Invalid servo ID format: {servo_id}")
     
     # ==================== ORIGINAL SERVO CONTROL METHODS (ENHANCED) ====================
@@ -643,16 +629,16 @@ class HardwareService:
             success = maestro.set_target(channel, position, priority=cmd_priority)
             
             if success:
-                logger.debug(f"🎯 Servo {channel_key} -> {position} ({priority})")
+                logger.debug(f"Servo {channel_key} -> {position} ({priority})")
                 # Update individual command statistics
                 self.batch_stats["individual_commands_sent"] += 1
             else:
-                logger.warning(f"⚠️ Failed to set servo {channel_key}")
+                logger.warning(f"Failed to set servo {channel_key}")
             
             return success
             
         except Exception as e:
-            logger.error(f"❌ Servo position error: {e}")
+            logger.error(f"Servo position error: {e}")
             return False
     
     async def set_servo_speed(self, channel_key: str, speed: int) -> bool:
@@ -662,11 +648,11 @@ class HardwareService:
             maestro = self.maestro1 if maestro_num == 1 else self.maestro2
             
             success = maestro.set_speed(channel, speed)
-            logger.debug(f"⚡ Servo speed {channel_key} -> {speed}")
+            logger.debug(f"Servo speed {channel_key} -> {speed}")
             return success
             
         except Exception as e:
-            logger.error(f"❌ Servo speed error: {e}")
+            logger.error(f"Servo speed error: {e}")
             return False
     
     async def set_servo_acceleration(self, channel_key: str, acceleration: int) -> bool:
@@ -676,11 +662,11 @@ class HardwareService:
             maestro = self.maestro1 if maestro_num == 1 else self.maestro2
             
             success = maestro.set_acceleration(channel, acceleration)
-            logger.debug(f"🚀 Servo acceleration {channel_key} -> {acceleration}")
+            logger.debug(f"Servo acceleration {channel_key} -> {acceleration}")
             return success
             
         except Exception as e:
-            logger.error(f"❌ Servo acceleration error: {e}")
+            logger.error(f"Servo acceleration error: {e}")
             return False
     
     async def get_servo_position(self, channel_key: str, callback: Callable) -> bool:
@@ -693,7 +679,7 @@ class HardwareService:
             return success
             
         except Exception as e:
-            logger.error(f"❌ Get servo position error: {e}")
+            logger.error(f"Get servo position error: {e}")
             return False
     
     async def get_all_servo_positions(self, maestro_num: int, callback: Callable) -> bool:
@@ -704,7 +690,7 @@ class HardwareService:
             return success
             
         except Exception as e:
-            logger.error(f"❌ Get all servo positions error: {e}")
+            logger.error(f"Get all servo positions error: {e}")
             return False
     
     async def get_maestro_info(self, maestro_num: int) -> Optional[Dict[str, Any]]:
@@ -724,7 +710,7 @@ class HardwareService:
             return info
             
         except Exception as e:
-            logger.error(f"❌ Get Maestro info error: {e}")
+            logger.error(f"Get Maestro info error: {e}")
             return None
     
     # ==================== STEPPER MOTOR METHODS ====================
@@ -742,7 +728,7 @@ class HardwareService:
             return response
             
         except Exception as e:
-            logger.error(f"❌ Stepper command error: {e}")
+            logger.error(f"Stepper command error: {e}")
             return {
                 "success": False,
                 "message": str(e)
@@ -758,7 +744,7 @@ class HardwareService:
             return success
             
         except Exception as e:
-            logger.error(f"❌ Stepper homing error: {e}")
+            logger.error(f"Stepper homing error: {e}")
             return False
     
     def get_stepper_status(self) -> Dict[str, Any]:
@@ -770,14 +756,14 @@ class HardwareService:
             return self.stepper_controller.get_status()
             
         except Exception as e:
-            logger.error(f"❌ Get stepper status error: {e}")
+            logger.error(f"Get stepper status error: {e}")
             return {"available": False, "error": str(e)}
     
     # ==================== EMERGENCY STOP METHODS ====================
     
     async def emergency_stop_all(self):
         """Async emergency stop all hardware"""
-        logger.critical("🚨 EMERGENCY STOP - All Hardware")
+        logger.critical("EMERGENCY STOP - All Hardware")
         self.emergency_stop_active = True
         
         try:
@@ -793,7 +779,7 @@ class HardwareService:
             
             # Stop basic motor
             if self.motor:
-                self.motor.emergency_stop()
+                self.motor.disable()
             
             # Notify emergency stop callbacks
             for callback in self.emergency_stop_callbacks:
@@ -802,14 +788,14 @@ class HardwareService:
                 except Exception as e:
                     logger.error(f"Emergency stop callback error: {e}")
             
-            logger.critical("🛑 Emergency stop complete")
+            logger.critical("Emergency stop complete")
             
         except Exception as e:
-            logger.error(f"❌ Emergency stop error: {e}")
+            logger.error(f"Emergency stop error: {e}")
     
     def emergency_stop_all_sync(self):
         """Synchronous emergency stop for interrupt handlers"""
-        logger.critical("🚨 SYNC EMERGENCY STOP - All Hardware")
+        logger.critical("SYNC EMERGENCY STOP - All Hardware")
         
         try:
             # Stop all hardware immediately (synchronous calls only)
@@ -828,18 +814,18 @@ class HardwareService:
                         pass
             
             if self.motor:
-                self.motor.emergency_stop()
+                self.motor.disable()
             
             if self.stepper_controller:
                 self.stepper_controller.emergency_stop()
             
         except Exception as e:
-            logger.error(f"❌ Sync emergency stop error: {e}")
+            logger.error(f"Sync emergency stop error: {e}")
     
     def reset_emergency_stop(self):
         """Reset emergency stop state"""
         self.emergency_stop_active = False
-        logger.info("🔄 Emergency stop state reset")
+        logger.info("Emergency stop state reset")
     
     # ==================== PERFORMANCE MONITORING AND STATISTICS ====================
     
@@ -921,7 +907,7 @@ class HardwareService:
             return stats
             
         except Exception as e:
-            logger.error(f"❌ Failed to get batch command performance stats: {e}")
+            logger.error(f"Failed to get batch command performance stats: {e}")
             return {"error": str(e)}
     
     def _calculate_efficiency_rating(self, batch_commands: int, total_commands: int) -> str:
@@ -957,7 +943,7 @@ class HardwareService:
         }
         
         try:
-            logger.info("🧪 Testing batch command functionality...")
+            logger.info("Testing batch command functionality...")
             
             # Test Maestro 1
             if self.maestro1 and self.maestro1.connected:
@@ -975,15 +961,15 @@ class HardwareService:
                     try:
                         success = await self.set_multiple_servo_targets("maestro1", test_servos, "low")
                         test_results["maestro1_batch_test"]["test_passed"] = success
-                        logger.info(f"✅ Maestro 1 batch test: {'PASSED' if success else 'FAILED'}")
+                        logger.info(f"Maestro 1 batch test: {'PASSED' if success else 'FAILED'}")
                     except Exception as e:
                         test_results["maestro1_batch_test"]["error"] = str(e)
-                        logger.warning(f"⚠️ Maestro 1 batch test failed: {e}")
+                        logger.warning(f"Maestro 1 batch test failed: {e}")
                 else:
-                    logger.info("ℹ️ Maestro 1 does not support batch commands")
+                    logger.info("Maestro 1 does not support batch commands")
             else:
                 test_results["maestro1_batch_test"]["error"] = "Not connected"
-                logger.warning("⚠️ Maestro 1 not connected for batch test")
+                logger.warning("Maestro 1 not connected for batch test")
             
             # Test Maestro 2
             if self.maestro2 and self.maestro2.connected:
@@ -1001,15 +987,15 @@ class HardwareService:
                     try:
                         success = await self.set_multiple_servo_targets("maestro2", test_servos, "low")
                         test_results["maestro2_batch_test"]["test_passed"] = success
-                        logger.info(f"✅ Maestro 2 batch test: {'PASSED' if success else 'FAILED'}")
+                        logger.info(f"Maestro 2 batch test: {'PASSED' if success else 'FAILED'}")
                     except Exception as e:
                         test_results["maestro2_batch_test"]["error"] = str(e)
-                        logger.warning(f"⚠️ Maestro 2 batch test failed: {e}")
+                        logger.warning(f"Maestro 2 batch test failed: {e}")
                 else:
-                    logger.info("ℹ️ Maestro 2 does not support batch commands")
+                    logger.info("Maestro 2 does not support batch commands")
             else:
                 test_results["maestro2_batch_test"]["error"] = "Not connected"
-                logger.warning("⚠️ Maestro 2 not connected for batch test")
+                logger.warning("Maestro 2 not connected for batch test")
             
             # Determine overall result
             maestro1_ok = test_results["maestro1_batch_test"]["test_passed"]
@@ -1026,11 +1012,11 @@ class HardwareService:
             else:
                 test_results["overall_result"] = "NOT_SUPPORTED"
             
-            logger.info(f"🧪 Batch command test complete: {test_results['overall_result']}")
+            logger.info(f"Batch command test complete: {test_results['overall_result']}")
             return test_results
             
         except Exception as e:
-            logger.error(f"❌ Batch command test error: {e}")
+            logger.error(f"Batch command test error: {e}")
             test_results["overall_result"] = "ERROR"
             test_results["error"] = str(e)
             return test_results
@@ -1038,17 +1024,20 @@ class HardwareService:
     # ==================== STATUS AND MONITORING ====================
     
     async def get_comprehensive_status(self) -> Dict[str, Any]:
-        """Get comprehensive hardware status with enhanced batch command information"""
+        """Get comprehensive hardware status with enhanced batch command information and Pi 5 GPIO compatibility"""
         try:
             hardware_status = {
                 "initialization_complete": self.initialization_complete,
                 "emergency_stop_active": self.emergency_stop_active,
+                "gpio_library": get_gpio_library(),
+                "gpio_available": is_gpio_available(),
                 "hardware": {
                     "maestro1": self.maestro1.get_status_dict() if self.maestro1 else {"connected": False},
                     "maestro2": self.maestro2.get_status_dict() if self.maestro2 else {"connected": False},
                     "stepper_motor": self.get_stepper_status(),
                     "basic_motor": {
-                        "gpio_setup": self.motor.gpio_setup if self.motor else False
+                        "gpio_setup": self.motor.gpio_setup if self.motor else False,
+                        "gpio_library": get_gpio_library() if self.motor and self.motor.gpio_setup else "none"
                     }
                 },
                 "shared_managers": {name: manager.get_stats() for name, manager in self.shared_managers.items()},
@@ -1056,10 +1045,14 @@ class HardwareService:
                     "shared_serial": True,
                     "priority_commands": True,
                     "async_responses": True,
-                    "stepper_control": bool(self.stepper_controller),
-                    "gpio": GPIO_AVAILABLE,
+                    "stepper_control": bool(self.stepper_controller and 
+                                        hasattr(self.stepper_controller, 'gpio_initialized') and 
+                                        self.stepper_controller.gpio_initialized),
+                    "gpio": is_gpio_available(),
+                    "gpio_library": get_gpio_library(),
                     "batch_commands": True,
-                    "enhanced_performance": True
+                    "enhanced_performance": True,
+                    "pi5_compatible": True
                 },
                 "servo_counts": {
                     "maestro1_channels": self.maestro1.channel_count if self.maestro1 else 0,
@@ -1069,7 +1062,18 @@ class HardwareService:
                         (self.maestro2.channel_count if self.maestro2 else 0)
                     )
                 },
-                "batch_command_stats": self.batch_stats.copy()
+                "batch_command_stats": self.batch_stats.copy(),
+                "gpio_status": {
+                    "library_used": get_gpio_library(),
+                    "available": is_gpio_available(),
+                    "emergency_stop_pin": self.config.emergency_stop_pin,
+                    "limit_switch_pin": self.config.limit_switch_pin,
+                    "motor_step_pin": self.config.motor_step_pin,
+                    "motor_dir_pin": self.config.motor_dir_pin,
+                    "motor_enable_pin": self.config.motor_enable_pin,
+                    "emergency_stop_state": self._get_emergency_stop_state(),
+                    "limit_switch_state": self._get_limit_switch_state()
+                }
             }
             
             # Add batch command support status
@@ -1081,12 +1085,45 @@ class HardwareService:
                 "performance_improvement_available": True
             }
             
+            # Add stepper motor detailed status if available
+            if self.stepper_controller:
+                stepper_status = self.stepper_controller.get_status()
+                hardware_status["hardware"]["stepper_motor"].update({
+                    "detailed_status": stepper_status,
+                    "gpio_library": stepper_status.get("gpio_library", "none")
+                })
+            
             return hardware_status
             
         except Exception as e:
-            logger.error(f"❌ Failed to get comprehensive status: {e}")
+            logger.error(f"Failed to get comprehensive status: {e}")
             return {"error": str(e)}
-    
+
+    def _get_emergency_stop_state(self) -> Optional[bool]:
+        """Get current emergency stop button state"""
+        if not is_gpio_available():
+            return None
+        
+        try:
+            # Emergency stop is active when pin is LOW (button pressed)
+            state = read_input(self.config.emergency_stop_pin)
+            return not state if state is not None else None
+        except Exception as e:
+            logger.debug(f"Failed to read emergency stop state: {e}")
+            return None
+
+    def _get_limit_switch_state(self) -> Optional[bool]:
+        """Get current limit switch state"""
+        if not is_gpio_available():
+            return None
+        
+        try:
+            state = read_input(self.config.limit_switch_pin)
+            return bool(state) if state is not None else None
+        except Exception as e:
+            logger.debug(f"Failed to read limit switch state: {e}")
+            return None
+
     def get_hardware_health(self) -> Dict[str, Any]:
         """Get hardware health assessment with batch command considerations"""
         try:
@@ -1139,7 +1176,7 @@ class HardwareService:
                 issues.append("Stepper motor not available")
             
             # Check GPIO
-            if GPIO_AVAILABLE:
+            if is_gpio_available():
                 component_scores["gpio"] = 100
             else:
                 component_scores["gpio"] = 0
@@ -1194,7 +1231,7 @@ class HardwareService:
                 health["recommendations"].append("Check Maestro 1 USB connection and device number")
             if not self.maestro2 or not self.maestro2.connected:
                 health["recommendations"].append("Check Maestro 2 USB connection and device number")
-            if self.stepper_controller and not self.stepper_controller.home_position_found:
+            if self.stepper_controller and not hasattr(self.stepper_controller, 'home_position_found'):
                 health["recommendations"].append("Run stepper motor homing sequence")
             
             # Batch command recommendations
@@ -1205,14 +1242,14 @@ class HardwareService:
             return health
             
         except Exception as e:
-            logger.error(f"❌ Failed to get hardware health: {e}")
+            logger.error(f"Failed to get hardware health: {e}")
             return {"overall_status": "ERROR", "error": str(e)}
     
     # ==================== DIAGNOSTIC METHODS ====================
     
     async def run_hardware_diagnostics(self) -> Dict[str, Any]:
         """Run comprehensive hardware diagnostics including batch command testing"""
-        logger.info("🔍 Running enhanced hardware diagnostics...")
+        logger.info("Running enhanced hardware diagnostics...")
         
         diagnostics = {
             "timestamp": time.time(),
@@ -1254,11 +1291,11 @@ class HardwareService:
             else:
                 diagnostics["overall_result"] = "MOSTLY_FAILED"
             
-            logger.info(f"🔍 Enhanced diagnostics complete: {passed_tests}/{total_tests} tests passed")
+            logger.info(f"Enhanced diagnostics complete: {passed_tests}/{total_tests} tests passed")
             return diagnostics
             
         except Exception as e:
-            logger.error(f"❌ Hardware diagnostics failed: {e}")
+            logger.error(f"Hardware diagnostics failed: {e}")
             diagnostics["overall_result"] = "ERROR"
             diagnostics["error"] = str(e)
             return diagnostics
@@ -1355,26 +1392,27 @@ class HardwareService:
         except Exception as e:
             test_result["message"] = f"Stepper test error: {str(e)}"
             return test_result
-    
+
     def _test_gpio_systems(self) -> Dict[str, Any]:
         """Test GPIO system availability"""
         test_result = {
             "name": "GPIO Systems",
-            "passed": GPIO_AVAILABLE,
-            "message": "GPIO available" if GPIO_AVAILABLE else "GPIO not available",
+            "passed": is_gpio_available(),
+            "message": f"GPIO using {get_gpio_library()}" if is_gpio_available() else "GPIO not available",
             "details": {
-                "gpio_available": GPIO_AVAILABLE,
+                "gpio_available": is_gpio_available(),
+                "gpio_library": get_gpio_library(),
                 "pins_configured": []
             }
         }
         
-        if GPIO_AVAILABLE:
+        if is_gpio_available():
             try:
                 # Test emergency stop pin
                 if hasattr(self.config, 'emergency_stop_pin'):
                     try:
-                        state = GPIO.input(self.config.emergency_stop_pin)
-                        test_result["details"]["emergency_stop_state"] = bool(state)
+                        state = read_input(self.config.emergency_stop_pin)
+                        test_result["details"]["emergency_stop_state"] = bool(state) if state is not None else False
                         test_result["details"]["pins_configured"].append("emergency_stop")
                     except:
                         pass
@@ -1382,8 +1420,8 @@ class HardwareService:
                 # Test limit switch pin
                 if hasattr(self.config, 'limit_switch_pin'):
                     try:
-                        state = GPIO.input(self.config.limit_switch_pin)
-                        test_result["details"]["limit_switch_state"] = bool(state)
+                        state = read_input(self.config.limit_switch_pin)
+                        test_result["details"]["limit_switch_state"] = bool(state) if state is not None else False
                         test_result["details"]["pins_configured"].append("limit_switch")
                     except:
                         pass
@@ -1393,7 +1431,7 @@ class HardwareService:
                 test_result["passed"] = False
         
         return test_result
-    
+
     def _test_serial_ports(self) -> Dict[str, Any]:
         """Test serial port availability"""
         test_result = {
@@ -1532,12 +1570,12 @@ class HardwareService:
             for key, value in new_config.items():
                 if hasattr(self.config, key):
                     setattr(self.config, key, value)
-                    logger.info(f"🔧 Updated config: {key} = {value}")
+                    logger.info(f"Updated config: {key} = {value}")
             
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to update hardware config: {e}")
+            logger.error(f"Failed to update hardware config: {e}")
             return False
     
     def get_hardware_config(self) -> Dict[str, Any]:
@@ -1559,7 +1597,7 @@ class HardwareService:
                 "servo_update_rate": self.config.servo_update_rate
             }
         except Exception as e:
-            logger.error(f"❌ Failed to get hardware config: {e}")
+            logger.error(f"Failed to get hardware config: {e}")
             return {}
     
     def reset_batch_statistics(self):
@@ -1571,7 +1609,7 @@ class HardwareService:
             "time_saved_ms": 0.0,
             "batch_command_errors": 0
         }
-        logger.info("📊 Batch command statistics reset")
+        logger.info("Batch command statistics reset")
     
     # ==================== UTILITY METHODS ====================
     
@@ -1665,23 +1703,32 @@ class HardwareService:
             return capabilities
             
         except Exception as e:
-            logger.error(f"❌ Failed to get batch command capabilities: {e}")
+            logger.error(f"Failed to get batch command capabilities: {e}")
             return {"error": str(e)}
     
     # ==================== CALLBACK MANAGEMENT ====================
     
     def register_emergency_stop_callback(self, callback: Callable):
         """Register callback for emergency stop events"""
+        if not hasattr(self, 'emergency_stop_callbacks'):
+            self.emergency_stop_callbacks = []
+        
         self.emergency_stop_callbacks.append(callback)
-        logger.debug(f"📋 Registered emergency stop callback ({len(self.emergency_stop_callbacks)} total)")
-    
+        logger.debug(f"Registered emergency stop callback ({len(self.emergency_stop_callbacks)} total)")
+
     def register_hardware_status_callback(self, callback: Callable):
         """Register callback for hardware status changes"""
+        if not hasattr(self, 'hardware_status_callbacks'):
+            self.hardware_status_callbacks = []
+            
         self.hardware_status_callbacks.append(callback)
-        logger.debug(f"📋 Registered hardware status callback ({len(self.hardware_status_callbacks)} total)")
-    
-    async def notify_hardware_status_change(self, component: str, status: Dict[str, Any]):
+        logger.debug(f"Registered hardware status callback ({len(self.hardware_status_callbacks)} total)")
+
+    async def notify_hardware_status_change(self, component: str, status: dict):
         """Notify all callbacks of hardware status change"""
+        if not hasattr(self, 'hardware_status_callbacks'):
+            return
+            
         for callback in self.hardware_status_callbacks:
             try:
                 await callback(component, status)
@@ -1692,7 +1739,7 @@ class HardwareService:
     
     def cleanup(self):
         """Clean up all hardware resources"""
-        logger.info("🧹 Cleaning up enhanced hardware service...")
+        logger.info("Cleaning up enhanced hardware service...")
         
         try:
             # Stop Maestro controllers
@@ -1709,26 +1756,20 @@ class HardwareService:
             cleanup_shared_managers()
             
             # GPIO cleanup
-            if GPIO_AVAILABLE:
-                try:
-                    GPIO.cleanup()
-                except RuntimeWarning:
-                    pass  # Ignore cleanup warnings
-                except Exception as e:
-                    logger.debug(f"GPIO cleanup: {e}")
+            cleanup_gpio()
             
             # Log final statistics
             if self.batch_stats["batch_commands_sent"] > 0:
                 total_commands = self.batch_stats["batch_commands_sent"] + self.batch_stats["individual_commands_sent"]
                 batch_percentage = (self.batch_stats["batch_commands_sent"] / total_commands) * 100
-                logger.info(f"📊 Final batch command usage: {batch_percentage:.1f}% ({self.batch_stats['batch_commands_sent']}/{total_commands})")
-                logger.info(f"⚡ Total time saved: {self.batch_stats['time_saved_ms']:.1f}ms")
-                logger.info(f"🎯 Total servos in batches: {self.batch_stats['total_servos_in_batches']}")
+                logger.info(f"Final batch command usage: {batch_percentage:.1f}% ({self.batch_stats['batch_commands_sent']}/{total_commands})")
+                logger.info(f"Total time saved: {self.batch_stats['time_saved_ms']:.1f}ms")
+                logger.info(f"Total servos in batches: {self.batch_stats['total_servos_in_batches']}")
             
-            logger.info("✅ Enhanced hardware service cleanup complete")
+            logger.info("Enhanced hardware service cleanup complete")
             
         except Exception as e:
-            logger.error(f"❌ Hardware cleanup error: {e}")
+            logger.error(f"Hardware cleanup error: {e}")
 
 
 # Factory function for creating hardware service
@@ -1766,14 +1807,14 @@ def create_hardware_service(config_dict: Dict[str, Any]) -> HardwareService:
         # Create and return enhanced hardware service
         service = HardwareService(config)
         
-        logger.info("✅ Enhanced hardware service created successfully")
-        logger.info("🚀 Batch command optimization enabled")
-        logger.info("⚡ Ready for high-performance scene execution")
+        logger.info("Enhanced hardware service created successfully")
+        logger.info("Batch command optimization enabled")
+        logger.info("Ready for high-performance scene execution")
         
         return service
         
     except Exception as e:
-        logger.error(f"❌ Failed to create enhanced hardware service: {e}")
+        logger.error(f"Failed to create enhanced hardware service: {e}")
         # Return service with default config
         return HardwareService(HardwareConfig())
 
@@ -1781,9 +1822,7 @@ def create_hardware_service(config_dict: Dict[str, Any]) -> HardwareService:
 # Example usage and demonstration
 async def demo_enhanced_hardware_service():
     """Demonstrate the enhanced hardware service capabilities"""
-    from unittest.mock import Mock
-    
-    print("🔧 Enhanced Hardware Service Demo")
+    print("Enhanced Hardware Service Demo")
     print("=" * 50)
     
     # Create mock config
@@ -1792,13 +1831,13 @@ async def demo_enhanced_hardware_service():
     # Create enhanced hardware service
     service = HardwareService(config)
     
-    print(f"✅ Service initialized: {service.initialization_complete}")
-    print(f"🔌 Connected devices: {service.get_connected_device_count()}")
-    print(f"🎛️ Total servo channels: {service.get_total_servo_channels()}")
+    print(f"Service initialized: {service.initialization_complete}")
+    print(f"Connected devices: {service.get_connected_device_count()}")
+    print(f"Total servo channels: {service.get_total_servo_channels()}")
     
     # Show batch capabilities
     capabilities = service.get_batch_command_capabilities()
-    print(f"\n🚀 Batch Command Capabilities:")
+    print(f"\nBatch Command Capabilities:")
     print(f"  Available: {capabilities['batch_commands_available']}")
     print(f"  Maestro 1: {capabilities['maestro1_support']}")
     print(f"  Maestro 2: {capabilities['maestro2_support']}")
@@ -1813,7 +1852,7 @@ async def demo_enhanced_hardware_service():
         "m2_ch1": {"target": 1600, "speed": 45}
     }
     
-    print(f"\n🎭 Example Scene Execution:")
+    print(f"\nExample Scene Execution:")
     print(f"  Total servos: {len(example_scene_servos)}")
     print(f"  Maestro 1 servos: {len([k for k in example_scene_servos if k.startswith('m1_')])}")
     print(f"  Maestro 2 servos: {len([k for k in example_scene_servos if k.startswith('m2_')])}")
@@ -1822,13 +1861,13 @@ async def demo_enhanced_hardware_service():
     
     # Show statistics
     stats = await service.get_batch_command_performance_stats()
-    print(f"\n📊 Current Statistics:")
+    print(f"\nCurrent Statistics:")
     print(f"  Batch commands sent: {stats.get('summary', {}).get('total_batch_commands', 0)}")
     print(f"  Individual commands: {stats.get('summary', {}).get('total_individual_commands', 0)}")
     print(f"  Time saved: {stats.get('summary', {}).get('estimated_time_saved_ms', 0):.1f}ms")
     print(f"  Efficiency: {stats.get('summary', {}).get('efficiency_rating', 'No Data')}")
     
-    print(f"\n✅ Enhanced hardware service ready for optimized scene execution!")
+    print(f"\nEnhanced hardware service ready for optimized scene execution!")
 
 
 if __name__ == "__main__":

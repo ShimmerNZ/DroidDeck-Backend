@@ -89,7 +89,7 @@ class EnhancedSceneEngine:
         self.scene_progress_callback: Optional[Callable] = None
         
         # Advanced features
-        self.auto_idle_enabled = True
+        self.auto_idle_enabled = False
         self.idle_timeout = 30.0  # seconds
         self.last_activity_time = time.time()
         self.idle_scenes = ["Casual Look Around", "Standby Mode", "Waiting Animation"]

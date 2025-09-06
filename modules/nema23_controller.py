@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NEMA 23 Stepper Controller for WALL-E Gantry System
+NEMA 23 Stepper Controller for WALL-E Gantry System - Pi 5 Compatible
 Handles homing, positioning, and smooth movement with TB6600 driver
 """
 
@@ -13,16 +13,20 @@ from enum import Enum
 from dataclasses import dataclass
 import json
 
-logger = logging.getLogger(__name__)
+# Import our new GPIO compatibility layer
+from modules.gpio_compat import (
+    setup_output_pin, 
+    setup_input_pin, 
+    set_output, 
+    read_input, 
+    pulse_pin,
+    setup_button_callback,
+    cleanup_gpio,
+    is_gpio_available,
+    get_gpio_library
+)
 
-# GPIO handling with fallbacks
-GPIO_AVAILABLE = False
-try:
-    import RPi.GPIO as GPIO
-    GPIO_AVAILABLE = True
-    logger.info("✅ GPIO library imported successfully")
-except ImportError:
-    logger.warning("⚠️ RPi.GPIO not available - GPIO features disabled")
+logger = logging.getLogger(__name__)
 
 
 class MotorState(Enum):
@@ -32,9 +36,11 @@ class MotorState(Enum):
     MOVING = "moving"
     ERROR = "error"
 
+
 class MoveDirection(Enum):
     TOWARD_HOME = 0  # DIR pin LOW
     AWAY_FROM_HOME = 1  # DIR pin HIGH
+
 
 @dataclass
 class StepperConfig:
@@ -67,6 +73,7 @@ class StepperConfig:
     
     # Safety margins
     soft_limit_margin: float = 0.5   # Extra safety margin for soft limits
+
 
 class NEMA23Controller:
     """Enhanced NEMA 23 stepper controller with homing and positioning"""
@@ -106,24 +113,25 @@ class NEMA23Controller:
         logger.info(f"   Default position: {self.default_position_steps} steps ({self.config.default_position_cm} cm)")
     
     def setup_gpio(self):
-        """Initialize GPIO pins for stepper control"""
-        if not GPIO_AVAILABLE:
-            logger.warning("GPIO not available - stepper control disabled")
+        """Initialize GPIO pins for stepper control using compatibility layer"""
+        if not is_gpio_available():
+            logger.warning("⚠️ GPIO not available - stepper control disabled")
             return
         
         try:
-            GPIO.setmode(GPIO.BCM)
-            
             # Setup output pins
-            GPIO.setup(self.config.step_pin, GPIO.OUT, initial=GPIO.LOW)
-            GPIO.setup(self.config.dir_pin, GPIO.OUT, initial=GPIO.LOW)
-            GPIO.setup(self.config.enable_pin, GPIO.OUT, initial=GPIO.HIGH)  # Start disabled
+            step_ok = setup_output_pin(self.config.step_pin, initial_state=False)
+            dir_ok = setup_output_pin(self.config.dir_pin, initial_state=False)
+            enable_ok = setup_output_pin(self.config.enable_pin, initial_state=True)  # Start disabled
             
             # Setup input pin for limit switch (normally open)
-            GPIO.setup(self.config.limit_switch_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+            limit_ok = setup_input_pin(self.config.limit_switch_pin, pull_down=True)
             
-            self.gpio_initialized = True
-            logger.info("✅ GPIO initialized for stepper motor")
+            if all([step_ok, dir_ok, enable_ok, limit_ok]):
+                self.gpio_initialized = True
+                logger.info(f"✅ GPIO initialized for stepper motor using {get_gpio_library()}")
+            else:
+                logger.error("❌ Failed to setup one or more GPIO pins")
             
         except Exception as e:
             logger.error(f"❌ Failed to setup GPIO: {e}")
@@ -132,32 +140,31 @@ class NEMA23Controller:
     def enable_motor(self):
         """Enable the stepper motor"""
         if self.gpio_initialized:
-            GPIO.output(self.config.enable_pin, GPIO.LOW)  # TB6600 enabled on LOW
-            logger.info("🔋 Stepper motor enabled")
+            set_output(self.config.enable_pin, False)  # TB6600 enables on LOW
+            logger.debug("🔌 Stepper motor enabled")
     
     def disable_motor(self):
         """Disable the stepper motor"""
         if self.gpio_initialized:
-            GPIO.output(self.config.enable_pin, GPIO.HIGH)  # TB6600 disabled on HIGH
-            logger.info("🔋 Stepper motor disabled")
+            set_output(self.config.enable_pin, True)  # TB6600 disables on HIGH
+            logger.debug("🔌 Stepper motor disabled")
         self.set_state(MotorState.DISABLED)
     
     def set_direction(self, direction: MoveDirection):
         """Set movement direction"""
         if self.gpio_initialized:
-            GPIO.output(self.config.dir_pin, direction.value)
+            set_output(self.config.dir_pin, bool(direction.value))
     
     def step_pulse(self):
-        """Generate a single step pulse"""
+        """Generate a single step pulse using compatibility layer"""
         if self.gpio_initialized:
-            GPIO.output(self.config.step_pin, GPIO.HIGH)
-            time.sleep(self.config.step_pulse_width / 1_000_000)  # Convert to seconds
-            GPIO.output(self.config.step_pin, GPIO.LOW)
+            pulse_pin(self.config.step_pin, self.config.step_pulse_width)
     
     def is_limit_switch_triggered(self) -> bool:
         """Check if limit switch is triggered"""
         if self.gpio_initialized:
-            return GPIO.input(self.config.limit_switch_pin) == GPIO.HIGH
+            state = read_input(self.config.limit_switch_pin)
+            return bool(state) if state is not None else False
         return False
     
     def set_state(self, new_state: MotorState):
@@ -381,13 +388,13 @@ class NEMA23Controller:
     
     async def move_to_default_position(self) -> bool:
         """Move to the default position (rear position)"""
-        logger.info("📍 Moving to default position...")
+        logger.info("🔄 Moving to default position...")
         return await self.move_to_position_cm(self.config.default_position_cm)
     
     async def move_to_forward_position(self) -> bool:
         """Move to the forward position"""
         forward_position = self.config.max_travel_cm - 2.0  # 2cm from max travel
-        logger.info("📍 Moving to forward position...")
+        logger.info("🔄 Moving to forward position...")
         return await self.move_to_position_cm(forward_position)
     
     def emergency_stop(self):
@@ -399,14 +406,21 @@ class NEMA23Controller:
     
     def get_status(self) -> dict:
         """Get comprehensive motor status"""
+        enabled = False
+        if self.gpio_initialized:
+            enable_state = read_input(self.config.enable_pin)
+            enabled = not bool(enable_state) if enable_state is not None else False
+        
         return {
             "state": self.state.value,
+            "gpio_initialized": self.gpio_initialized,
+            "gpio_library": get_gpio_library() if self.gpio_initialized else "none",
             "position_steps": self.current_position_steps,
             "position_cm": round(self.steps_to_cm(self.current_position_steps), 2),
             "target_steps": self.target_position_steps,
             "target_cm": round(self.steps_to_cm(self.target_position_steps), 2),
             "homed": self.home_position_found,
-            "enabled": self.gpio_initialized and not GPIO.input(self.config.enable_pin) if GPIO_AVAILABLE else False,
+            "enabled": enabled,
             "limit_switch": self.is_limit_switch_triggered(),
             "max_travel_cm": self.config.max_travel_cm,
             "default_position_cm": self.config.default_position_cm,
@@ -424,16 +438,8 @@ class NEMA23Controller:
         
         self.disable_motor()
         
-        if GPIO_AVAILABLE and self.gpio_initialized:
-            try:
-                GPIO.cleanup([
-                    self.config.step_pin,
-                    self.config.dir_pin, 
-                    self.config.enable_pin,
-                    self.config.limit_switch_pin
-                ])
-            except Exception as e:
-                logger.debug(f"GPIO cleanup: {e}")
+        # GPIO cleanup is handled by the compatibility layer
+        logger.info("✅ NEMA 23 controller cleanup complete")
 
 
 class StepperControlInterface:

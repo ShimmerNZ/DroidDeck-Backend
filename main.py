@@ -99,8 +99,18 @@ class WALLEBackend:
         """Setup callbacks between components"""
         try:
             # Hardware service callbacks
-            self.hardware_service.register_emergency_stop_callback(self.handle_emergency_stop_event)
-            self.hardware_service.register_hardware_status_callback(self.handle_hardware_status_change)
+            if hasattr(self.hardware_service, 'register_emergency_stop_callback'):
+                self.hardware_service.register_emergency_stop_callback(self.handle_emergency_stop_event)
+                logger.info("✅ Emergency stop callback registered")
+            else:
+                logger.warning("⚠️ Emergency stop callback method not available")
+                
+            if hasattr(self.hardware_service, 'register_hardware_status_callback'):
+                self.hardware_service.register_hardware_status_callback(self.handle_hardware_status_change)
+                logger.info("✅ Hardware status callback registered")
+            else:
+                logger.warning("⚠️ Hardware status callback method not available")
+
             
             # Scene engine callbacks
             self.scene_engine.set_scene_started_callback(self.handle_scene_started)
@@ -121,24 +131,34 @@ class WALLEBackend:
         except Exception as e:
             logger.error(f"❌ Failed to setup callbacks: {e}")
     
+
     def setup_signal_handlers(self):
         """Setup graceful shutdown signal handlers"""
         def signal_handler(signum, frame):
             logger.info(f"🛑 Received signal {signum}, starting graceful shutdown...")
-            if self.loop and self.running:
-                # Create shutdown task
+            
+            if not self.running:
+                logger.info("Already shutting down, ignoring additional signals")
+                return
+                
+            # Set running to False immediately to stop main loop
+            self.running = False
+            
+            if self.loop and self.loop.is_running():
+                # Create shutdown task and wait for it
                 shutdown_task = self.loop.create_task(self.shutdown())
                 
-                # Set a timeout for the entire shutdown process
-                def force_exit():
-                    logger.warning("⚠️ Shutdown timeout exceeded - forcing exit")
-                    os._exit(1)
+                # Don't set a timeout callback that calls os._exit immediately
+                # Instead, let the main loop handle the shutdown gracefully
                 
-                # Force exit after 10 seconds max
-                self.loop.call_later(10.0, force_exit)
+            else:
+                # If no event loop, force exit
+                logger.warning("⚠️ No event loop running, forcing immediate exit")
+                os._exit(1)
         
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
+
     
     # ==================== WEBSOCKET CONNECTION HANDLER ====================
     
@@ -386,7 +406,6 @@ class WALLEBackend:
         })
     
     # ==================== SYSTEM LIFECYCLE ====================
-    
     async def start(self):
         """Start the WALL-E backend system"""
         self.start_time = time.time()
@@ -433,16 +452,25 @@ class WALLEBackend:
             logger.info(f"📷 Camera: http://{ip}:8081/stream")
             logger.info(f"📁 SMB Share: \\\\{hostname}\\walle")
             
-            # Keep running until shutdown
+            # Keep running until shutdown - this will exit when running becomes False
             while self.running:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.1)  # Reduced from 1 second for faster shutdown response
+                
+            # When we exit the loop, shutdown was triggered
+            logger.info("🛑 Main loop exited, running shutdown...")
+            await self.shutdown()
                 
         except Exception as e:
             logger.error(f"❌ Failed to start backend system: {e}")
             raise
-    
+
     async def shutdown(self):
         """Graceful system shutdown"""
+        if hasattr(self, '_shutdown_started') and self._shutdown_started:
+            logger.info("Shutdown already in progress, skipping duplicate call")
+            return
+            
+        self._shutdown_started = True
         logger.info("🛑 Shutting down WALL-E Backend...")
         
         self.running = False
@@ -450,35 +478,44 @@ class WALLEBackend:
         try:
             # 1. First notify clients BEFORE closing connections
             logger.info("📢 Notifying clients of shutdown...")
-            await self.broadcast_message({
-                "type": "system_shutdown",
-                "timestamp": time.time()
-            })
+            try:
+                await asyncio.wait_for(self.broadcast_message({
+                    "type": "system_shutdown", 
+                    "timestamp": time.time()
+                }), timeout=1.0)
+            except asyncio.TimeoutError:
+                logger.warning("Timeout notifying clients of shutdown")
             
             # Give clients time to receive the message
             await asyncio.sleep(0.5)
             
             # 2. Stop telemetry loop
             if self.telemetry_task:
-                logger.info("⏹️ Stopping telemetry task...")
+                logger.info("ℹ️ Stopping telemetry task...")
                 self.telemetry_task.cancel()
                 try:
                     await asyncio.wait_for(self.telemetry_task, timeout=2.0)
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     logger.info("✅ Telemetry task stopped")
             
-            # 3. Close client connections first
+            # 3. Close client connections
             if self.connected_clients:
                 logger.info(f"🔌 Closing {len(self.connected_clients)} client connections...")
                 close_tasks = []
                 for client in list(self.connected_clients):
                     try:
-                        close_tasks.append(client.close())
+                        close_tasks.append(asyncio.create_task(client.close()))
                     except Exception as e:
-                        logger.debug(f"Error closing client: {e}")
+                        logger.debug(f"Error creating close task for client: {e}")
                 
                 if close_tasks:
-                    await asyncio.gather(*close_tasks, return_exceptions=True)
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(*close_tasks, return_exceptions=True), 
+                            timeout=2.0
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("Timeout closing client connections")
                 
                 self.connected_clients.clear()
             
@@ -486,33 +523,50 @@ class WALLEBackend:
             if self.websocket_server:
                 logger.info("🌐 Shutting down WebSocket server...")
                 self.websocket_server.close()
-                await asyncio.wait_for(self.websocket_server.wait_closed(), timeout=3.0)
+                try:
+                    await asyncio.wait_for(self.websocket_server.wait_closed(), timeout=3.0)
+                    logger.info("✅ WebSocket server closed")
+                except asyncio.TimeoutError:
+                    logger.warning("⚠️ WebSocket server close timeout")
             
             # 5. Stop scene engine and audio
             logger.info("🎭 Stopping scene engine...")
-            await self.scene_engine.stop_current_scene()
+            try:
+                await asyncio.wait_for(self.scene_engine.stop_current_scene(), timeout=2.0)
+            except asyncio.TimeoutError:
+                logger.warning("Scene engine stop timeout")
             
-            logger.info("🔊 Cleaning up audio controller...")
-            self.audio_controller.cleanup()
+            logger.info("📊 Cleaning up audio controller...")
+            try:
+                self.audio_controller.cleanup()
+            except Exception as e:
+                logger.error(f"Audio cleanup error: {e}")
             
-            # 6. Cleanup hardware (this should be fast)
+            # 6. Cleanup hardware (this should be fast but might involve serial communication)
             logger.info("🔧 Cleaning up hardware service...")
-            self.hardware_service.cleanup()
+            try:
+                # Run hardware cleanup in executor to avoid blocking
+                await asyncio.get_event_loop().run_in_executor(
+                    None, self.hardware_service.cleanup
+                )
+            except Exception as e:
+                logger.error(f"Hardware cleanup error: {e}")
             
             # 7. Cleanup telemetry
             logger.info("📊 Cleaning up telemetry system...")
-            self.telemetry_system.cleanup()
+            try:
+                self.telemetry_system.cleanup()
+            except Exception as e:
+                logger.error(f"Telemetry cleanup error: {e}")
             
             logger.info("✅ WALL-E Backend shutdown complete")
             
-        except asyncio.TimeoutError:
-            logger.warning("⚠️ Shutdown timeout - forcing exit")
         except Exception as e:
             logger.error(f"❌ Error during shutdown: {e}")
         finally:
-            # Force exit if we're still hanging
-            await asyncio.sleep(0.1)
-    
+            # Ensure we exit cleanly
+            logger.info("👋 Final cleanup complete")
+
     # ==================== CALLBACK HANDLERS ====================
     
     async def handle_telemetry_alert(self, alert, reading):
@@ -679,12 +733,12 @@ async def main():
         traceback.print_exc()
     finally:
         # Ensure cleanup happens
-        if backend:
+        if backend and hasattr(backend, '_shutdown_started') and not backend._shutdown_started:
             try:
                 logger.info("🧹 Running final cleanup...")
-                await asyncio.wait_for(backend.shutdown(), timeout=8.0)
+                await asyncio.wait_for(backend.shutdown(), timeout=5.0)
             except asyncio.TimeoutError:
-                logger.warning("⚠️ Final cleanup timeout - forcing exit")
+                logger.warning("⚠️ Final cleanup timeout")
             except Exception as e:
                 logger.error(f"❌ Error in final cleanup: {e}")
         
@@ -705,4 +759,7 @@ if __name__ == "__main__":
     finally:
         # Force exit to ensure we don't hang
         print("👋 Goodbye!")
+        # Give a moment for final logs, then force exit
+        import time
+        time.sleep(0.1)
         os._exit(0)
