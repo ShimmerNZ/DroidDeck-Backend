@@ -326,6 +326,19 @@ class WALLEBackend:
                     "stream_latency": 0.0  # TODO: Get from camera proxy
                 })
 
+                # Get audio status directly from audio controller
+                audio_connected = False
+                if self.audio_controller:
+                    try:
+                        audio_status = self.audio_controller.get_audio_status()
+                        audio_connected = audio_status.get("connected", False)
+                    except Exception as e:
+                        logger.debug(f"Failed to get audio status: {e}")
+                        audio_connected = False
+                
+                # Add to hardware_status for telemetry
+                hardware_status["audio_system_ready"] = audio_connected
+
                 # Collect telemetry data
                 reading = await self.telemetry_system.update(hardware_status)
                 
@@ -337,10 +350,18 @@ class WALLEBackend:
                     "memory": reading.memory_percent,
                     "temperature": reading.temperature,
                     "battery_voltage": reading.battery_voltage,
-                    "current": reading.current,
-                    "current_a1": reading.current_a1,
+                    "current_left_track": reading.current_left_track,
+                    "current_right_track": reading.current_right_track,
+                    "current_electronics": reading.current_electronics,
+                    "maestro1": hardware_status.get("hardware", {}).get("maestro1", {"connected": False}),
+                    "maestro2": hardware_status.get("hardware", {}).get("maestro2", {"connected": False}),
+                
+                    "audio_system": {
+                        "connected": hardware_status.get("audio_system_ready", False)
+                    },
                     "hardware_status": hardware_status,
                     "system_state": self.state.value,
+                    "adc_available": reading.adc_available,
                     "connected_clients": len(self.connected_clients),
                     "camera_proxy": self.get_camera_proxy_status()
                 }

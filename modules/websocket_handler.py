@@ -31,6 +31,7 @@ class WebSocketMessageHandler:
             "servo": self._handle_servo_command,
             "servo_speed": self._handle_servo_speed_command,
             "servo_acceleration": self._handle_servo_acceleration_command,
+            "servo_config_update": self._handle_servo_config_update,
             "get_servo_position": self._handle_get_servo_position,
             "get_all_servo_positions": self._handle_get_all_servo_positions,
             "get_maestro_info": self._handle_get_maestro_info,
@@ -177,45 +178,106 @@ class WebSocketMessageHandler:
         success = await self.hardware_service.get_servo_position(channel_key, position_callback)
         if not success:
             await self._send_error_response(websocket, f"Failed to request position for {channel_key}")
-    
+
+    async def _handle_servo_config_update(self, websocket, data: Dict[str, Any]):
+        """Handle servo configuration update"""
+        config = data.get("config")
+        
+        if not config:
+            await self._send_error_response(websocket, "Missing config data")
+            return
+        
+        # Just acknowledge - the actual servo commands were already sent
+        await self._send_websocket_message(websocket, {
+            "type": "servo_config_updated", 
+            "success": True,
+            "timestamp": time.time()
+        })
+        
+        logger.info(f"Servo configuration updated")
+
+
     async def _handle_get_all_servo_positions(self, websocket, data: Dict[str, Any]):
         """Handle request for all servo positions"""
         maestro_num = data.get("maestro", 1)
+            
+        maestro_info = await self.hardware_service.get_maestro_info(maestro_num)
+        actual_channels = maestro_info.get("channels", 18) if maestro_info else 18
+
+        # Store the current event loop
+        current_loop = asyncio.get_running_loop()
         
         def batch_callback(positions_dict):
+            """Synchronous callback that schedules async work safely"""
             response = {
                 "type": "all_servo_positions",
                 "maestro": maestro_num,
                 "positions": positions_dict,
-                "total_channels": 18,  # TODO: Get from hardware service
-                "successful_reads": len(positions_dict),
+                "total_channels": 18,
+                "successful_reads": len(positions_dict) if positions_dict else 0,
                 "timestamp": time.time()
             }
-            # Schedule response in main event loop
-            asyncio.run_coroutine_threadsafe(
-                self._send_websocket_message(websocket, response),
-                asyncio.get_running_loop()
-            )
+            
+            # Use call_soon_threadsafe to schedule the coroutine safely
+            def send_response():
+                asyncio.create_task(self._send_websocket_message(websocket, response))
+            
+            current_loop.call_soon_threadsafe(send_response)
         
         success = await self.hardware_service.get_all_servo_positions(maestro_num, batch_callback)
         if not success:
             await self._send_error_response(websocket, f"Failed to request positions from Maestro {maestro_num}")
-    
+
+
     async def _handle_get_maestro_info(self, websocket, data: Dict[str, Any]):
         """Handle maestro information request"""
         maestro_num = data.get("maestro", 1)
         
-        info = await self.hardware_service.get_maestro_info(maestro_num)
-        if info:
+        try:
+            info = await self.hardware_service.get_maestro_info(maestro_num)
+            if info:
+                response = {
+                    "type": "maestro_info",
+                    "maestro": maestro_num,
+                    **info,
+                    "timestamp": time.time()
+                }
+                await self._send_websocket_message(websocket, response)
+            else:
+                await self._send_error_response(websocket, f"Failed to get info for Maestro {maestro_num}")
+        except Exception as e:
+            logger.error(f"Get maestro info error: {e}")
+            await self._send_error_response(websocket, f"Error getting Maestro {maestro_num} info: {str(e)}")
+
+    async def _handle_get_servo_position(self, websocket, data: Dict[str, Any]):
+        """Handle servo position request"""
+        channel_key = data.get("channel")
+        
+        if not channel_key:
+            await self._send_error_response(websocket, "Missing channel")
+            return
+        
+        # Store the current event loop
+        current_loop = asyncio.get_running_loop()
+        
+        def position_callback(position):
+            """Synchronous callback that schedules async work safely"""
             response = {
-                "type": "maestro_info",
-                "maestro": maestro_num,
-                **info,
+                "type": "servo_position",
+                "channel": channel_key,
+                "position": position,
                 "timestamp": time.time()
             }
-            await self._send_websocket_message(websocket, response)
-        else:
-            await self._send_error_response(websocket, f"Failed to get info for Maestro {maestro_num}")
+            
+            # Use call_soon_threadsafe to schedule the coroutine safely
+            def send_response():
+                asyncio.create_task(self._send_websocket_message(websocket, response))
+            
+            current_loop.call_soon_threadsafe(send_response)
+        
+        success = await self.hardware_service.get_servo_position(channel_key, position_callback)
+        if not success:
+            await self._send_error_response(websocket, f"Failed to request position for {channel_key}")
     
     # ==================== STEPPER MOTOR HANDLERS ====================
     

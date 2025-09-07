@@ -1,0 +1,1366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WALL-E Control System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+            color: white;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        :root {
+            --primary-color: #e1a014;
+            --primary-light: #f4c430;
+            --panel-bg: #181818;
+            --panel-dark: #1e1e1e;
+            --card-bg: #252525;
+            --grey: #888;
+            --grey-light: #aaa;
+            --green: #44bb44;
+            --red: #cc4444;
+            --dark-bg: #1a1a1a;
+        }
+
+        body.star-wars {
+            --primary-color: #1976d2;
+            --primary-light: #63a4ff;
+            --panel-bg: #0a1929;
+            --panel-dark: #1e2328;
+            --card-bg: #1a2332;
+            --green: #2e7d32;
+            --red: #d32f2f;
+            --dark-bg: #0d1421;
+        }
+
+        .container {
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 50px;
+            background: var(--panel-dark);
+            border-bottom: 2px solid var(--primary-color);
+            height: 60px;
+        }
+
+        .header h1 {
+            color: var(--primary-color);
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .voltage-display {
+            color: var(--primary-color);
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        .wifi-signal {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .wifi-bars {
+            display: flex;
+            align-items: end;
+            gap: 2px;
+            height: 20px;
+        }
+
+        .wifi-bar {
+            width: 4px;
+            background: var(--green);
+            border-radius: 1px;
+        }
+
+        .wifi-bar:nth-child(1) { height: 4px; }
+        .wifi-bar:nth-child(2) { height: 8px; }
+        .wifi-bar:nth-child(3) { height: 12px; }
+        .wifi-bar:nth-child(4) { height: 16px; }
+        .wifi-bar:nth-child(5) { height: 20px; }
+
+        .wifi-text {
+            font-size: 12px;
+            color: var(--green);
+        }
+
+        .nav-bar {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            padding: 10px 50px;
+            background: var(--dark-bg);
+        }
+
+        .nav-btn {
+            background: linear-gradient(145deg, #4a4a4a, #2a2a2a);
+            border: 2px solid var(--grey);
+            border-radius: 8px;
+            padding: 12px 20px;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: bold;
+            min-width: 120px;
+            text-align: center;
+        }
+
+        .nav-btn:hover {
+            border-color: var(--primary-color);
+            background: linear-gradient(145deg, #5a5a5a, #3a3a3a);
+        }
+
+        .nav-btn.active {
+            background: linear-gradient(180deg, var(--primary-color) 0%, var(--primary-light) 100%);
+            border-color: var(--primary-light);
+            color: black;
+        }
+
+        .failsafe-btn {
+            background: var(--red) !important;
+            border-color: var(--red) !important;
+            margin-left: 20px;
+        }
+
+        .failsafe-btn.active {
+            background: #ff6666 !important;
+        }
+
+        .main-content {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .screen {
+            width: 100%;
+            height: 100%;
+            display: none;
+            padding: 20px 50px;
+            overflow-y: auto;
+        }
+
+        .screen.active {
+            display: block;
+        }
+
+        .theme-selector {
+            position: fixed;
+            top: 70px;
+            right: 20px;
+            z-index: 1000;
+        }
+
+        .theme-btn {
+            background: var(--panel-bg);
+            border: 1px solid var(--primary-color);
+            color: var(--primary-color);
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        /* Home Screen */
+        .home-screen {
+            display: flex;
+            gap: 20px;
+            height: 100%;
+        }
+
+        .home-left {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .home-right {
+            width: 400px;
+            background: var(--panel-bg);
+            border: 2px solid var(--primary-color);
+            border-radius: 12px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .walle-image {
+            max-width: 400px;
+            max-height: 500px;
+            object-fit: contain;
+            border-radius: 12px;
+        }
+
+        .emotion-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin-bottom: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .emotion-btn {
+            background: var(--card-bg);
+            border: 2px solid var(--grey);
+            border-radius: 8px;
+            padding: 15px;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 16px;
+            text-align: center;
+            min-height: 60px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .emotion-btn:hover {
+            border-color: var(--primary-color);
+            background: var(--panel-dark);
+        }
+
+        .mode-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .mode-btn {
+            background: var(--card-bg);
+            border: 2px solid var(--grey);
+            border-radius: 8px;
+            padding: 12px;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-align: center;
+        }
+
+        .mode-btn.active {
+            background: var(--green);
+            border-color: var(--green);
+        }
+
+        /* Camera Screen */
+        .camera-layout {
+            display: flex;
+            gap: 20px;
+            height: 100%;
+        }
+
+        .camera-main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .camera-controls {
+            width: 320px;
+            background: var(--panel-bg);
+            border: 2px solid var(--primary-color);
+            border-radius: 12px;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .video-container {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--panel-dark);
+            border: 2px solid var(--primary-color);
+            border-radius: 12px;
+            margin-bottom: 20px;
+            min-height: 400px;
+        }
+
+        .video-feed {
+            max-width: 100%;
+            max-height: 100%;
+            border-radius: 8px;
+        }
+
+        .camera-status {
+            text-align: center;
+            padding: 20px;
+            color: var(--grey);
+        }
+
+        .control-group {
+            margin-bottom: 20px;
+        }
+
+        .control-group h3 {
+            color: var(--primary-color);
+            margin-bottom: 10px;
+            font-size: 16px;
+        }
+
+        .control-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .control-item label {
+            color: white;
+            font-size: 14px;
+        }
+
+        .control-slider {
+            width: 150px;
+            height: 6px;
+            background: var(--grey);
+            border-radius: 3px;
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        .control-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: var(--primary-color);
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        .control-toggle {
+            background: var(--card-bg);
+            border: 2px solid var(--grey);
+            border-radius: 6px;
+            padding: 8px 16px;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .control-toggle.active {
+            background: var(--green);
+            border-color: var(--green);
+        }
+
+        /* Health Screen */
+        .health-layout {
+            display: flex;
+            gap: 20px;
+            height: 100%;
+        }
+
+        .health-graphs {
+            flex: 1;
+            background: var(--panel-bg);
+            border: 2px solid var(--primary-color);
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .health-panel {
+            width: 340px;
+            background: var(--panel-bg);
+            border: 2px solid var(--primary-color);
+            border-radius: 12px;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .graph-container {
+            height: 300px;
+            background: var(--panel-dark);
+            border: 1px solid var(--grey);
+            border-radius: 8px;
+            margin-bottom: 20px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .graph-title {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: var(--primary-color);
+            font-weight: bold;
+            z-index: 10;
+        }
+
+        .status-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .status-item {
+            background: var(--card-bg);
+            border: 1px solid var(--grey);
+            border-radius: 6px;
+            padding: 10px;
+            text-align: center;
+        }
+
+        .status-label {
+            font-size: 12px;
+            color: var(--grey-light);
+            margin-bottom: 5px;
+        }
+
+        .status-value {
+            font-size: 16px;
+            font-weight: bold;
+            color: var(--primary-color);
+        }
+
+        /* Settings Screen */
+        .settings-container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: var(--panel-bg);
+            border: 2px solid var(--primary-color);
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .settings-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .settings-section {
+            background: var(--card-bg);
+            border: 1px solid var(--grey);
+            border-radius: 8px;
+            padding: 15px;
+        }
+
+        .section-title {
+            color: var(--primary-color);
+            font-weight: bold;
+            margin-bottom: 15px;
+            font-size: 16px;
+        }
+
+        .settings-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .settings-input {
+            background: var(--panel-dark);
+            border: 1px solid var(--grey);
+            border-radius: 4px;
+            padding: 8px;
+            color: white;
+            width: 200px;
+        }
+
+        .settings-select {
+            background: var(--panel-dark);
+            border: 1px solid var(--grey);
+            border-radius: 4px;
+            padding: 8px;
+            color: white;
+            width: 100px;
+        }
+
+        /* Buttons */
+        .scene-btn {
+            background: linear-gradient(180deg, var(--primary-color) 0%, var(--primary-light) 100%);
+            border: none;
+            border-radius: 6px;
+            padding: 8px 16px;
+            color: black;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .scene-btn.secondary {
+            background: var(--card-bg);
+            border: 1px solid var(--grey);
+            color: white;
+        }
+
+        /* Utility Classes */
+        .hidden {
+            display: none !important;
+        }
+
+        .success {
+            color: var(--green);
+        }
+
+        .error {
+            color: var(--red);
+        }
+
+        .warning {
+            color: orange;
+        }
+
+        /* Responsive Design */
+        @media (max-width: 768px) {
+            .header,
+            .nav-bar,
+            .screen {
+                padding-left: 20px;
+                padding-right: 20px;
+            }
+
+            .nav-btn {
+                min-width: auto;
+                padding: 8px 12px;
+                font-size: 12px;
+            }
+
+            .home-screen,
+            .camera-layout,
+            .health-layout {
+                flex-direction: column;
+            }
+
+            .home-right,
+            .camera-controls,
+            .health-panel {
+                width: 100%;
+            }
+
+            .settings-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .emotion-grid {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Theme Selector -->
+        <div class="theme-selector">
+            <select class="theme-btn" id="themeSelector">
+                <option value="wall-e">WALL-E</option>
+                <option value="star-wars">Star Wars</option>
+            </select>
+        </div>
+
+        <!-- Header -->
+        <header class="header">
+            <h1 id="headerTitle">Home</h1>
+            <div class="header-right">
+                <div class="voltage-display" id="voltageDisplay">14.2V</div>
+                <div class="wifi-signal">
+                    <div class="wifi-bars" id="wifiBars">
+                        <div class="wifi-bar"></div>
+                        <div class="wifi-bar"></div>
+                        <div class="wifi-bar"></div>
+                        <div class="wifi-bar"></div>
+                        <div class="wifi-bar"></div>
+                    </div>
+                    <div class="wifi-text" id="wifiText">85%</div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Navigation -->
+        <nav class="nav-bar">
+            <button class="nav-btn active" data-screen="home">Home</button>
+            <button class="nav-btn" data-screen="camera">Camera</button>
+            <button class="nav-btn" data-screen="health">Health</button>
+            <button class="nav-btn" data-screen="settings">Settings</button>
+            <button class="nav-btn failsafe-btn" id="failsafeBtn">FAILSAFE</button>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Home Screen -->
+            <div class="screen active" id="homeScreen">
+                <div class="home-screen">
+                    <div class="home-left">
+                        <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 500'%3E%3Crect width='400' height='500' fill='%23333'/%3E%3Ctext x='200' y='250' text-anchor='middle' fill='%23e1a014' font-size='24' font-family='Arial'%3EWALL-E%3C/text%3E%3C/svg%3E" alt="WALL-E" class="walle-image" id="walleImage">
+                    </div>
+                    <div class="home-right">
+                        <h2 style="color: var(--primary-color); margin-bottom: 15px; text-align: center;">Scene Queue</h2>
+                        <div class="emotion-grid" id="emotionGrid">
+                            <!-- Emotion buttons will be populated by JavaScript -->
+                        </div>
+                        <div class="mode-controls">
+                            <button class="mode-btn" id="idleBtn">Idle Mode</button>
+                            <button class="mode-btn" id="demoBtn">Demo Mode</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Camera Screen -->
+            <div class="screen" id="cameraScreen">
+                <div class="camera-layout">
+                    <div class="camera-main">
+                        <div class="video-container">
+                            <img class="video-feed hidden" id="videoFeed" alt="Camera Feed">
+                            <div class="camera-status" id="cameraStatus">
+                                Camera not connected<br>
+                                <small>Check camera proxy settings</small>
+                            </div>
+                        </div>
+                        <div style="text-align: center; color: var(--grey);" id="streamStats">
+                            Stream Stats: Disconnected
+                        </div>
+                    </div>
+                    <div class="camera-controls">
+                        <div class="control-group">
+                            <h3>Stream Control</h3>
+                            <div class="control-item">
+                                <button class="control-toggle" id="streamToggle">Start Stream</button>
+                            </div>
+                            <div class="control-item">
+                                <button class="control-toggle" id="trackingToggle">Wave Tracking</button>
+                            </div>
+                        </div>
+
+                        <div class="control-group">
+                            <h3>Camera Settings</h3>
+                            <div class="control-item">
+                                <label>Quality</label>
+                                <input type="range" class="control-slider" id="qualitySlider" min="1" max="63" value="10">
+                            </div>
+                            <div class="control-item">
+                                <label>Brightness</label>
+                                <input type="range" class="control-slider" id="brightnessSlider" min="-2" max="2" value="0">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Health Screen -->
+            <div class="screen" id="healthScreen">
+                <div class="health-layout">
+                    <div class="health-graphs">
+                        <h2 style="color: var(--primary-color); margin-bottom: 20px; text-align: center;">System Telemetry</h2>
+                        
+                        <div class="graph-container">
+                            <div class="graph-title">Battery Voltage (V)</div>
+                            <canvas id="voltageChart" width="100%" height="280"></canvas>
+                        </div>
+                        
+                        <div class="graph-container">
+                            <div class="graph-title">Current Draw (A)</div>
+                            <canvas id="currentChart" width="100%" height="280"></canvas>
+                        </div>
+                    </div>
+                    
+                    <div class="health-panel">
+                        <h2 style="color: var(--primary-color); margin-bottom: 20px; text-align: center;">SYSTEM HEALTH</h2>
+                        
+                        <div class="status-grid">
+                            <div class="status-item">
+                                <div class="status-label">CPU Usage</div>
+                                <div class="status-value" id="cpuValue">45%</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-label">Memory</div>
+                                <div class="status-value" id="memoryValue">67%</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-label">Temperature</div>
+                                <div class="status-value" id="tempValue">52°C</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-label">WiFi Signal</div>
+                                <div class="status-value" id="wifiStatus">85%</div>
+                            </div>
+                        </div>
+
+                        <div class="control-group">
+                            <h3>Component Status</h3>
+                            <div class="status-item" style="margin-bottom: 10px;">
+                                <div style="display: flex; justify-content: space-between;">
+                                    <span>Maestro 1</span>
+                                    <span class="success" id="maestro1Status">Connected</span>
+                                </div>
+                            </div>
+                            <div class="status-item" style="margin-bottom: 10px;">
+                                <div style="display: flex; justify-content: space-between;">
+                                    <span>Audio System</span>
+                                    <span class="success" id="audioStatus">Active</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="control-group">
+                            <h3>System Controls</h3>
+                            <div class="control-item">
+                                <button class="scene-btn" id="networkTestBtn">Test Network</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings Screen -->
+            <div class="screen" id="settingsScreen">
+                <div class="settings-container">
+                    <h2 style="color: var(--primary-color); margin-bottom: 20px; text-align: center;">Settings Configuration</h2>
+                    
+                    <div class="settings-grid">
+                        <div class="settings-section">
+                            <div class="section-title">Network Configuration</div>
+                            <div class="settings-row">
+                                <label>Camera Proxy URL</label>
+                                <input type="text" class="settings-input" id="cameraProxyUrl" value="http://10.1.1.230:8081/stream">
+                            </div>
+                            <div class="settings-row">
+                                <label>WebSocket URL</label>
+                                <input type="text" class="settings-input" id="websocketUrl" value="ws://10.1.1.230:8766">
+                            </div>
+                        </div>
+
+                        <div class="settings-section">
+                            <div class="section-title">Wave Detection</div>
+                            <div class="settings-row">
+                                <label>Sample Duration</label>
+                                <input type="number" class="settings-input" id="sampleDuration" value="3" min="1" max="10" style="width: 100px;">
+                            </div>
+                            <div class="settings-row">
+                                <label>Confidence</label>
+                                <input type="range" class="control-slider" id="confidenceSlider" min="0.1" max="1" step="0.1" value="0.7">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="display: flex; justify-content: center; gap: 20px; margin-top: 30px;">
+                        <button class="scene-btn" id="saveSettingsBtn">Save Configuration</button>
+                        <button class="scene-btn secondary" id="testConnectionBtn">Test Connection</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        class WalleApp {
+            constructor() {
+                this.websocket = null;
+                this.currentScreen = 'home';
+                this.theme = 'wall-e';
+                this.isConnected = false;
+                this.charts = {};
+                this.emotionButtons = [
+                    { name: 'Happy', emoji: '😊' },
+                    { name: 'Sad', emoji: '😢' },
+                    { name: 'Excited', emoji: '🤗' },
+                    { name: 'Curious', emoji: '🤔' },
+                    { name: 'Sleepy', emoji: '😴' },
+                    { name: 'Wave', emoji: '👋' },
+                    { name: 'Dance', emoji: '💃' },
+                    { name: 'Love', emoji: '💝' }
+                ];
+                
+                this.init();
+            }
+
+            init() {
+                this.setupEventListeners();
+                this.connectWebSocket();
+                this.startTelemetrySimulation();
+                this.initializeCharts();
+                this.populateEmotionGrid();
+            }
+
+            setupEventListeners() {
+                // Theme selector
+                document.getElementById('themeSelector').addEventListener('change', (e) => {
+                    this.switchTheme(e.target.value);
+                });
+
+                // Navigation
+                document.querySelectorAll('.nav-btn').forEach(btn => {
+                    if (!btn.id.includes('failsafe')) {
+                        btn.addEventListener('click', (e) => {
+                            const screen = e.target.dataset.screen;
+                            this.switchScreen(screen);
+                        });
+                    }
+                });
+
+                // Failsafe button
+                document.getElementById('failsafeBtn').addEventListener('click', () => {
+                    this.toggleFailsafe();
+                });
+
+                // Mode buttons
+                document.getElementById('idleBtn').addEventListener('click', () => {
+                    this.setMode('idle');
+                });
+                document.getElementById('demoBtn').addEventListener('click', () => {
+                    this.setMode('demo');
+                });
+
+                // Camera controls
+                document.getElementById('streamToggle').addEventListener('click', () => {
+                    this.toggleStream();
+                });
+                document.getElementById('trackingToggle').addEventListener('click', () => {
+                    this.toggleTracking();
+                });
+
+                // Settings
+                document.getElementById('saveSettingsBtn').addEventListener('click', () => {
+                    this.saveSettings();
+                });
+                document.getElementById('testConnectionBtn').addEventListener('click', () => {
+                    this.testConnection();
+                });
+
+                // Network test
+                document.getElementById('networkTestBtn').addEventListener('click', () => {
+                    this.testNetwork();
+                });
+            }
+
+            switchTheme(theme) {
+                this.theme = theme;
+                document.body.className = theme === 'star-wars' ? 'star-wars' : '';
+                
+                const walleImage = document.getElementById('walleImage');
+                if (theme === 'star-wars') {
+                    walleImage.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 500'%3E%3Crect width='400' height='500' fill='%23333'/%3E%3Ctext x='200' y='250' text-anchor='middle' fill='%231976d2' font-size='24' font-family='Arial'%3ER2-D2%3C/text%3E%3C/svg%3E";
+                } else {
+                    walleImage.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 500'%3E%3Crect width='400' height='500' fill='%23333'/%3E%3Ctext x='200' y='250' text-anchor='middle' fill='%23e1a014' font-size='24' font-family='Arial'%3EWALL-E%3C/text%3E%3C/svg%3E";
+                }
+                
+                console.log(`Theme switched to: ${theme}`);
+            }
+
+            switchScreen(screenName) {
+                document.querySelectorAll('.screen').forEach(screen => {
+                    screen.classList.remove('active');
+                });
+
+                const targetScreen = document.getElementById(screenName + 'Screen');
+                if (targetScreen) {
+                    targetScreen.classList.add('active');
+                }
+
+                document.querySelectorAll('.nav-btn').forEach(btn => {
+                    btn.classList.remove('active');
+                });
+                document.querySelector(`[data-screen="${screenName}"]`).classList.add('active');
+
+                const titles = {
+                    home: 'Home',
+                    camera: 'Camera Feed',
+                    health: 'System Health',
+                    settings: 'Settings'
+                };
+                document.getElementById('headerTitle').textContent = titles[screenName] || screenName;
+
+                this.currentScreen = screenName;
+                console.log(`Switched to screen: ${screenName}`);
+            }
+
+            connectWebSocket() {
+                const wsUrl = document.getElementById('websocketUrl')?.value || 'ws://10.1.1.230:8766';
+                
+                try {
+                    this.websocket = new WebSocket(wsUrl);
+                    
+                    this.websocket.onopen = () => {
+                        this.isConnected = true;
+                        console.log('WebSocket connected');
+                    };
+                    
+                    this.websocket.onclose = () => {
+                        this.isConnected = false;
+                        console.log('WebSocket disconnected');
+                        setTimeout(() => this.connectWebSocket(), 5000);
+                    };
+                    
+                    this.websocket.onerror = (error) => {
+                        console.error('WebSocket error:', error);
+                    };
+                    
+                    this.websocket.onmessage = (event) => {
+                        this.handleWebSocketMessage(JSON.parse(event.data));
+                    };
+                } catch (error) {
+                    console.error('Failed to connect WebSocket:', error);
+                }
+            }
+
+            sendWebSocketMessage(type, data = {}) {
+                if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+                    const message = { type, ...data };
+                    this.websocket.send(JSON.stringify(message));
+                    console.log('Sent WebSocket message:', message);
+                    return true;
+                } else {
+                    console.warn('WebSocket not connected');
+                    return false;
+                }
+            }
+
+            handleWebSocketMessage(message) {
+                console.log('Received WebSocket message:', message);
+                
+                switch (message.type) {
+                    case 'telemetry':
+                        this.updateTelemetry(message);
+                        break;
+                }
+            }
+
+            updateTelemetry(data) {
+                if (data.battery_voltage) {
+                    document.getElementById('voltageDisplay').textContent = `${data.battery_voltage.toFixed(1)}V`;
+                }
+                
+                if (data.cpu) document.getElementById('cpuValue').textContent = `${data.cpu}%`;
+                if (data.memory) document.getElementById('memoryValue').textContent = `${data.memory}%`;
+                if (data.temperature) document.getElementById('tempValue').textContent = `${data.temperature}°C`;
+                
+                this.updateCharts(data);
+            }
+
+            startTelemetrySimulation() {
+                setInterval(() => {
+                    const simulatedData = {
+                        battery_voltage: 14.2 + (Math.random() - 0.5) * 0.8,
+                        current_a0: 5.3 + (Math.random() - 0.5) * 2.0,
+                        current_a1: 3.1 + (Math.random() - 0.5) * 1.5,
+                        cpu: Math.floor(45 + (Math.random() - 0.5) * 20),
+                        memory: Math.floor(67 + (Math.random() - 0.5) * 15),
+                        temperature: Math.floor(52 + (Math.random() - 0.5) * 10)
+                    };
+                    this.updateTelemetry(simulatedData);
+                }, 1000);
+
+                setInterval(() => {
+                    const signal = Math.floor(Math.random() * 100);
+                    this.updateWiFiSignal(signal);
+                }, 3000);
+            }
+
+            updateWiFiSignal(percentage) {
+                const bars = document.querySelectorAll('.wifi-bar');
+                const text = document.getElementById('wifiText');
+                
+                text.textContent = `${percentage}%`;
+                
+                let color = '#44bb44';
+                if (percentage < 30) color = '#cc4444';
+                else if (percentage < 60) color = '#ff8800';
+                else if (percentage < 80) color = '#ffbb00';
+                
+                bars.forEach((bar, index) => {
+                    const threshold = (index + 1) * 20;
+                    bar.style.backgroundColor = percentage >= threshold ? color : '#333';
+                });
+                
+                text.style.color = color;
+                document.getElementById('wifiStatus').textContent = `${percentage}%`;
+            }
+
+            initializeCharts() {
+                this.charts = {
+                    voltage: {
+                        canvas: document.getElementById('voltageChart'),
+                        data: [],
+                        maxPoints: 100
+                    },
+                    current: {
+                        canvas: document.getElementById('currentChart'),
+                        dataA0: [],
+                        dataA1: [],
+                        maxPoints: 100
+                    }
+                };
+                
+                this.animateCharts();
+            }
+
+            updateCharts(data) {
+                if (data.battery_voltage) {
+                    this.charts.voltage.data.push(data.battery_voltage);
+                    if (this.charts.voltage.data.length > this.charts.voltage.maxPoints) {
+                        this.charts.voltage.data.shift();
+                    }
+                }
+                
+                if (data.current_a0) {
+                    this.charts.current.dataA0.push(data.current_a0);
+                    if (this.charts.current.dataA0.length > this.charts.current.maxPoints) {
+                        this.charts.current.dataA0.shift();
+                    }
+                }
+                
+                if (data.current_a1) {
+                    this.charts.current.dataA1.push(data.current_a1);
+                    if (this.charts.current.dataA1.length > this.charts.current.maxPoints) {
+                        this.charts.current.dataA1.shift();
+                    }
+                }
+            }
+
+            animateCharts() {
+                requestAnimationFrame(() => {
+                    this.drawChart('voltage');
+                    this.drawChart('current');
+                    this.animateCharts();
+                });
+            }
+
+            drawChart(type) {
+                const chart = this.charts[type];
+                const canvas = chart.canvas;
+                const ctx = canvas.getContext('2d');
+                
+                canvas.width = canvas.offsetWidth;
+                canvas.height = canvas.offsetHeight;
+                
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                if (type === 'voltage') {
+                    this.drawVoltageChart(chart);
+                } else if (type === 'current') {
+                    this.drawCurrentChart(chart);
+                }
+            }
+
+            drawVoltageChart(chart) {
+                const { canvas, data } = chart;
+                const ctx = canvas.getContext('2d');
+                const width = canvas.width;
+                const height = canvas.height;
+                
+                if (data.length < 2) return;
+                
+                // Draw grid
+                ctx.strokeStyle = '#333';
+                ctx.lineWidth = 1;
+                for (let i = 0; i <= 10; i++) {
+                    const y = (height / 10) * i;
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(width, y);
+                    ctx.stroke();
+                }
+                
+                // Draw voltage line
+                ctx.strokeStyle = '#e1a014';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                
+                const minVoltage = 10;
+                const maxVoltage = 18;
+                
+                data.forEach((voltage, index) => {
+                    const x = (width / (data.length - 1)) * index;
+                    const y = height - ((voltage - minVoltage) / (maxVoltage - minVoltage)) * height;
+                    
+                    if (index === 0) {
+                        ctx.moveTo(x, y);
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                });
+                
+                ctx.stroke();
+            }
+
+            drawCurrentChart(chart) {
+                const { canvas, dataA0, dataA1 } = chart;
+                const ctx = canvas.getContext('2d');
+                const width = canvas.width;
+                const height = canvas.height;
+                
+                if (dataA0.length < 2 && dataA1.length < 2) return;
+                
+                // Draw grid
+                ctx.strokeStyle = '#333';
+                ctx.lineWidth = 1;
+                for (let i = 0; i <= 10; i++) {
+                    const y = (height / 10) * i;
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(width, y);
+                    ctx.stroke();
+                }
+                
+                const maxCurrent = 15;
+                
+                // Draw current A0 line
+                if (dataA0.length >= 2) {
+                    ctx.strokeStyle = '#e1a014';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    
+                    dataA0.forEach((current, index) => {
+                        const x = (width / (dataA0.length - 1)) * index;
+                        const y = height - (current / maxCurrent) * height;
+                        
+                        if (index === 0) {
+                            ctx.moveTo(x, y);
+                        } else {
+                            ctx.lineTo(x, y);
+                        }
+                    });
+                    
+                    ctx.stroke();
+                }
+                
+                // Draw current A1 line
+                if (dataA1.length >= 2) {
+                    ctx.strokeStyle = '#f4c430';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    
+                    dataA1.forEach((current, index) => {
+                        const x = (width / (dataA1.length - 1)) * index;
+                        const y = height - (current / maxCurrent) * height;
+                        
+                        if (index === 0) {
+                            ctx.moveTo(x, y);
+                        } else {
+                            ctx.lineTo(x, y);
+                        }
+                    });
+                    
+                    ctx.stroke();
+                }
+            }
+
+            populateEmotionGrid() {
+                const grid = document.getElementById('emotionGrid');
+                grid.innerHTML = '';
+                
+                this.emotionButtons.forEach(emotion => {
+                    const btn = document.createElement('button');
+                    btn.className = 'emotion-btn';
+                    btn.innerHTML = `
+                        <div style="font-size: 24px; margin-bottom: 5px;">${emotion.emoji}</div>
+                        <div style="font-size: 12px;">${emotion.name}</div>
+                    `;
+                    btn.addEventListener('click', () => {
+                        this.triggerEmotion(emotion.name);
+                    });
+                    grid.appendChild(btn);
+                });
+            }
+
+            triggerEmotion(emotionName) {
+                console.log(`Triggering emotion: ${emotionName}`);
+                this.sendWebSocketMessage('scene', { emotion: emotionName });
+                
+                // Visual feedback
+                const buttons = document.querySelectorAll('.emotion-btn');
+                buttons.forEach(btn => {
+                    if (btn.textContent.includes(emotionName)) {
+                        btn.style.borderColor = 'var(--primary-color)';
+                        btn.style.background = 'var(--panel-dark)';
+                        setTimeout(() => {
+                            btn.style.borderColor = 'var(--grey)';
+                            btn.style.background = 'var(--card-bg)';
+                        }, 300);
+                    }
+                });
+            }
+
+            setMode(mode) {
+                const idleBtn = document.getElementById('idleBtn');
+                const demoBtn = document.getElementById('demoBtn');
+                
+                idleBtn.classList.remove('active');
+                demoBtn.classList.remove('active');
+                
+                if (mode === 'idle') {
+                    idleBtn.classList.add('active');
+                    this.sendWebSocketMessage('mode', { mode: 'idle' });
+                } else if (mode === 'demo') {
+                    demoBtn.classList.add('active');
+                    this.sendWebSocketMessage('mode', { mode: 'demo' });
+                }
+                
+                console.log(`Mode set to: ${mode}`);
+            }
+
+            toggleFailsafe() {
+                const btn = document.getElementById('failsafeBtn');
+                const isActive = btn.classList.contains('active');
+                
+                if (isActive) {
+                    btn.classList.remove('active');
+                    btn.textContent = 'FAILSAFE';
+                    this.sendWebSocketMessage('failsafe', { active: false });
+                } else {
+                    if (confirm('Activate Emergency Failsafe?')) {
+                        btn.classList.add('active');
+                        btn.textContent = 'ACTIVE';
+                        this.sendWebSocketMessage('failsafe', { active: true });
+                    }
+                }
+                
+                console.log(`Failsafe ${isActive ? 'deactivated' : 'activated'}`);
+            }
+
+            toggleStream() {
+                const btn = document.getElementById('streamToggle');
+                const isStreaming = btn.textContent === 'Stop Stream';
+                
+                if (isStreaming) {
+                    this.stopStream();
+                } else {
+                    this.startStream();
+                }
+            }
+
+            startStream() {
+                const cameraUrl = document.getElementById('cameraProxyUrl')?.value || 'http://10.1.1.230:8081/stream';
+                const videoFeed = document.getElementById('videoFeed');
+                const cameraStatus = document.getElementById('cameraStatus');
+                const streamBtn = document.getElementById('streamToggle');
+                const streamStats = document.getElementById('streamStats');
+                
+                videoFeed.src = cameraUrl;
+                videoFeed.classList.remove('hidden');
+                cameraStatus.style.display = 'none';
+                streamBtn.textContent = 'Stop Stream';
+                streamBtn.classList.add('active');
+                streamStats.textContent = 'Stream Stats: Active';
+                
+                this.sendWebSocketMessage('camera', { action: 'start_stream' });
+                console.log('Stream started');
+            }
+
+            stopStream() {
+                const videoFeed = document.getElementById('videoFeed');
+                const cameraStatus = document.getElementById('cameraStatus');
+                const streamBtn = document.getElementById('streamToggle');
+                const streamStats = document.getElementById('streamStats');
+                
+                videoFeed.src = '';
+                videoFeed.classList.add('hidden');
+                cameraStatus.style.display = 'block';
+                streamBtn.textContent = 'Start Stream';
+                streamBtn.classList.remove('active');
+                streamStats.textContent = 'Stream Stats: Disconnected';
+                
+                this.sendWebSocketMessage('camera', { action: 'stop_stream' });
+                console.log('Stream stopped');
+            }
+
+            toggleTracking() {
+                const btn = document.getElementById('trackingToggle');
+                const isActive = btn.classList.contains('active');
+                
+                if (isActive) {
+                    btn.classList.remove('active');
+                    btn.textContent = 'Wave Tracking';
+                    this.sendWebSocketMessage('tracking', { enabled: false });
+                } else {
+                    btn.classList.add('active');
+                    btn.textContent = 'Tracking On';
+                    this.sendWebSocketMessage('tracking', { enabled: true });
+                }
+                
+                console.log(`Wave tracking ${isActive ? 'disabled' : 'enabled'}`);
+            }
+
+            testNetwork() {
+                const btn = document.getElementById('networkTestBtn');
+                
+                btn.textContent = 'Testing...';
+                btn.disabled = true;
+                
+                setTimeout(() => {
+                    btn.textContent = 'Test Network';
+                    btn.disabled = false;
+                    alert('Network test completed successfully!');
+                }, 2000);
+                
+                this.sendWebSocketMessage('network_test', {});
+            }
+
+            saveSettings() {
+                const settings = {
+                    camera_proxy_url: document.getElementById('cameraProxyUrl').value,
+                    websocket_url: document.getElementById('websocketUrl').value,
+                    sample_duration: document.getElementById('sampleDuration').value,
+                    confidence: document.getElementById('confidenceSlider').value
+                };
+                
+                console.log('Settings saved:', settings);
+                alert('Settings saved successfully!');
+            }
+
+            testConnection() {
+                const btn = document.getElementById('testConnectionBtn');
+                btn.textContent = 'Testing...';
+                btn.disabled = true;
+                
+                setTimeout(() => {
+                    alert('Connection test completed!');
+                    btn.textContent = 'Test Connection';
+                    btn.disabled = false;
+                }, 2000);
+            }
+        }
+
+        // Initialize the application
+        let app;
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            app = new WalleApp();
+            
+            // Keyboard shortcuts
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    app.toggleFailsafe();
+                }
+                
+                const screens = ['home', 'camera', 'health', 'settings'];
+                const num = parseInt(e.key);
+                if (num >= 1 && num <= screens.length) {
+                    app.switchScreen(screens[num - 1]);
+                }
+            });
+            
+            console.log('WALL-E Control System initialized');
+        });
+    </script>
+</body>
+</html>

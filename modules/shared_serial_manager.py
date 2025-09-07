@@ -267,6 +267,8 @@ class EnhancedSharedSerialPortManager:
             with self.connection_lock:
                 if not self.connected or not self.serial_conn.is_open:
                     logger.warning("Serial connection not available")
+                    if command.callback:
+                        command.callback(None)
                     return
                 
                 result = self._execute_maestro_command(command)
@@ -339,7 +341,41 @@ class EnhancedSharedSerialPortManager:
                 
                 self.serial_conn.write(cmd_bytes)
                 return True
+
+            elif cmd_type == "get_all_positions":
+                # Batch position reading
+                channels = data.get("channels", [])
+                positions = {}
                 
+                try:
+                    for channel in channels:
+                        try:
+                            # Read individual position
+                            cmd_bytes = bytes([0xAA, device_num, 0x10, channel])
+                            self.serial_conn.write(cmd_bytes)
+                            
+                            # Small delay between reads
+                            time.sleep(0.005)
+                            response = self.serial_conn.read(2)
+                            
+                            if len(response) == 2:
+                                position = ((response[1] << 8) | response[0]) // 4
+                                positions[channel] = position
+                            else:
+                                positions[channel] = None
+                                logger.debug(f"Invalid position response for channel {channel}")
+                                
+                        except Exception as e:
+                            logger.error(f"Error reading position for channel {channel}: {e}")
+                            positions[channel] = None
+                    
+                    logger.debug(f"Read {len(positions)} positions from device #{device_num}")
+                    return positions
+                    
+                except Exception as e:
+                    logger.error(f"Batch position read error: {e}")
+                    return {}
+
             elif cmd_type == "set_speed":
                 speed = data["speed"]
                 channel = data["channel"]
@@ -428,7 +464,7 @@ class EnhancedMaestroControllerShared:
         
         # Status tracking
         self.connected = False
-        self.channel_count = 18
+        self.channel_count = 0
         
         # Register with shared manager
         if self.shared_manager.register_device(device_id, device_number, self):
@@ -471,7 +507,114 @@ class EnhancedMaestroControllerShared:
             builder.set_callback(callback)
         
         return self.shared_manager.send_batch_command(builder)
-    
+
+    def detect_channel_count_advanced(self) -> int:
+        """Auto-detection using device info response"""
+        print(f"=== DEVICE INFO DETECTION: {self.device_id} (device #{self.device_number}) ===")
+        
+        try:
+            if not self.connected:
+                return 0
+            
+            with self.shared_manager.connection_lock:
+                if self.shared_manager.connected and self.shared_manager.serial_conn:
+                    # Get device info command (0x21)
+                    cmd_bytes = bytes([0xAA, self.device_number, 0x21])
+                    self.shared_manager.serial_conn.write(cmd_bytes)
+                    time.sleep(0.050)
+                    
+                    response = self.shared_manager.serial_conn.read(16)
+                    if len(response) >= 2:
+                        device_info = response.hex()
+                        print(f"  Device info: {device_info}")
+                        
+                        # Based on your results:
+                        # 1100 = 24-channel Maestro
+                        # 0100 = 18-channel Maestro
+                        if device_info.startswith('1100'):
+                            detected_channels = 24
+                            print(f"  Device info indicates 24-channel Maestro")
+                        elif device_info.startswith('0100'):
+                            detected_channels = 18
+                            print(f"  Device info indicates 18-channel Maestro")
+                        else:
+                            # Unknown device info, fall back to guess
+                            print(f"  Unknown device info, using fallback...")
+                            detected_channels = self._guess_channel_count()
+                    else:
+                        print(f"  No device info response, using fallback...")
+                        detected_channels = self._guess_channel_count()
+                    
+                    self.channel_count = detected_channels
+                    print(f"=== FINAL: {self.device_id} = {detected_channels} channels ===")
+                    return detected_channels
+            
+        except Exception as e:
+            print(f"=== ERROR: {self.device_id} - {e} ===")
+            fallback = self._guess_channel_count()
+            self.channel_count = fallback
+            return fallback
+
+    def _guess_channel_count(self) -> int:
+        """Fallback method to guess channel count based on device number"""
+        # Common Maestro configurations:
+        # 6-channel, 12-channel, 18-channel, 24-channel
+        common_configs = [6, 12, 18, 24]
+        
+        # Default based on your typical setup
+        if self.device_number == 12:  # Maestro 1
+            return 18
+        elif self.device_number == 13:  # Maestro 2
+            return 24
+        else:
+            return 18  # Safe default
+
+
+    def get_all_positions_batch(self, callback: Optional[Callable] = None,
+                            priority: CommandPriority = CommandPriority.LOW) -> bool:
+        """
+        Get all servo positions using individual requests (fallback method)
+        """
+        try:
+            positions = {}
+            positions_received = 0
+            total_channels = self.channel_count
+            
+            def position_callback(channel):
+                def inner_callback(position):
+                    nonlocal positions_received
+                    positions[channel] = position
+                    positions_received += 1
+                    
+                    # When all positions received, call the main callback
+                    if positions_received >= total_channels:
+                        if callback:
+                            # Ensure callback gets a proper dictionary
+                            clean_positions = {k: v for k, v in positions.items() if v is not None}
+                            callback(clean_positions)
+                return inner_callback
+            
+            # Request all positions individually
+            success_count = 0
+            for channel in range(total_channels):
+                success = self.get_position(channel, position_callback(channel))
+                if success:
+                    success_count += 1
+            
+            # If no individual requests succeeded, call callback immediately
+            if success_count == 0:
+                if callback:
+                    callback({})
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Get all positions batch error: {e}")
+            if callback:
+                callback({})
+            return False
+
     def set_multiple_targets_with_settings(self, servo_configs: List[Dict[str, Any]],
                                          priority: CommandPriority = CommandPriority.NORMAL,
                                          callback: Optional[Callable] = None) -> bool:

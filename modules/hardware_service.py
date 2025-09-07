@@ -681,23 +681,52 @@ class HardwareService:
         except Exception as e:
             logger.error(f"Get servo position error: {e}")
             return False
-    
+         
     async def get_all_servo_positions(self, maestro_num: int, callback: Callable) -> bool:
         """Get all servo positions for a Maestro"""
         try:
             maestro = self.maestro1 if maestro_num == 1 else self.maestro2
-            success = maestro.get_all_positions_batch(callback=callback)
+            
+            if not maestro or not maestro.connected:
+                logger.error(f"Maestro {maestro_num} not connected")
+                return False
+            
+            def sync_callback(positions):
+                """Completely synchronous callback wrapper"""
+                try:
+                    if positions is None:
+                        positions = {}
+                    
+                    # Just call the callback directly - no async handling
+                    callback(positions)
+                        
+                except Exception as e:
+                    logger.error(f"Callback wrapper error: {e}")
+                    import traceback
+                    logger.error(f"Full traceback: {traceback.format_exc()}")
+            
+            success = maestro.get_all_positions_batch(callback=sync_callback)
             return success
             
         except Exception as e:
             logger.error(f"Get all servo positions error: {e}")
-            return False
+            return False     
     
     async def get_maestro_info(self, maestro_num: int) -> Optional[Dict[str, Any]]:
         """Get Maestro controller information"""
         try:
             maestro = self.maestro1 if maestro_num == 1 else self.maestro2
             
+            if not maestro:
+                return None
+                    
+            # Trigger channel detection if not already done or if channel count is 0
+            if maestro.channel_count == 0:
+                detected_count = maestro.detect_channel_count_advanced()
+                if detected_count > 0:
+                    maestro.channel_count = detected_count
+                    logger.info(f"Updated Maestro {maestro_num} channel count to {detected_count}")
+
             info = {
                 "connected": maestro.connected,
                 "channels": maestro.channel_count,
