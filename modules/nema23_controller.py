@@ -62,8 +62,8 @@ class StepperConfig:
     
     # Speed settings (steps per second)
     homing_speed: int = 400          # Slow speed for homing
-    normal_speed: int = 1200         # Normal movement speed
-    max_speed: int = 2000            # Maximum speed
+    normal_speed: int = 1000         # Normal movement speed
+    max_speed: int = 1200            # Maximum speed
     
     # Acceleration settings
     acceleration: int = 800          # Steps per second²
@@ -158,7 +158,13 @@ class NEMA23Controller:
     def step_pulse(self):
         """Generate a single step pulse using compatibility layer"""
         if self.gpio_initialized:
-            pulse_pin(self.config.step_pin, self.config.step_pulse_width)
+            from modules.gpio_compat import set_output
+            import time
+            
+            # Create manual pulse
+            set_output(self.config.step_pin, True)   # Pulse HIGH
+            time.sleep(self.config.step_pulse_width / 1_000_000)  # Convert microseconds to seconds
+            set_output(self.config.step_pin, False)  # Pulse LOW
     
     def is_limit_switch_triggered(self) -> bool:
         """Check if limit switch is triggered"""
