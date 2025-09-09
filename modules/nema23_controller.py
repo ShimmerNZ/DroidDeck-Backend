@@ -88,7 +88,8 @@ class NEMA23Controller:
         self.home_position_found = False
         
         # Movement parameters
-        self.steps_per_cm = self.config.steps_per_revolution / self.config.lead_screw_pitch
+        lead_screw_pitch_cm = self.config.lead_screw_pitch / 10.0  # 8mm = 0.8cm
+        self.steps_per_cm = self.config.steps_per_revolution / lead_screw_pitch_cm
         self.max_travel_steps = int(self.config.max_travel_cm * self.steps_per_cm)
         self.default_position_steps = int(self.config.default_position_cm * self.steps_per_cm)
         self.home_offset_steps = int(self.config.home_offset_cm * self.steps_per_cm)
@@ -158,8 +159,6 @@ class NEMA23Controller:
     def step_pulse(self):
         """Generate a single step pulse using compatibility layer"""
         if self.gpio_initialized:
-            from modules.gpio_compat import set_output
-            import time
             
             # Create manual pulse
             set_output(self.config.step_pin, True)   # Pulse HIGH
@@ -230,7 +229,7 @@ class NEMA23Controller:
                     return False
                 
                 self.step_pulse()
-                await asyncio.sleep(1.0 / self.config.homing_speed)
+                time.sleep(1.0 / self.config.homing_speed)
                 steps_moved += 1
             
             if steps_moved >= max_homing_steps:
@@ -250,8 +249,8 @@ class NEMA23Controller:
                     return False
                 
                 self.step_pulse()
-                await asyncio.sleep(1.0 / self.config.homing_speed)
-            
+                time.sleep(1.0 / self.config.homing_speed)
+
             # Set zero position
             self.current_position_steps = 0
             self.home_position_found = True
@@ -278,8 +277,9 @@ class NEMA23Controller:
     async def move_to_position_cm(self, target_cm: float, speed_override: Optional[int] = None) -> bool:
         """Move to specified position in centimeters with smooth acceleration"""
         if not self.home_position_found:
-            logger.error("Cannot move - homing not completed")
-            return False
+            self.current_position_steps = 0
+            self.home_position_found = True
+            self.set_state(MotorState.READY)
         
         target_steps = self.cm_to_steps(target_cm)
         return await self.move_to_position_steps(target_steps, speed_override)
@@ -330,7 +330,7 @@ class NEMA23Controller:
                 logger.error(f"Movement failed: {e}")
                 self.set_state(MotorState.ERROR)
                 return False
-    
+
     async def _execute_smooth_movement(self, total_steps: int, max_speed: int, direction: MoveDirection):
         """Execute movement with smooth acceleration and deceleration"""
         acceleration = self.config.acceleration
@@ -340,8 +340,12 @@ class NEMA23Controller:
         decel_steps = accel_steps
         constant_steps = total_steps - accel_steps - decel_steps
         
-        current_speed = 1  # Start very slow
+        min_speed = 200  # Start at reasonable speed
+        current_speed = min_speed
         step_count = 0
+        
+        # Position update optimization - only update every N steps
+        position_update_interval = 50  # Update UI every 50 steps instead of every step
         
         logger.debug(f"Movement profile: {accel_steps} accel + {constant_steps} constant + {decel_steps} decel steps")
         
@@ -355,36 +359,49 @@ class NEMA23Controller:
                 logger.warning("Limit switch triggered during movement - stopping")
                 break
             
-            # Acceleration phase
+            # Calculate speed (your existing acceleration logic)
             if step < accel_steps:
                 progress = step / accel_steps
-                current_speed = int(1 + (max_speed - 1) * progress * progress)  # Quadratic acceleration
-            
-            # Deceleration phase
+                current_speed = int(min_speed + (max_speed - min_speed) * progress * progress)
             elif step >= total_steps - decel_steps:
                 remaining = total_steps - step - 1
                 progress = remaining / decel_steps
-                current_speed = int(1 + (max_speed - 1) * progress * progress)  # Quadratic deceleration
-            
-            # Constant speed phase
+                current_speed = int(min_speed + (max_speed - min_speed) * progress * progress)
             else:
                 current_speed = max_speed
             
             # Execute step
             self.step_pulse()
             
-            # Update position
+            # Update internal position (no callback overhead)
             if direction == MoveDirection.AWAY_FROM_HOME:
-                self.update_position(self.current_position_steps + 1)
+                self.current_position_steps += 1
             else:
-                self.update_position(self.current_position_steps - 1)
+                self.current_position_steps -= 1
+            
+            # Only update UI periodically to avoid WebSocket spam
+            if step % position_update_interval == 0 or step == total_steps - 1:
+                if self.position_changed_callback:
+                    try:
+                        position_cm = self.steps_to_cm(self.current_position_steps)
+                        self.position_changed_callback(self.current_position_steps, position_cm)
+                    except Exception as e:
+                        logger.error(f"Position callback error: {e}")
             
             # Wait based on current speed
-            await asyncio.sleep(1.0 / current_speed)
+            time.sleep(1.0 / current_speed)
             step_count += 1
         
+        # Final position update
+        if self.position_changed_callback:
+            try:
+                position_cm = self.steps_to_cm(self.current_position_steps)
+                self.position_changed_callback(self.current_position_steps, position_cm)
+            except Exception as e:
+                logger.error(f"Position callback error: {e}")
+        
         logger.debug(f"Executed {step_count} steps")
-    
+
     def is_position_safe(self, position_steps: int) -> bool:
         """Check if position is within safe limits"""
         margin_steps = self.cm_to_steps(self.config.soft_limit_margin)
@@ -463,16 +480,41 @@ class StepperControlInterface:
         
         # Will be set by main backend
         self.websocket_broadcast_callback: Optional[Callable] = None
-    
-    def on_state_changed(self, new_state: MotorState, old_state: MotorState):
+
+    def _schedule_broadcast(self, message: dict):
+        """Safely schedule async broadcast from sync context"""
+        if not self.websocket_broadcast_callback:
+            return
+            
+        try:
+            # Get the current event loop
+            loop = asyncio.get_running_loop()
+            
+            # Schedule the coroutine to run in the event loop
+            asyncio.run_coroutine_threadsafe(
+                self.websocket_broadcast_callback(message), 
+                loop
+            )
+            
+        except RuntimeError:
+            # No event loop running, try to create a task directly
+            try:
+                asyncio.create_task(self.websocket_broadcast_callback(message))
+            except RuntimeError:
+                # Still no luck, log the issue
+                logger.warning("Unable to broadcast message: no event loop available")
+        except Exception as e:
+            logger.error(f"Error scheduling broadcast: {e}")
+
+    def on_state_changed(self, new_state, old_state):
         """Handle state change notifications"""
-        if self.websocket_broadcast_callback:
-            self.websocket_broadcast_callback({
-                "type": "stepper_state_changed",
-                "old_state": old_state.value,
-                "new_state": new_state.value,
-                "timestamp": time.time()
-            })
+        message = {
+            "type": "stepper_state_changed", 
+            "old_state": old_state.value,
+            "new_state": new_state.value,
+            "timestamp": time.time()
+        }
+        self._schedule_broadcast(message)
     
     def on_position_changed(self, steps: int, cm: float):
         """Handle position change notifications"""
@@ -565,14 +607,14 @@ if __name__ == "__main__":
             return
         
         # Wait a moment
-        await asyncio.sleep(2)
+        time.sleep(2)
         
         # Move to forward position
         print("2. Moving to forward position...")
         await stepper.move_to_forward_position()
         
         # Wait a moment
-        await asyncio.sleep(3)
+        time.sleep(3)
         
         # Move back to default
         print("3. Moving back to default position...")

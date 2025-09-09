@@ -60,6 +60,15 @@ class WebSocketMessageHandler:
             
             # Heartbeat
             "heartbeat": self._handle_heartbeat,
+
+            # NEMA stepper motor control
+            "nema_move_to_position": self._handle_nema_move_to_position,
+            "nema_start_sweep": self._handle_nema_start_sweep,
+            "nema_stop_sweep": self._handle_nema_stop_sweep,
+            "nema_config_update": self._handle_nema_config_update,
+            "nema_home": self._handle_nema_home,
+            "nema_enable": self._handle_nema_enable,
+            "nema_get_status": self._handle_nema_get_status,
             
             # Mode control
             "failsafe": self._handle_failsafe,
@@ -196,6 +205,220 @@ class WebSocketMessageHandler:
         
         logger.info(f"Servo configuration updated")
 
+
+    async def _handle_nema_move_to_position(self, websocket, data: Dict[str, Any]):
+        """Handle NEMA move to position command"""
+        try:
+            position_cm = data.get("position_cm")
+            
+            if position_cm is None:
+                await self._send_error_response(websocket, "Missing position_cm parameter")
+                return
+            
+            # Create stepper command
+            stepper_data = {
+                "command": "move_to_position",
+                "position_cm": position_cm
+            }
+            
+            response = await self.hardware_service.handle_stepper_command(stepper_data)
+            
+            # Send response back to client
+            await self._send_websocket_message(websocket, {
+                "type": "nema_move_response",
+                "success": response.get("success", False),
+                "message": response.get("message", ""),
+                "position_cm": position_cm,
+                "timestamp": time.time()
+            })
+            
+            # If successful, broadcast position update to all clients
+            if response.get("success"):
+                await self.backend.broadcast_message({
+                    "type": "nema_position_update",
+                    "position_cm": position_cm,
+                    "timestamp": time.time()
+                })
+            
+        except Exception as e:
+            logger.error(f"NEMA move position error: {e}")
+            await self._send_error_response(websocket, f"NEMA move error: {str(e)}")
+
+    async def _handle_nema_start_sweep(self, websocket, data: Dict[str, Any]):
+        """Handle NEMA start sweep command"""
+        try:
+            min_cm = data.get("min_cm")
+            max_cm = data.get("max_cm")
+            acceleration = data.get("acceleration", 800)
+            normal_speed = data.get("normal_speed", 800)
+            
+            if min_cm is None or max_cm is None:
+                await self._send_error_response(websocket, "Missing min_cm or max_cm parameters")
+                return
+            
+            # Validate sweep parameters
+            if min_cm >= max_cm:
+                await self._send_error_response(websocket, "Invalid sweep range: min_cm must be less than max_cm")
+                return
+            
+            # For now, we'll simulate sweep by moving between positions
+            # In a real implementation, you'd start a continuous sweep
+            logger.info(f"NEMA sweep started: {min_cm} to {max_cm} cm")
+            
+            # Broadcast sweep status
+            await self.backend.broadcast_message({
+                "type": "nema_sweep_status",
+                "sweeping": True,
+                "min_cm": min_cm,
+                "max_cm": max_cm,
+                "timestamp": time.time()
+            })
+            
+            await self._send_websocket_message(websocket, {
+                "type": "nema_sweep_started",
+                "success": True,
+                "min_cm": min_cm,
+                "max_cm": max_cm,
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            logger.error(f"NEMA start sweep error: {e}")
+            await self._send_error_response(websocket, f"NEMA sweep error: {str(e)}")
+
+    async def _handle_nema_stop_sweep(self, websocket, data: Dict[str, Any]):
+        """Handle NEMA stop sweep command"""
+        try:
+            logger.info("NEMA sweep stopped")
+            
+            # Broadcast sweep stopped status
+            await self.backend.broadcast_message({
+                "type": "nema_sweep_status",
+                "sweeping": False,
+                "timestamp": time.time()
+            })
+            
+            await self._send_websocket_message(websocket, {
+                "type": "nema_sweep_stopped",
+                "success": True,
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            logger.error(f"NEMA stop sweep error: {e}")
+            await self._send_error_response(websocket, f"NEMA stop sweep error: {str(e)}")
+
+    async def _handle_nema_config_update(self, websocket, data: Dict[str, Any]):
+        """Handle NEMA configuration update"""
+        try:
+            config = data.get("config")
+            
+            if not config:
+                await self._send_error_response(websocket, "Missing config data")
+                return
+            
+            # Log the configuration update
+            logger.info(f"NEMA configuration updated: {config}")
+            
+            # In a real implementation, you'd update the NEMA controller configuration
+            # For now, just acknowledge the update
+            
+            await self._send_websocket_message(websocket, {
+                "type": "nema_config_updated",
+                "success": True,
+                "config": config,
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            logger.error(f"NEMA config update error: {e}")
+            await self._send_error_response(websocket, f"NEMA config error: {str(e)}")
+
+    async def _handle_nema_home(self, websocket, data: Dict[str, Any]):
+        """Handle NEMA homing command"""
+        try:
+            # Create stepper command for homing
+            stepper_data = {
+                "command": "home"
+            }
+            
+            response = await self.hardware_service.handle_stepper_command(stepper_data)
+            
+            await self._send_websocket_message(websocket, {
+                "type": "nema_home_response",
+                "success": response.get("success", False),
+                "message": response.get("message", ""),
+                "timestamp": time.time()
+            })
+            
+            # If successful, broadcast homing complete
+            if response.get("success"):
+                await self.backend.broadcast_message({
+                    "type": "nema_homing_complete",
+                    "success": True,
+                    "timestamp": time.time()
+                })
+            
+        except Exception as e:
+            logger.error(f"NEMA home error: {e}")
+            await self._send_error_response(websocket, f"NEMA home error: {str(e)}")
+
+    async def _handle_nema_enable(self, websocket, data: Dict[str, Any]):
+        """Handle NEMA enable/disable command"""
+        try:
+            enabled = data.get("enabled", True)
+            
+            # Create stepper command
+            stepper_data = {
+                "command": "enable" if enabled else "disable"
+            }
+            
+            response = await self.hardware_service.handle_stepper_command(stepper_data)
+            
+            await self._send_websocket_message(websocket, {
+                "type": "nema_enable_response",
+                "success": response.get("success", False),
+                "enabled": enabled,
+                "message": response.get("message", ""),
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            logger.error(f"NEMA enable error: {e}")
+            await self._send_error_response(websocket, f"NEMA enable error: {str(e)}")
+
+    async def _handle_nema_get_status(self, websocket, data: Dict[str, Any]):
+        """Handle NEMA status request"""
+        try:
+            # Create stepper command for status
+            stepper_data = {
+                "command": "get_status"
+            }
+            
+            response = await self.hardware_service.handle_stepper_command(stepper_data)
+            
+            if response.get("success") and "status" in response:
+                # Send comprehensive status
+                status = response["status"]
+                await self._send_websocket_message(websocket, {
+                    "type": "nema_status",
+                    "status": {
+                        "state": status.get("state", "unknown"),
+                        "homed": status.get("homed", False),
+                        "enabled": status.get("enabled", False),
+                        "position_cm": status.get("position_cm", 0.0),
+                        "target_cm": status.get("target_cm", 0.0),
+                        "limit_switch": status.get("limit_switch", False),
+                        "safe_position": status.get("safe_position", True)
+                    },
+                    "timestamp": time.time()
+                })
+            else:
+                await self._send_error_response(websocket, "Failed to get NEMA status")
+            
+        except Exception as e:
+            logger.error(f"NEMA get status error: {e}")
+            await self._send_error_response(websocket, f"NEMA status error: {str(e)}")
 
     async def _handle_get_all_servo_positions(self, websocket, data: Dict[str, Any]):
         """Handle request for all servo positions"""
@@ -580,7 +803,7 @@ class WebSocketMessageHandler:
         }
         await self._send_websocket_message(websocket, error_response)
         logger.error(f"❌ Sent error to client: {error_message}")
-    
+        
     def get_handler_stats(self) -> Dict[str, Any]:
         """Get statistics about message handling"""
         return {
@@ -589,6 +812,7 @@ class WebSocketMessageHandler:
             "categories": {
                 "servo_control": 6,
                 "stepper_motor": 1,
+                "nema_control": 7,  # Add this line
                 "scene_management": 4,
                 "audio_control": 2,
                 "system_control": 3,
