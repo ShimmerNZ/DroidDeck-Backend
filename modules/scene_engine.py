@@ -277,16 +277,6 @@ class EnhancedSceneEngine:
                     self.metrics.scenes_by_category.get(category, 0) + 1
     
     async def play_scene(self, scene_name: str, auto_triggered: bool = False) -> bool:
-        """
-        Execute a scene with enhanced batch command support and full error handling
-        
-        Args:
-            scene_name: Name of the scene to play
-            auto_triggered: Whether this was triggered automatically (for metrics)
-            
-        Returns:
-            bool: True if scene played successfully
-        """
         if scene_name not in self.scenes:
             logger.warning(f"⚠️ Scene '{scene_name}' not found")
             return False
@@ -320,12 +310,19 @@ class EnhancedSceneEngine:
             if len(self.scene_history) > 100:
                 self.scene_history = self.scene_history[-50:]
             
+            # DEBUG: Check callback before calling
+            logger.info(f"DEBUG: scene_started_callback exists: {self.scene_started_callback is not None}")
+            
             # Notify scene started
             if self.scene_started_callback:
                 try:
+                    logger.info(f"DEBUG: Calling scene_started_callback for {scene_name}")
                     await self.scene_started_callback(scene_name, scene)
+                    logger.info(f"DEBUG: scene_started_callback completed successfully")
                 except Exception as e:
                     logger.error(f"Scene started callback error: {e}")
+            else:
+                logger.warning(f"DEBUG: No scene_started_callback set!")
             
             # Execute scene components with enhanced batch support
             success = await self._execute_scene_components(scene)
@@ -340,12 +337,19 @@ class EnhancedSceneEngine:
             
             logger.info(f"✅ Scene '{scene_name}' completed in {execution_time:.2f}s")
             
+            # DEBUG: Check callback before calling
+            logger.info(f"DEBUG: About to call scene_completed_callback, callback exists: {self.scene_completed_callback is not None}")
+            
             # Notify scene completed
             if self.scene_completed_callback:
                 try:
+                    logger.info(f"DEBUG: Calling scene_completed_callback for {scene_name}")
                     await self.scene_completed_callback(scene_name, scene, success)
+                    logger.info(f"DEBUG: scene_completed_callback completed successfully")
                 except Exception as e:
                     logger.error(f"Scene completed callback error: {e}")
+            else:
+                logger.warning(f"DEBUG: No scene_completed_callback set!")
             
             # Process scene queue if any
             await self._process_scene_queue()
@@ -358,12 +362,21 @@ class EnhancedSceneEngine:
         except Exception as e:
             logger.error(f"❌ Failed to play scene '{scene_name}': {e}")
             
+            # DEBUG: Check callback before calling
+            logger.info(f"DEBUG: scene_error_callback exists: {self.scene_error_callback is not None}")
+            import traceback
+            traceback.print_exc()
+            
             # Notify scene error
             if self.scene_error_callback:
                 try:
+                    logger.info(f"DEBUG: Calling scene_error_callback for {scene_name}")
                     await self.scene_error_callback(scene_name, scene, str(e))
+                    logger.info(f"DEBUG: scene_error_callback completed successfully")
                 except Exception as e:
                     logger.error(f"Scene error callback error: {e}")
+            else:
+                logger.warning(f"DEBUG: No scene_error_callback set!")
             
             return False
         finally:
@@ -371,10 +384,11 @@ class EnhancedSceneEngine:
             self.current_scene = None
             self.interrupt_requested = False
             self.pause_requested = False
-    
+
     async def _wait_with_interrupt_support(self, duration: float):
         """Wait for scene duration with support for interrupts and pauses"""
         start_time = time.time()
+        logger.info(f"DEBUG: Starting wait for {duration}s")
         
         while time.time() - start_time < duration:
             if self.interrupt_requested:
@@ -396,7 +410,9 @@ class EnhancedSceneEngine:
                     logger.error(f"Progress callback error: {e}")
             
             await asyncio.sleep(0.1)
-    
+        
+        logger.info(f"DEBUG: Finished waiting after {time.time() - start_time:.2f}s")
+
     async def _execute_scene_components(self, scene: Dict[str, Any]) -> bool:
         """Execute all components of a scene with enhanced batch support"""
         success = True
@@ -411,12 +427,18 @@ class EnhancedSceneEngine:
         if scene.get("audio_enabled", False) and not self.interrupt_requested:
             audio_file = scene.get("audio_file")
             if audio_file:
-                audio_started = self.audio_controller.play_track(audio_file)
-                if audio_started:
-                    logger.info(f"🎵 Started audio: {audio_file}")
-                else:
-                    logger.warning(f"⚠️ Failed to start audio: {audio_file}")
+                # Quick validation before attempting playback
+                if not self.audio_controller.get_audio_info(audio_file):
+                    logger.warning(f"⚠️ Audio file not found: {audio_file}")
+                    audio_started = False
                     success = False
+                else:
+                    audio_started = self.audio_controller.play_track(audio_file)
+                    if audio_started:
+                        logger.info(f"🎵 Started audio: {audio_file}")
+                    else:
+                        logger.warning(f"⚠️ Failed to start audio: {audio_file}")
+                        success = False
         
         # Execute servo movements using batch commands
         if not self.interrupt_requested:

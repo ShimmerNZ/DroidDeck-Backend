@@ -591,22 +591,27 @@ class WALLEBackend:
     # ==================== CALLBACK HANDLERS ====================
     
     async def handle_telemetry_alert(self, alert, reading):
-        """Handle telemetry alerts"""
-        await self.broadcast_message({
-            "type": "telemetry_alert",
-            "alert": {
-                "name": alert.name,
-                "level": alert.level,
-                "message": alert.message,
-                "triggered_at": alert.first_triggered
-            },
-            "reading": {
+            """Handle telemetry alerts - FIXED for new current naming convention"""
+            # Build reading data safely with proper attribute names
+            reading_data = {
                 "battery_voltage": reading.battery_voltage,
-                "current": reading.current,
-                "temperature": reading.temperature
-            },
-            "timestamp": time.time()
-        })
+                "temperature": reading.temperature,
+                "current_left_track": reading.current_left_track,
+                "current_right_track": reading.current_right_track,
+                "current_electronics": reading.current_electronics,
+            }
+            
+            await self.broadcast_message({
+                "type": "telemetry_alert",
+                "alert": {
+                    "name": alert.name,
+                    "level": alert.level,
+                    "message": alert.message,
+                    "triggered_at": alert.first_triggered
+                },
+                "reading": reading_data,
+                "timestamp": time.time()
+            })
     
     async def handle_emergency_stop_event(self):
         """Handle emergency stop events from hardware"""
@@ -698,7 +703,14 @@ def load_system_configuration() -> Dict[str, Any]:
                 "maestro2": {"port": "/dev/ttyAMA0", "baud_rate": 9600, "device_number": 13},
                 "gpio": {"motor_step_pin": 16, "motor_dir_pin": 12, "motor_enable_pin": 13},
                 "timing": {"telemetry_interval": 0.2},
-                "audio": {"directory": "audio", "volume": 0.7}
+                "audio": {"directory": "audio", "volume": 0.7},
+                "stepper_motor": {
+                    "steps_per_revolution": 800,
+                    "homing_speed": 1600,
+                    "normal_speed": 4000,
+                    "max_speed": 4800,
+                    "acceleration": 3200
+                }
             }
         
         logger.info("✅ System configuration loaded")

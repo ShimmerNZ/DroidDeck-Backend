@@ -58,6 +58,13 @@ class HardwareConfig:
     motor_enable_pin: int = 13
     limit_switch_pin: int = 26
     emergency_stop_pin: int = 25
+
+    # ADD THESE NEW STEPPER MOTOR SETTINGS:
+    stepper_steps_per_revolution: int = 800
+    stepper_homing_speed: int = 1600
+    stepper_normal_speed: int = 4000
+    stepper_max_speed: int = 4800
+    stepper_acceleration: int = 3200
     
     # Timing
     telemetry_interval: float = 0.2
@@ -267,7 +274,13 @@ class HardwareService:
                 step_pin=self.config.motor_step_pin,
                 dir_pin=self.config.motor_dir_pin,
                 enable_pin=self.config.motor_enable_pin,
-                limit_switch_pin=self.config.limit_switch_pin
+                limit_switch_pin=self.config.limit_switch_pin,
+                # USE THE CONFIG VALUES:
+                steps_per_revolution=self.config.stepper_steps_per_revolution,
+                homing_speed=self.config.stepper_homing_speed,
+                normal_speed=self.config.stepper_normal_speed,
+                max_speed=self.config.stepper_max_speed,
+                acceleration=self.config.stepper_acceleration
             )
             
             # Create stepper controller
@@ -743,7 +756,7 @@ class HardwareService:
             return None
     
     # ==================== STEPPER MOTOR METHODS ====================
-    
+        
     async def handle_stepper_command(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Handle stepper motor control commands"""
         try:
@@ -753,6 +766,16 @@ class HardwareService:
                     "message": "Stepper motor not available"
                 }
             
+            # Extract command from data
+            command = data.get("command")
+            
+            # Handle update_config command specifically in hardware service
+            if command == "update_config":
+                config = data.get("config", {})
+                success = self.stepper_controller.update_config(config)
+                return {"success": success, "message": "Config updated" if success else "Config update failed"}
+
+            # For all other commands, delegate to stepper interface
             response = await self.stepper_interface.handle_command(data)
             return response
             
@@ -762,7 +785,33 @@ class HardwareService:
                 "success": False,
                 "message": str(e)
             }
-    
+        
+    async def update_nema_config(self, config: Dict[str, Any]) -> bool:
+        """Update NEMA stepper configuration"""
+        try:
+            if not self.stepper_controller:
+                logger.warning("No stepper controller available")
+                return False
+            
+            # Validate and apply configuration
+            stepper_config = self.stepper_controller.config
+            
+            if "normal_speed" in config:
+                stepper_config.normal_speed = int(config["normal_speed"])
+            if "max_speed" in config:
+                stepper_config.max_speed = int(config["max_speed"])
+            if "acceleration" in config:
+                stepper_config.acceleration = int(config["acceleration"])
+            if "homing_speed" in config:
+                stepper_config.homing_speed = int(config["homing_speed"])
+            
+            logger.info(f"Updated NEMA config: {config}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to update NEMA config: {e}")
+            return False
+
     async def home_stepper_motor(self) -> bool:
         """Perform stepper motor homing sequence"""
         try:
@@ -1830,7 +1879,13 @@ def create_hardware_service(config_dict: Dict[str, Any]) -> HardwareService:
             limit_switch_pin=hw_config.get("gpio", {}).get("limit_switch_pin", 26),
             emergency_stop_pin=hw_config.get("gpio", {}).get("emergency_stop_pin", 25),
             telemetry_interval=hw_config.get("timing", {}).get("telemetry_interval", 0.2),
-            servo_update_rate=hw_config.get("timing", {}).get("servo_update_rate", 0.02)
+            servo_update_rate=hw_config.get("timing", {}).get("servo_update_rate", 0.02),
+            # ADD THESE NEW STEPPER MOTOR PARAMETERS:
+            stepper_steps_per_revolution=hw_config.get("stepper_motor", {}).get("steps_per_revolution", 800),
+            stepper_homing_speed=hw_config.get("stepper_motor", {}).get("homing_speed", 1600),
+            stepper_normal_speed=hw_config.get("stepper_motor", {}).get("normal_speed", 4000),
+            stepper_max_speed=hw_config.get("stepper_motor", {}).get("max_speed", 4800),
+            stepper_acceleration=hw_config.get("stepper_motor", {}).get("acceleration", 3200)
         )
         
         # Create and return enhanced hardware service

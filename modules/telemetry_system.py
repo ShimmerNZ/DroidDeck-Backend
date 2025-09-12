@@ -90,9 +90,10 @@ class SafeTelemetrySystem:
         # ADC setup
         self.adc_available = ADC_AVAILABLE
         self.ads = None
+        self.left_track_channel = None
+        self.right_track_channel = None
+        self.electronics_channel = None
         self.battery_channel = None
-        self.current_left_track_channel = None
-        self.current_right_track_channel = None
         self.setup_adc()
         
         # Hardware calibration constants
@@ -228,7 +229,6 @@ class SafeTelemetrySystem:
         }
         
         logger.info(f"⚠️ Setup {len(self.alerts)} default alerts")
-    
     def voltage_to_current(self, voltage: float) -> float:
         """Convert voltage reading to current using sensor calibration"""
         return (voltage - self.ZERO_CURRENT_VOLTAGE) / self.CURRENT_SENSITIVITY
@@ -309,18 +309,16 @@ class SafeTelemetrySystem:
         current_variation = 2.0 * abs(math.sin(elapsed / 10))  # Periodic variation
         load_current = cpu_load_factor * 10.0  # Higher current with CPU load
         current_noise = 0.5 * (0.5 - random.random())
-        current = self.base_current + current_variation + load_current + current_noise
-        current = max(0, current)
+        base_current = self.base_current + current_variation + load_current + current_noise
+        base_current = max(0, base_current)
         
-        # Simulate secondary current (fraction of main current)
-        current_left_track = max(0, current)  # Rename 'current' to 'current_left_track'
-        current_right_track = max(0, current * 0.3 + 1.0 * (0.5 - random.random()))  # Rename 'current_a1'
-
-        logger.debug(f"🎲 SIMULATED - Battery: {battery_voltage:.2f}V, Current Left Track: {current_left_track:.2f}A, Current Right Track: {current_right_track:.2f}A")
-
+        # Simulate different current readings for each channel
+        current_left_track = max(0, base_current)
+        current_right_track = max(0, base_current * 0.8 + 1.0 * (0.5 - random.random()))
         current_electronics = max(0, 2.5 + 0.5 * (0.5 - random.random()))
 
-        # Fix the return:
+        logger.debug(f"SIMULATED - Battery: {battery_voltage:.2f}V, Left Track: {current_left_track:.2f}A, Right Track: {current_right_track:.2f}A, Electronics: {current_electronics:.2f}A")
+
         return battery_voltage, current_left_track, current_right_track, current_electronics
     
     async def update(self, hardware_status: Optional[Dict[str, Any]] = None) -> TelemetryReading:
@@ -393,12 +391,12 @@ class SafeTelemetrySystem:
                     self.stats["average_update_time"] * 0.9 + update_time * 0.1
                 )
             
-            logger.debug(f"📊 Telemetry updated in {update_time*1000:.1f}ms")
+            logger.debug(f"Telemetry updated in {update_time*1000:.1f}ms")
             
             return reading
             
         except Exception as e:
-            logger.error(f"❌ Telemetry update failed: {e}")
+            logger.error(f"Telemetry update failed: {e}")
             # Return safe default reading
             return TelemetryReading(
                 timestamp=time.time(),
@@ -417,7 +415,7 @@ class SafeTelemetrySystem:
         
         for alert_name, alert in self.alerts.items():
             try:
-                # Build evaluation context
+                # Build evaluation context with proper naming
                 context = {
                     "battery_voltage": reading.battery_voltage,
                     "temperature": reading.temperature,
@@ -441,9 +439,9 @@ class SafeTelemetrySystem:
                     alert.trigger_count += 1
                     self.stats["alerts_triggered"] += 1
                     
-                    logger.warning(f"⚠️ ALERT TRIGGERED: {alert.name} - {alert.message}")
+                    logger.warning(f"ALERT TRIGGERED: {alert.name} - {alert.message}")
                     
-                    # Notify callback
+                    # Notify callback with safe error handling
                     if self.alert_callback:
                         try:
                             await self.alert_callback(alert, reading)
@@ -457,10 +455,10 @@ class SafeTelemetrySystem:
                 elif not condition_met and alert.triggered:
                     # Alert resolved
                     alert.triggered = False
-                    logger.info(f"✅ ALERT RESOLVED: {alert.name}")
+                    logger.info(f"ALERT RESOLVED: {alert.name}")
                     
             except Exception as e:
-                logger.error(f"❌ Error checking alert '{alert_name}': {e}")
+                logger.error(f"Error checking alert '{alert_name}': {e}")
     
     def get_readings_history(self, count: Optional[int] = None) -> List[TelemetryReading]:
         """
@@ -511,7 +509,7 @@ class SafeTelemetrySystem:
             return avg_reading
             
         except Exception as e:
-            logger.error(f"❌ Failed to calculate average reading: {e}")
+            logger.error(f"Failed to calculate average reading: {e}")
             return None
     
     def get_telemetry_summary(self) -> Dict[str, Any]:
@@ -575,7 +573,7 @@ class SafeTelemetrySystem:
             return summary
             
         except Exception as e:
-            logger.error(f"❌ Failed to get telemetry summary: {e}")
+            logger.error(f"Failed to get telemetry summary: {e}")
             return {"error": str(e)}
     
     def add_custom_alert(self, name: str, condition: str, level: str, message: str) -> bool:
@@ -596,7 +594,7 @@ class SafeTelemetrySystem:
             if level not in ["INFO", "WARNING", "CRITICAL"]:
                 raise ValueError("Alert level must be INFO, WARNING, or CRITICAL")
             
-            # Test condition syntax
+            # Test condition syntax with proper variable names
             test_context = {
                 "battery_voltage": 12.0,
                 "current_left_track": 5.0,
@@ -622,11 +620,11 @@ class SafeTelemetrySystem:
                 message=message
             )
             
-            logger.info(f"➕ Added custom alert: {name}")
+            logger.info(f"Added custom alert: {name}")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to add custom alert '{name}': {e}")
+            logger.error(f"Failed to add custom alert '{name}': {e}")
             return False
     
     def remove_alert(self, name: str) -> bool:
@@ -634,14 +632,14 @@ class SafeTelemetrySystem:
         try:
             if name in self.alerts:
                 del self.alerts[name]
-                logger.info(f"➖ Removed alert: {name}")
+                logger.info(f"Removed alert: {name}")
                 return True
             else:
-                logger.warning(f"⚠️ Alert '{name}' not found")
+                logger.warning(f"Alert '{name}' not found")
                 return False
                 
         except Exception as e:
-            logger.error(f"❌ Failed to remove alert '{name}': {e}")
+            logger.error(f"Failed to remove alert '{name}': {e}")
             return False
     
     def export_telemetry_data(self, filename: str, hours: int = 24) -> bool:
@@ -664,10 +662,10 @@ class SafeTelemetrySystem:
             filtered_readings = [r for r in self.reading_history if r.timestamp >= cutoff_time]
             
             if not filtered_readings:
-                logger.warning("⚠️ No telemetry data to export")
+                logger.warning("No telemetry data to export")
                 return False
             
-            # Create CSV file
+            # Create CSV file with proper field names
             with open(filename, 'w', newline='') as csvfile:
                 fieldnames = [
                     'timestamp', 'datetime', 'cpu_percent', 'memory_percent', 
@@ -698,11 +696,11 @@ class SafeTelemetrySystem:
                         'stream_fps': reading.stream_fps
                     })
             
-            logger.info(f"📊 Exported {len(filtered_readings)} telemetry readings to {filename}")
+            logger.info(f"Exported {len(filtered_readings)} telemetry readings to {filename}")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to export telemetry data: {e}")
+            logger.error(f"Failed to export telemetry data: {e}")
             return False
     
     def get_system_health_score(self) -> Dict[str, Any]:
@@ -747,7 +745,7 @@ class SafeTelemetrySystem:
                 battery_score = 0  # Critical voltage
             scores["battery"] = max(0, battery_score)
             
-            # Current health (reasonable draw expected)
+            # Current health (reasonable draw expected) - use left track as primary indicator
             if reading.current_left_track <= 30:
                 current_score = 100
             elif reading.current_left_track <= 50:
@@ -815,7 +813,7 @@ class SafeTelemetrySystem:
             }
             
         except Exception as e:
-            logger.error(f"❌ Failed to calculate health score: {e}")
+            logger.error(f"Failed to calculate health score: {e}")
             return {"score": 0, "status": "ERROR", "error": str(e)}
     
     def register_hardware_status_callback(self, callback: Callable):
@@ -853,11 +851,11 @@ class SafeTelemetrySystem:
             if "adc_reference_voltage" in calibration_data:
                 self.ADC_REFERENCE_VOLTAGE = calibration_data["adc_reference_voltage"]
             
-            logger.info(f"🎯 Updated sensor calibration: {calibration_data}")
+            logger.info(f"Updated sensor calibration: {calibration_data}")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to calibrate sensors: {e}")
+            logger.error(f"Failed to calibrate sensors: {e}")
             return False
     
     def get_calibration_info(self) -> Dict[str, float]:
@@ -879,11 +877,11 @@ class SafeTelemetrySystem:
             "system_uptime": 0.0,
             "average_update_time": 0.0
         }
-        logger.info("📊 Telemetry statistics reset")
+        logger.info("Telemetry statistics reset")
     
     def cleanup(self):
         """Clean up telemetry system resources"""
-        logger.info("🧹 Cleaning up telemetry system...")
+        logger.info("Cleaning up telemetry system...")
         
         try:
             # Clear history to free memory
@@ -893,10 +891,43 @@ class SafeTelemetrySystem:
             if self.ads:
                 self.ads = None
                 self.battery_channel = None
-                self.current_left_track_channel = None
-                self.current_right_track_channel = None
+                self.left_track_channel = None
+                self.right_track_channel = None
+                self.electronics_channel = None
             
-            logger.info("✅ Telemetry system cleanup complete")
+            logger.info("Telemetry system cleanup complete")
             
         except Exception as e:
-            logger.error(f"❌ Telemetry cleanup error: {e}")
+            logger.error(f"Telemetry cleanup error: {e}")
+
+
+# Backward compatibility helper functions (deprecated - use new naming)
+def get_legacy_current_mapping(reading: TelemetryReading) -> Dict[str, float]:
+    """
+    DEPRECATED: Provide backward compatibility for legacy current naming.
+    This function maps new naming to old naming for transitional period.
+    
+    Returns:
+        Dictionary with legacy current names mapped to new values
+    """
+    return {
+        "current": reading.current_left_track,      # Legacy: main current -> left track
+        "current_a1": reading.current_right_track,  # Legacy: current_a1 -> right track
+        "current_a2": reading.current_electronics   # Legacy: current_a2 -> electronics
+    }
+
+
+def create_legacy_compatible_reading(reading: TelemetryReading) -> TelemetryReading:
+    """
+    DEPRECATED: Create a reading object with legacy attributes for compatibility.
+    This is a temporary bridge function during the transition period.
+    """
+    # Add legacy attributes dynamically
+    setattr(reading, 'current', reading.current_left_track)
+    setattr(reading, 'current_a1', reading.current_right_track)
+    setattr(reading, 'current_a2', reading.current_electronics)
+    return reading
+
+
+# Export the main telemetry system class
+__all__ = ['SafeTelemetrySystem', 'TelemetryReading', 'TelemetryAlert']

@@ -320,19 +320,27 @@ class WebSocketMessageHandler:
             # Log the configuration update
             logger.info(f"NEMA configuration updated: {config}")
             
-            # In a real implementation, you'd update the NEMA controller configuration
-            # For now, just acknowledge the update
+            # Create stepper command to update configuration
+            stepper_data = {
+                "command": "update_config",
+                "config": config
+            }
+            
+            # Send to hardware service
+            response = await self.hardware_service.handle_stepper_command(stepper_data)
             
             await self._send_websocket_message(websocket, {
                 "type": "nema_config_updated",
-                "success": True,
+                "success": response.get("success", False),
                 "config": config,
+                "message": response.get("message", ""),
                 "timestamp": time.time()
             })
             
         except Exception as e:
             logger.error(f"NEMA config update error: {e}")
             await self._send_error_response(websocket, f"NEMA config error: {str(e)}")
+
 
     async def _handle_nema_home(self, websocket, data: Dict[str, Any]):
         """Handle NEMA homing command"""

@@ -8,7 +8,7 @@ import asyncio
 import threading
 import time
 import logging
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict, Any
 from enum import Enum
 from dataclasses import dataclass
 import json
@@ -52,7 +52,7 @@ class StepperConfig:
     limit_switch_pin: int = 26
     
     # Motor specifications  
-    steps_per_revolution: int = 200  # 1.8° per step
+    steps_per_revolution: int = 800  # 1.8° per step
     lead_screw_pitch: float = 8.0    # 8mm per revolution
     
     # Movement parameters
@@ -73,6 +73,17 @@ class StepperConfig:
     
     # Safety margins
     soft_limit_margin: float = 0.5   # Extra safety margin for soft limits
+
+    def update_from_dict(self, config_dict: Dict[str, Any]):
+        """Update configuration from dictionary"""
+        for key, value in config_dict.items():
+            if hasattr(self, key):
+                # Validate numeric values
+                if key in ['normal_speed', 'max_speed', 'acceleration', 'homing_speed']:
+                    if isinstance(value, (int, float)) and value > 0:
+                        setattr(self, key, int(value))
+                    else:
+                        raise ValueError(f"Invalid value for {key}: {value}")
 
 
 class NEMA23Controller:
@@ -184,6 +195,22 @@ class NEMA23Controller:
                     self.state_changed_callback(new_state, old_state)
                 except Exception as e:
                     logger.error(f"State callback error: {e}")
+
+    def update_config(self, config_dict: Dict[str, Any]) -> bool:
+        """Update controller configuration at runtime"""
+        try:
+            # Don't allow updates while moving
+            if self.state == MotorState.MOVING:
+                logger.warning("Cannot update config while motor is moving")
+                return False
+            
+            self.config.update_from_dict(config_dict)
+            logger.info(f"NEMA config updated: {config_dict}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to update NEMA config: {e}")
+            return False
     
     def update_position(self, new_position_steps: int):
         """Update current position and notify callbacks"""
@@ -340,7 +367,7 @@ class NEMA23Controller:
         decel_steps = accel_steps
         constant_steps = total_steps - accel_steps - decel_steps
         
-        min_speed = 200  # Start at reasonable speed
+        min_speed = 1000  # Start at reasonable speed
         current_speed = min_speed
         step_count = 0
         
@@ -563,7 +590,16 @@ class StepperControlInterface:
             elif command == "enable":
                 self.stepper.enable_motor()
                 return {"success": True, "message": "Motor enabled"}
+                
+            elif command == "update_config":
+                config = data.get("config", {})
+                success = self.stepper.update_config(config)
+                return {"success": success, "message": "Config updated" if success else "Config update failed"}
             
+            elif command == "get_status":
+                status = self.stepper.get_status()
+                return {"success": True, "status": status}
+
             elif command == "disable":
                 self.stepper.disable_motor()
                 return {"success": True, "message": "Motor disabled"}
