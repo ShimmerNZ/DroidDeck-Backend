@@ -513,3 +513,5 @@ class ControllerInputProcessor:
         logger.info("🧹 Cleaning up controller input processor...")
         self.active_inputs.clear()
         self.controller_mappings.clear()
+
+ControllerInputHandler = ControllerInputProcessor

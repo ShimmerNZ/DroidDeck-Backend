@@ -32,6 +32,8 @@ from modules.audio_controller import NativeAudioController
 from modules.telemetry_system import SafeTelemetrySystem
 from modules.hardware_service import HardwareService, create_hardware_service
 from modules.config_manager import ConfigurationManager
+from modules.bluetooth_controller import BackendBluetoothController
+
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,9 @@ class WALLEBackend:
             config_directory="configs",
             enable_hot_reload=True
         )
+
+        # Camera proxy configuration
+        self.camera_proxy_url = config_dict.get("camera", {}).get("proxy_url", "http://10.1.1.230:8081")
         
         # Initialize modular components
         self.hardware_service = create_hardware_service(config_dict)
@@ -88,10 +93,26 @@ class WALLEBackend:
             telemetry_system=self.telemetry_system,
             backend_ref=self
         )
-        
+        # Set camera proxy URL in websocket handler
+        self.websocket_handler.camera_proxy_url = self.camera_proxy_url
+
         # Setup callbacks and signal handlers
         self.setup_callbacks()
         self.setup_signal_handlers()
+
+        # Initialize controller input processor (if you have one, otherwise create it)
+        from modules.controller_input_handler import ControllerInputHandler
+        self.controller_input_processor = ControllerInputHandler(
+            hardware_service=self.hardware_service,
+            scene_engine=self.scene_engine
+        )
+        
+        # Initialize bluetooth controller
+        self.bluetooth_controller = BackendBluetoothController(
+            controller_input_processor=self.controller_input_processor
+        )
+        
+        logger.info("🎮 Backend bluetooth controller initialized")
         
         logger.info(f"🤖 WALL-E Backend initialized (websockets {WEBSOCKETS_VERSION})")
     
@@ -131,6 +152,27 @@ class WALLEBackend:
         except Exception as e:
             logger.error(f"❌ Failed to setup callbacks: {e}")
     
+
+    async def start_bluetooth_controller(self):
+        """Start the bluetooth controller service"""
+        try:
+            # Load controller configuration
+            controller_config_path = "configs/controller_config.json"
+            if os.path.exists(controller_config_path):
+                with open(controller_config_path, 'r') as f:
+                    controller_config = json.load(f)
+                    
+                # Load config into controller processor
+                if hasattr(self.controller_input_processor, 'load_controller_config'):
+                    success = self.controller_input_processor.load_controller_config(controller_config)
+                    logger.info(f"🎮 Controller config loaded: {success}")
+            
+            # Start bluetooth controller
+            self.bluetooth_controller.start()
+            logger.info("🎮 Bluetooth controller service started")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to start bluetooth controller: {e}")
 
     def setup_signal_handlers(self):
         """Setup graceful shutdown signal handlers"""
@@ -273,38 +315,110 @@ class WALLEBackend:
         return {"running": False}
     
     async def handle_camera_config_update(self, data: Dict[str, Any]):
-        """Handle camera configuration updates from WebSocket"""
+        """Handle camera configuration updates from WebSocket with proxy communication"""
         try:
             config_updates = data.get("config", {})
             logger.info(f"📷 Updating camera config: {list(config_updates.keys())}")
             
-            # Apply camera configuration updates
-            # This would typically update camera_config.json and notify camera proxy
-            camera_config_path = Path("configs/camera_config.json")
-            
-            if camera_config_path.exists():
-                with open(camera_config_path, "r") as f:
-                    current_config = json.load(f)
-            else:
-                current_config = {}
-            
-            # Update configuration
-            current_config.update(config_updates)
-            
-            # Save updated configuration
-            with open(camera_config_path, "w") as f:
-                json.dump(current_config, f, indent=2)
-            
-            # Broadcast update to all clients
-            await self.broadcast_message({
-                "type": "camera_config_updated",
-                "config": current_config,
-                "timestamp": time.time()
-            })
-            
+            # Send settings to camera proxy first
+            import requests
+            try:
+                response = requests.post(
+                    f"{self.camera_proxy_url}/camera/settings",
+                    json=config_updates,
+                    timeout=5
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    updated_settings = result.get("settings", config_updates)
+                    
+                    # Save to local config file
+                    camera_config_path = Path("configs/camera_config.json")
+                    
+                    if camera_config_path.exists():
+                        with open(camera_config_path, "r") as f:
+                            current_config = json.load(f)
+                    else:
+                        current_config = {}
+                    
+                    # Update local configuration
+                    current_config.update(updated_settings)
+                    
+                    # Save updated configuration
+                    camera_config_path.parent.mkdir(exist_ok=True)
+                    with open(camera_config_path, "w") as f:
+                        json.dump(current_config, f, indent=2)
+                    
+                    # Broadcast successful update to all clients
+                    await self.broadcast_message({
+                        "type": "camera_config_updated",
+                        "success": True,
+                        "config": updated_settings,
+                        "message": result.get("message", "Settings updated successfully"),
+                        "timestamp": time.time()
+                    })
+                    
+                    logger.info("✅ Camera configuration updated successfully")
+                    return True
+                    
+                elif response.status_code == 206:  # Partial success
+                    result = response.json()
+                    updated_settings = result.get("settings", config_updates)
+                    
+                    # Still save partial updates to local config
+                    camera_config_path = Path("configs/camera_config.json")
+                    if camera_config_path.exists():
+                        with open(camera_config_path, "r") as f:
+                            current_config = json.load(f)
+                    else:
+                        current_config = {}
+                    
+                    current_config.update(updated_settings)
+                    camera_config_path.parent.mkdir(exist_ok=True)
+                    with open(camera_config_path, "w") as f:
+                        json.dump(current_config, f, indent=2)
+                    
+                    # Broadcast partial success
+                    await self.broadcast_message({
+                        "type": "camera_config_updated",
+                        "success": False,
+                        "partial": True,
+                        "config": updated_settings,
+                        "message": result.get("message", "Some settings failed to update"),
+                        "timestamp": time.time()
+                    })
+                    
+                    logger.warning(f"⚠️ Camera config partially updated: {result.get('message')}")
+                    return False
+                    
+                else:
+                    logger.error(f"❌ Camera proxy returned HTTP {response.status_code}")
+                    await self.broadcast_message({
+                        "type": "camera_config_error",
+                        "message": f"Camera proxy returned HTTP {response.status_code}",
+                        "timestamp": time.time()
+                    })
+                    return False
+                    
+            except requests.exceptions.RequestException as e:
+                logger.error(f"❌ Failed to connect to camera proxy: {e}")
+                await self.broadcast_message({
+                    "type": "camera_config_error",
+                    "message": f"Camera proxy connection failed: {str(e)}",
+                    "timestamp": time.time()
+                })
+                return False
+                
         except Exception as e:
             logger.error(f"❌ Failed to update camera config: {e}")
-    
+            await self.broadcast_message({
+                "type": "camera_config_error",
+                "message": f"Camera config error: {str(e)}",
+                "timestamp": time.time()
+            })
+            return False
+
     # ==================== TELEMETRY LOOP ====================
     
     async def telemetry_loop(self):
@@ -485,6 +599,37 @@ class WALLEBackend:
             logger.error(f"❌ Failed to start backend system: {e}")
             raise
 
+    async def run(self):
+        """Start the WALL-E backend system"""
+        try:
+            logger.info("🤖 Starting WALL-E Backend System...")
+            
+            # ... your existing startup code ...
+            
+            # Start bluetooth controller
+            await self.start_bluetooth_controller()
+            
+            # Start websocket server
+            websocket_host = self.config_manager.get_value("websocket", "host", "0.0.0.0")
+            websocket_port = self.config_manager.get_value("websocket", "port", 8766)
+            
+            logger.info(f"🌐 Starting WebSocket server on {websocket_host}:{websocket_port}")
+            
+            async with websockets.serve(self.handle_websocket, websocket_host, websocket_port):
+                logger.info("✅ WALL-E Backend System running")
+                
+                # Keep running
+                while self.running:
+                    await asyncio.sleep(1)
+                    
+        except KeyboardInterrupt:
+            logger.info("🛑 Shutdown requested")
+        except Exception as e:
+            logger.error(f"❌ Backend error: {e}")
+        finally:
+            await self.shutdown()
+
+
     async def shutdown(self):
         """Graceful system shutdown"""
         if hasattr(self, '_shutdown_started') and self._shutdown_started:
@@ -509,6 +654,9 @@ class WALLEBackend:
             
             # Give clients time to receive the message
             await asyncio.sleep(0.5)
+            
+            if hasattr(self, 'bluetooth_controller'):
+                self.bluetooth_controller.stop()
             
             # 2. Stop telemetry loop
             if self.telemetry_task:
@@ -712,7 +860,18 @@ def load_system_configuration() -> Dict[str, Any]:
                     "acceleration": 3200
                 }
             }
-        
+        camera_config_path = Path("configs/camera_config.json")
+        if camera_config_path.exists():
+            with open(camera_config_path, "r") as f:
+                camera_config = json.load(f)
+                config["camera"] = camera_config
+        else:
+            logger.warning("⚠️ Camera config not found, using defaults")
+            config["camera"] = {
+                "proxy_url": "http://10.1.1.230:8081",
+                "esp32_url": "http://esp32.local:81/stream"
+            }
+            
         logger.info("✅ System configuration loaded")
         return config
         

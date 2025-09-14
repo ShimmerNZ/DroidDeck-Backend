@@ -1,0 +1,52 @@
+{
+  "dpad_up": {
+    "behavior": "differential_tracks",
+    "input_type": "dpad",
+    "left_servo": "m2_ch0",
+    "right_servo": "m2_ch1",
+    "turn_sensitivity": 0.0,
+    "forward_speed": 1.0
+  },
+  "dpad_down": {
+    "behavior": "differential_tracks", 
+    "input_type": "dpad",
+    "left_servo": "m2_ch0",
+    "right_servo": "m2_ch1",
+    "turn_sensitivity": 0.0,
+    "forward_speed": -1.0
+  },
+  "dpad_left": {
+    "behavior": "differential_tracks",
+    "input_type": "dpad", 
+    "left_servo": "m2_ch0",
+    "right_servo": "m2_ch1",
+    "turn_sensitivity": -1.0,
+    "forward_speed": 0.0
+  },
+  "dpad_right": {
+    "behavior": "differential_tracks",
+    "input_type": "dpad",
+    "left_servo": "m2_ch0", 
+    "right_servo": "m2_ch1",
+    "turn_sensitivity": 1.0,
+    "forward_speed": 0.0
+  },
+  "button_a": {
+    "behavior": "scene_trigger",
+    "input_type": "button",
+    "scene": "Happy",
+    "trigger_timing": "on_press"
+  },
+  "button_b": {
+    "behavior": "scene_trigger", 
+    "input_type": "button",
+    "scene": "Alert",
+    "trigger_timing": "on_press"
+  },
+  "button_home": {
+    "behavior": "scene_trigger",
+    "input_type": "button", 
+    "scene": "emergency_stop",
+    "trigger_timing": "on_press"
+  }
+}

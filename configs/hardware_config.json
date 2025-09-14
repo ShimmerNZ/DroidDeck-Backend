@@ -28,16 +28,13 @@
         "audio": {
             "directory": "audio",
             "volume": 0.7
-        }
-        {
-        "hardware": {
-            "stepper_motor": {
-                "steps_per_revolution": 800,
-                "homing_speed": 1600,
-                "normal_speed": 4000,
-                "max_speed": 4800,
-                "acceleration": 3200
-            }
+        },
+        "stepper_motor": {
+            "steps_per_revolution": 800,
+            "homing_speed": 1600,
+            "normal_speed": 4000,
+            "max_speed": 4800,
+            "acceleration": 3200
         }
     }
 }

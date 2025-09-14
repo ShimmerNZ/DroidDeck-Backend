@@ -35,6 +35,7 @@ class WebSocketMessageHandler:
             "get_servo_position": self._handle_get_servo_position,
             "get_all_servo_positions": self._handle_get_all_servo_positions,
             "get_maestro_info": self._handle_get_maestro_info,
+            "get_controller_info": self._handle_get_controller_info,
             
             # Stepper motor control
             "stepper": self._handle_stepper_command,
@@ -162,6 +163,26 @@ class WebSocketMessageHandler:
         if not success:
             await self._send_error_response(websocket, f"Failed to set acceleration for {channel_key}")
     
+    async def _handle_get_controller_info(self, websocket, data: Dict[str, Any]):
+        """Handle controller info request"""
+        try:
+            controller_info = {}
+            
+            if hasattr(self.backend, 'bluetooth_controller'):
+                controller_info = self.backend.bluetooth_controller.get_controller_info()
+            
+            await self._send_websocket_message(websocket, {
+                "type": "controller_info",
+                "controller_info": controller_info,
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            logger.error(f"Error getting controller info: {e}")
+            await self._send_error_response(websocket, f"Error getting controller info: {str(e)}")
+
+
+
     async def _handle_get_servo_position(self, websocket, data: Dict[str, Any]):
         """Handle servo position request"""
         channel_key = data.get("channel")
@@ -714,18 +735,6 @@ class WebSocketMessageHandler:
             logger.error(f"System status error: {e}")
             await self._send_error_response(websocket, f"Error getting system status: {str(e)}")
     
-    async def _handle_camera_config_update(self, websocket, data: Dict[str, Any]):
-        """Handle camera configuration update"""
-        try:
-            # Delegate to backend's camera config handler
-            if hasattr(self.backend, 'handle_camera_config_update'):
-                await self.backend.handle_camera_config_update(data)
-            else:
-                await self._send_error_response(websocket, "Camera config update not available")
-                
-        except Exception as e:
-            logger.error(f"Camera config update error: {e}")
-            await self._send_error_response(websocket, f"Camera config error: {str(e)}")
     
     # ==================== GESTURE & TRACKING HANDLERS ====================
     
@@ -828,3 +837,83 @@ class WebSocketMessageHandler:
                 "utility": 3
             }
         }
+    
+    async def _handle_camera_config_update(self, websocket, data: Dict[str, Any]):
+        """Handle camera configuration update with proxy communication"""
+        try:
+            config = data.get("config")
+            
+            if not config:
+                await self._send_error_response(websocket, "Missing config data")
+                return
+            
+            # Get camera proxy URL from backend configuration
+            camera_proxy_url = getattr(self.backend, 'camera_proxy_url', 'http://10.1.1.230:8081')
+            
+            # Send settings to camera proxy
+            try:
+                import requests
+                response = requests.post(
+                    f"{camera_proxy_url}/camera/settings", 
+                    json=config, 
+                    timeout=5
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    
+                    # Send success response back to client
+                    await self._send_websocket_message(websocket, {
+                        "type": "camera_config_updated",
+                        "success": True,
+                        "config": result.get("settings", config),
+                        "message": result.get("message", "Settings updated successfully"),
+                        "timestamp": time.time()
+                    })
+                    
+                    # Broadcast config update to all clients
+                    await self.backend.broadcast_message({
+                        "type": "camera_config_broadcast",
+                        "config": result.get("settings", config),
+                        "timestamp": time.time()
+                    })
+                    
+                    logger.info(f"Camera configuration updated successfully")
+                    
+                elif response.status_code == 206:  # Partial content
+                    result = response.json()
+                    
+                    # Send partial success response
+                    await self._send_websocket_message(websocket, {
+                        "type": "camera_config_updated",
+                        "success": False,
+                        "config": result.get("settings", config),
+                        "message": result.get("message", "Some settings failed to update"),
+                        "partial": True,
+                        "timestamp": time.time()
+                    })
+                    
+                else:
+                    await self._send_error_response(
+                        websocket, 
+                        f"Camera proxy returned HTTP {response.status_code}"
+                    )
+                    
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Failed to connect to camera proxy: {e}")
+                await self._send_error_response(
+                    websocket, 
+                    f"Camera proxy connection failed: {str(e)}"
+                )
+                
+            except Exception as e:
+                logger.error(f"Camera proxy request error: {e}")
+                await self._send_error_response(
+                    websocket, 
+                    f"Camera proxy error: {str(e)}"
+                )
+                
+        except Exception as e:
+            logger.error(f"Camera config update error: {e}")
+            await self._send_error_response(websocket, f"Camera config error: {str(e)}")
+

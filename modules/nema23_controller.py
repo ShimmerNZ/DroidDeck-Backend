@@ -97,6 +97,7 @@ class NEMA23Controller:
         self.current_position_steps = 0
         self.target_position_steps = 0
         self.home_position_found = False
+        self.intentionally_disabled = True
         
         # Movement parameters
         lead_screw_pitch_cm = self.config.lead_screw_pitch / 10.0  # 8mm = 0.8cm
@@ -148,19 +149,29 @@ class NEMA23Controller:
         except Exception as e:
             logger.error(f"❌ Failed to setup GPIO: {e}")
             self.gpio_initialized = False
-    
+        
     def enable_motor(self):
         """Enable the stepper motor"""
         if self.gpio_initialized:
             set_output(self.config.enable_pin, False)  # TB6600 enables on LOW
-            logger.debug("🔌 Stepper motor enabled")
-    
+            self.intentionally_disabled = False
+            logger.debug("Stepper motor enabled")
+
     def disable_motor(self):
         """Disable the stepper motor"""
         if self.gpio_initialized:
             set_output(self.config.enable_pin, True)  # TB6600 disables on HIGH
-            logger.debug("🔌 Stepper motor disabled")
+            self.intentionally_disabled = True
+            logger.debug("Stepper motor disabled")
         self.set_state(MotorState.DISABLED)
+    
+    def is_movement_allowed(self) -> bool:
+        """Check if movement commands should be accepted"""
+        if self.intentionally_disabled:
+            return False
+        if not self.gpio_initialized:
+            return False
+        return True
     
     def set_direction(self, direction: MoveDirection):
         """Set movement direction"""
@@ -237,7 +248,10 @@ class NEMA23Controller:
         if not self.gpio_initialized:
             logger.error("Cannot home - GPIO not initialized")
             return False
-        
+            
+        was_disabled = self.intentionally_disabled
+        self.intentionally_disabled = False
+
         logger.info("🏠 Starting homing sequence...")
         self.set_state(MotorState.HOMING)
         self.enable_motor()
@@ -262,6 +276,8 @@ class NEMA23Controller:
             if steps_moved >= max_homing_steps:
                 logger.error("🏠 Homing failed - limit switch not found")
                 self.set_state(MotorState.ERROR)
+                if was_disabled:
+                    self.intentionally_disabled = True
                 return False
             
             logger.info(f"🏠 Limit switch triggered after {steps_moved} steps")
@@ -294,11 +310,16 @@ class NEMA23Controller:
             # Move to default position
             await self.move_to_position_cm(self.config.default_position_cm)
             
+            if was_disabled:
+                self.intentionally_disabled = True
             return True
-            
+
+
         except Exception as e:
             logger.error(f"🏠 Homing failed: {e}")
             self.set_state(MotorState.ERROR)
+            if was_disabled:
+                self.intentionally_disabled = True
             return False
     
     async def move_to_position_cm(self, target_cm: float, speed_override: Optional[int] = None) -> bool:
@@ -313,6 +334,10 @@ class NEMA23Controller:
     
     async def move_to_position_steps(self, target_steps: int, speed_override: Optional[int] = None) -> bool:
         """Move to specified position in steps with smooth acceleration"""
+        if not self.is_movement_allowed():
+            logger.warning("Movement rejected - motor is intentionally disabled")
+            return False
+        
         if not self.gpio_initialized:
             logger.error("Cannot move - GPIO not initialized")
             return False
@@ -459,7 +484,7 @@ class NEMA23Controller:
         enabled = False
         if self.gpio_initialized:
             enable_state = read_input(self.config.enable_pin)
-            enabled = not bool(enable_state) if enable_state is not None else False
+            hardware_enabled = not bool(enable_state) if enable_state is not None else False
         
         return {
             "state": self.state.value,
@@ -470,7 +495,9 @@ class NEMA23Controller:
             "target_steps": self.target_position_steps,
             "target_cm": round(self.steps_to_cm(self.target_position_steps), 2),
             "homed": self.home_position_found,
-            "enabled": enabled,
+            "enabled": hardware_enabled and not self.intentionally_disabled,  # Only enabled if both conditions met
+            "hardware_enabled": hardware_enabled,  # Raw hardware state
+            "intentionally_disabled": self.intentionally_disabled,  # Software disable state
             "limit_switch": self.is_limit_switch_triggered(),
             "max_travel_cm": self.config.max_travel_cm,
             "default_position_cm": self.config.default_position_cm,

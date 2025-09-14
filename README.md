@@ -1,354 +1,255 @@
-# 🤖 WALL-E Robot Control System Documentation
+# 🤖 WALL-E Robot Control System
 
-**Updated: December 2024 - Comprehensive System Review**
+**Updated: September 2025**
 
 ## 📋 Table of Contents
 
 1. [System Overview](#system-overview)
-2. [Architecture](#architecture) 
-3. [Implementation Status](#implementation-status)
-4. [Hardware Components](#hardware-components)
-5. [Software Architecture](#software-architecture)
-6. [API Documentation](#api-documentation)
+2. [Recent Changes & Updates](#recent-changes--updates)
+3. [Hardware Configuration](#hardware-configuration)
+4. [TB6600 Stepper Driver Configuration](#tb6600-stepper-driver-configuration)
+5. [Motor & Movement Configuration](#motor--movement-configuration)
+6. [Software Architecture](#software-architecture)
 7. [Configuration Files](#configuration-files)
 8. [Installation & Setup](#installation--setup)
-9. [Code Organization Recommendations](#code-organization-recommendations)
-10. [Future Improvements](#future-improvements)
-11. [Troubleshooting](#troubleshooting)
+9. [API Documentation](#api-documentation)
+10. [Troubleshooting](#troubleshooting)
 
 ---
 
 ## System Overview
 
-WALL-E is a comprehensive robotics platform featuring:
+WALL-E is a comprehensive robotics platform featuring advanced motion control, scene management, and multi-client streaming capabilities:
 
-- **Backend**: Python-based WebSocket server with shared serial management
-- **Frontend**: PyQt6 application (referenced but not included in current files)
+- **Backend**: Python 3.9.13-based WebSocket server with shared serial management
+- **Frontend**: PyQt6 application with real-time telemetry and scene editing
 - **Camera System**: ESP32-CAM with HTTP proxy for multi-client streaming
-- **Hardware Control**: Dual Pololu Maestro servo controllers, NEMA 23 stepper motor, ADC sensors
-- **Scene Management**: Audio-synchronized servo movements with configurable scenes
-- **Safety Systems**: Emergency stop, failsafe modes, hardware monitoring
-
-**Current Python Version**: 3.9.13 (managed via pyenv)
+- **Hardware Control**: Dual Pololu Maestro servo controllers, NEMA 23 stepper motor with TB6600 driver
+- **Scene Management**: Audio-synchronized servo movements with 33+ predefined scenes
+- **Safety Systems**: Emergency stop, limit switches, hardware monitoring, and graceful fallbacks
 
 ---
 
-## Architecture
+## Recent Changes & Updates
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│ Steam Deck / PC / Mobile Device                              │
-│ ┌─────────────────────────────────────────────────────┐      │
-│ │ PyQt6 Frontend Application (wall_e_frontend.py)   │      │
-│ │ ├── Home Screen (Scene/Emotion Control)           │      │
-│ │ ├── Camera Feed (MediaPipe Wave Detection)        │      │
-│ │ ├── Health Monitor (Real-time Telemetry)          │      │
-│ │ ├── Servo Configuration & Testing                 │      │
-│ │ └── Controller Mapping                            │      │
-│ └─────────────────────────────────────────────────────┘      │
-└────────────────────┬─────────────────────────────────────────┘
-                     │ WebSocket (ws://IP:8766)
-                     │ HTTP Camera Stream (http://IP:8081)
-┌────────────────────┴─────────────────────────────────────────┐
-│ Raspberry Pi 5 - WALL-E Backend                             │
-│ ┌─────────────────────────────────────────────────────┐      │
-│ │ main.py - Core Backend System                     │      │
-│ │ ├── WALLEBackend (Main orchestrator)              │      │
-│ │ ├── WebSocket Server (asyncio-based)              │      │
-│ │ ├── Scene Engine (Audio + Servo coordination)     │      │
-│ │ ├── SafeTelemetrySystem (Hardware monitoring)     │      │
-│ │ ├── NativeAudioController (pygame-based)          │      │
-│ │ └── SafeMotorController (GPIO wrapper)            │      │
-│ └─────────────────────────────────────────────────────┘      │
-│ ┌─────────────────────────────────────────────────────┐      │
-│ │ modules/shared_serial_manager.py                   │      │
-│ │ ├── SharedSerialPortManager                       │      │
-│ │ ├── MaestroControllerShared                       │      │
-│ │ └── Priority-based Command Queuing                │      │
-│ └─────────────────────────────────────────────────────┘      │
-│ ┌─────────────────────────────────────────────────────┐      │
-│ │ modules/nema23_controller.py                       │      │
-│ │ ├── NEMA23Controller (Stepper motor control)      │      │
-│ │ ├── StepperControlInterface (WebSocket interface) │      │
-│ │ └── Homing & Positioning System                   │      │
-│ └─────────────────────────────────────────────────────┘      │
-│ ┌─────────────────────────────────────────────────────┐      │
-│ │ modules/camera_proxy.py                            │      │
-│ │ ├── CameraProxy (ESP32 stream handler)            │      │
-│ │ ├── Flask HTTP Server (port 8081)                 │      │
-│ │ └── Multi-client MJPEG rebroadcasting             │      │
-│ └─────────────────────────────────────────────────────┘      │
-└───────────┬────────────────────┬──────────────┬──────────────┘
-            │ Serial             │ I2C          │ Network
-┌───────────┴────────┐ ┌─────────┴─────────┐ ┌───┴────┐
-│ Maestro 1 & 2     │ │ ADS1115 ADC       │ │ESP32CAM│
-│ (Shared /dev/ttyAMA0) │ (Battery/Current) │ │ Stream │
-│ Device #12 & #13   │ │ Voltage Dividers  │ │        │
-└────────────────────┘ └───────────────────┘ └────────┘
-┌────────────────────┐ ┌───────────────────┐
-│ TB6600 Stepper     │ │ GPIO Safety       │
-│ Driver (NEMA 23)   │ │ ├── Limit Switch  │
-│ ├── Step Pin: 16   │ │ ├── E-Stop: 25   │
-│ ├── Dir Pin: 12    │ │ └── Enable: 13   │
-│ └── Enable Pin: 13 │ └───────────────────┘
-└────────────────────┘
-```
+### ✅ **Major System Enhancements**
 
----
-
-## Implementation Status
-
-### ✅ **Fully Implemented Components**
-
-#### **1. Shared Serial Communication System**
-- **File**: `modules/shared_serial_manager.py`
-- **Status**: ✅ Complete and Production Ready
+#### **1. Advanced Configuration Management System**
+- **New File**: `config_manager.py`
 - **Features**:
-  - Multiple Maestro controllers sharing single serial port
-  - Priority-based command queuing (EMERGENCY → BACKGROUND)
-  - Thread-safe async communication
-  - Automatic retry logic and error handling
-  - Comprehensive statistics and monitoring
-  - Device registration and management
+  - Hot-reload configuration changes without restart
+  - Configuration validation and backup system
+  - Automatic config file watching with debounced updates
+  - Schema validation for hardware and scene configurations
+  - Statistics tracking for configuration operations
 
-#### **2. NEMA 23 Stepper Motor Control**
-- **File**: `modules/nema23_controller.py`  
-- **Status**: ✅ Complete and Production Ready
-- **Features**:
-  - Automatic homing with limit switch detection
+#### **2. Enhanced TB6600 Stepper Motor Control**
+- **File**: `modules/nema23_controller.py`
+- **Key Improvements**:
+  - **1/4 Microstepping Configuration**: Set for quieter operation at slow speeds
+  - Configurable steps per revolution (default: 800 steps for 1.8° motors)
+  - Adjustable lead screw pitch (default: 8mm per revolution)
   - Smooth acceleration/deceleration curves
-  - Position tracking in steps and centimeters
-  - Safety limits and soft boundaries
-  - WebSocket control interface
-  - Emergency stop functionality
+  - Automatic homing with limit switch detection
+  - Position tracking in both steps and centimeters
 
-#### **3. Camera Streaming System**
-- **File**: `modules/camera_proxy.py`
-- **Status**: ✅ Complete with Stream Control
+#### **3. Shared Serial Port Management**
+- **File**: `modules/shared_serial_manager.py`
 - **Features**:
-  - ESP32-CAM proxy server (Flask-based)
-  - Manual start/stop stream control
-  - Real-time camera settings adjustment
-  - Multi-client MJPEG rebroadcasting
-  - Bandwidth testing endpoint
-  - Connection health monitoring
+  - Multiple Maestro controllers sharing single `/dev/ttyAMA0` port
+  - Priority-based command queuing (Emergency → Background)
+  - Thread-safe async communication with automatic retry logic
+  - Batch command optimization for improved performance
+  - Comprehensive statistics and error handling
 
-#### **4. Scene Management System**
-- **File**: `main.py` (SceneEngine class)
-- **Status**: ✅ Complete with Dynamic Loading
-- **Features**:
-  - JSON-based scene configuration
+#### **4. GPIO Compatibility Layer**
+- **File**: `modules/gpio_compat.py`
+- **Purpose**: Unified GPIO interface supporting multiple libraries
+- **Libraries Supported**: RPi.GPIO, lgpio, gpiod with graceful fallbacks
+- **Benefits**: Ensures compatibility across different Raspberry Pi configurations
+
+#### **5. Enhanced Scene System**
+- **File**: `scene_engine.py`
+- **Improvements**:
+  - 33+ predefined scenes with categories (Happy, Sad, Curious, etc.)
   - Audio-synchronized servo movements
-  - Frontend scene editor integration
-  - Real-time scene testing
-  - Category-based organization
-
-#### **5. Telemetry & Health Monitoring**
-- **File**: `main.py` (SafeTelemetrySystem class)
-- **Status**: ✅ Complete with Real Hardware Support
-- **Features**:
-  - Real ADC readings (ADS1115) with simulation fallback
-  - Battery voltage monitoring with alarms
-  - Dual current sensing channels
-  - CPU, memory, temperature monitoring
-  - Hardware availability detection
-
-#### **6. Audio System**
-- **File**: `main.py` (NativeAudioController class)
-- **Status**: ✅ Complete Native Implementation
-- **Features**:
-  - pygame-based audio playback
-  - Multi-format support (MP3, WAV, OGG, M4A)
-  - Volume control and playlist management
-  - Scene-synchronized audio
-  - File scanning and management
-
-### ⚠️ **Partially Implemented Components**
-
-#### **1. WebSocket Message Handling**
-- **Location**: `main.py` (handle_client_message method)
-- **Status**: ⚠️ Functional but Could Be Modularized
-- **Current State**: Large switch-case method handling all message types
-- **Recommendation**: Extract to separate WebSocket handler module
-
-
-### ❌ **Missing/To Be Completed Components**
-
-
-#### **2. Advanced Safety Systems**
-- **Status**: ❌ Basic emergency stop only
-- **Missing**: 
-  - Voltage-based automatic shutdown
-  - Current limiting
-  - Temperature-based throttling
-  - Comprehensive failsafe modes
-
-#### **3. Bluetooth Controller Support**
-- **Status**: ❌ Not implemented
-- **Required**: Direct Steam Deck controller integration
-- **Alternative**: Currently relies on frontend for control
-
-#### **4. Configuration Management System**
-- **Status**: ❌ Basic JSON loading only
-- **Missing**:
-  - Hot-reload of configurations
-  - Configuration validation
-  - Runtime configuration updates
-  - Backup/restore system
-
-#### **5. Advanced Scene Timeline Editor**
-- **Status**: ❌ Basic scene support only
-- **Missing**:
-  - Complex multi-step sequences
-  - Timeline-based editing
-  - Scene chaining and transitions
-  - Variable timing control
+  - Real-time scene testing and validation
+  - Dynamic scene loading and saving
+  - Category-based organization with emoji support
 
 ---
 
-## Hardware Components
+## Hardware Configuration
 
 ### **Core Processing**
-- **Raspberry Pi 5**: Main controller with enhanced GPIO
-- **Python 3.9.13**: Managed via pyenv for consistency
+- **Raspberry Pi 5**: Main controller with enhanced GPIO and processing power
+- **Python 3.9.13**: Managed via pyenv for consistency and compatibility
 
-### **Motion Control**
+### **Motion Control Hardware**
+
+#### **Servo Control**
 - **Pololu Maestro 18-channel (x2)**: 36 total servo channels
-  - Device #12 & #13 on shared `/dev/ttyAMA0` port
+  - **Device #12 & #13** on shared `/dev/ttyAMA0` port (9600 baud)
   - Priority-based command queuing
-  - Real-time position feedback
-- **TB6600 Stepper Driver**: NEMA 23 motor control
-  - Step: GPIO 16, Dir: GPIO 12, Enable: GPIO 13
-  - Automatic homing and positioning
-- **Sabertooth 2x60**: Tank drive motor controller (configured but not implemented)
+  - Real-time position feedback and error detection
+
+#### **Stepper Motor System**
+- **NEMA 23 Stepper Motor**: Precision positioning system
+- **TB6600 Stepper Driver**: Professional-grade microstep driver
+- **Lead Screw**: 8mm pitch for precise linear movement
+- **Limit Switch**: Hardware homing and safety boundaries
+
+#### **Tank Drive (Configured)**
+- **Sabertooth 2x60**: Dual motor controller for tank drive
+- **Status**: Hardware configured but software integration pending
 
 ### **Sensors & Monitoring**
-- **ADS1115 ADC**: 16-bit current and voltage sensing
-  - Channel 0: Battery voltage (with voltage divider)
-  - Channel 1 & 2: Dual current sensors (ACS758)
-- **GPIO Safety**: Limit switches and emergency stop
+- **ADS1115 ADC**: 16-bit precision analog-to-digital converter
+  - **Channel 0**: Battery voltage monitoring (with voltage divider)
+  - **Channel 1 & 2**: Dual current sensors (ACS758) for power monitoring
+- **GPIO Safety**: Limit switches, emergency stop, and status indicators
 
 ### **Media & Communication**
-- **ESP32-CAM**: WiFi camera with settings control
-- **Native Audio**: Built-in Pi audio with pygame
-- **SMB Sharing**: Network file access for easy management
+- **ESP32-CAM**: WiFi camera with configurable settings and streaming
+- **Native Audio**: Built-in Raspberry Pi audio with pygame
+- **SMB Network Sharing**: Easy file access and management
+
+---
+
+## TB6600 Stepper Driver Configuration
+
+### **Current Configuration Settings**
+
+The TB6600 driver is configured for **1/4 microstepping** to achieve quieter operation at slow speeds while maintaining good torque and precision.
+
+#### **DIP Switch Settings for 1/4 Microstepping:**
+```
+SW1: OFF
+SW2: OFF  
+SW3: ON
+```
+
+#### **Current Settings (Adjust based on your NEMA 23 motor):**
+```
+SW4: OFF  
+SW5: ON
+SW6: ON
+```
+*Note: Verify current rating matches your specific NEMA 23 motor specifications*
+
+### **Physical Connections**
+```
+TB6600 Driver → Raspberry Pi 5
+├── PUL+ → GPIO 16 (Step Pin)
+├── PUL- → GND
+├── DIR+ → GPIO 12 (Direction Pin)  
+├── DIR- → GND
+├── ENA+ → GPIO 13 (Enable Pin)
+└── ENA- → GND
+
+TB6600 Driver → NEMA 23 Motor
+├── A+ → Motor Phase A+
+├── A- → Motor Phase A-
+├── B+ → Motor Phase B+
+└── B- → Motor Phase B-
+
+Power Supply (24V recommended)
+├── VCC → TB6600 VCC
+└── GND → TB6600 GND
+```
+
+---
+
+## Motor & Movement Configuration
+
+### **Default Motor Specifications**
+```python
+# Current settings in nema23_controller.py
+steps_per_revolution: int = 800      # For 1.8° stepper with 1/4 microstepping
+lead_screw_pitch: float = 8.0        # 8mm per revolution
+max_travel_cm: float = 20.0          # Maximum safe travel distance
+default_position_cm: float = 5.0     # Default position from home
+```
+
+### **Speed & Acceleration Settings**
+```python
+homing_speed: int = 400              # Slow speed for accurate homing
+normal_speed: int = 1000             # Standard movement speed  
+max_speed: int = 1200                # Maximum movement speed
+acceleration: int = 800              # Acceleration in steps/sec²
+```
+
+### **How to Modify Configuration**
+
+#### **To Change Lead Screw Pitch:**
+1. Edit `modules/nema23_controller.py`
+2. Modify the `StepperConfig` class:
+```python
+lead_screw_pitch: float = 10.0    # Change from 8.0 to 10.0 for 10mm pitch
+```
+
+#### **To Change Steps Per Revolution:**
+1. For different microstepping or motor:
+```python
+# Full step (1.8° motor): 200 steps
+# Half step: 400 steps  
+# Quarter step (current): 800 steps
+# Eighth step: 1600 steps
+steps_per_revolution: int = 1600  # Example for 1/8 microstepping
+```
+
+#### **Runtime Configuration Updates:**
+You can also update settings via the configuration management system:
+```python
+# Update via config manager (requires restart)
+config_updates = {
+    "stepper_motor": {
+        "steps_per_revolution": 1600,
+        "lead_screw_pitch": 10.0,
+        "normal_speed": 1500
+    }
+}
+```
+
+### **Position Calculation Formula**
+```
+Steps per cm = steps_per_revolution / (lead_screw_pitch / 10.0)
+Current: 800 steps / (8mm / 10) = 1000 steps per cm
+
+Position in cm = current_position_steps / steps_per_cm
+Position in steps = position_cm * steps_per_cm
+```
 
 ---
 
 ## Software Architecture
 
 ### **Main Application Structure**
-
 ```python
-# main.py - Core Architecture
-WALLEBackend
-├── SharedSerialPortManager (hardware communication)
-├── SceneEngine (audio + servo coordination)  
-├── SafeTelemetrySystem (sensor monitoring)
+WALLEBackend (main.py)
+├── ConfigurationManager (config_manager.py)
+├── SharedSerialPortManager (modules/shared_serial_manager.py)
+├── NEMA23Controller (modules/nema23_controller.py)
+├── SceneEngine (scene_engine.py)
+├── SafeTelemetrySystem (telemetry monitoring)
 ├── NativeAudioController (audio playback)
-├── SafeMotorController (GPIO wrapper)
-├── NEMA23Controller (stepper motor)
+├── CameraProxy (modules/camera_proxy.py)
 └── WebSocket Server (client communication)
 ```
 
 ### **Key Design Patterns**
-
 1. **Shared Resource Management**: Single serial port shared between multiple Maestro controllers
 2. **Priority Queue System**: Commands processed by priority (Emergency → Background)
-3. **Async/Await**: Non-blocking communication and telemetry
-4. **Observer Pattern**: Callbacks for hardware state changes
-5. **Factory Pattern**: Hardware abstraction with graceful fallbacks
-
-### **Thread Safety**
-- Threading locks for shared resources
-- Async queues for command processing
-- Thread-safe callbacks for real-time updates
-
----
-
-## API Documentation
-
-### **WebSocket API** (`ws://[IP]:8766`)
-
-#### **Core Control Messages**
-
-**Servo Control**
-```json
-{
-  "type": "servo",
-  "channel": "m1_ch5",
-  "pos": 1500,
-  "priority": "normal"
-}
-```
-
-**Scene Execution**
-```json
-{
-  "type": "scene", 
-  "emotion": "happy"
-}
-```
-
-**Stepper Motor Control** 
-```json
-{
-  "type": "stepper",
-  "command": "move_to_position",
-  "position_cm": 15.0
-}
-```
-
-**Scene Management**
-```json
-{
-  "type": "get_scenes"
-}
-{
-  "type": "save_scenes",
-  "scenes": [...]
-}
-```
-
-#### **Telemetry Broadcast**
-```json
-{
-  "type": "telemetry",
-  "timestamp": 1234567890.123,
-  "cpu": 45.2,
-  "memory": 62.1,
-  "temperature": 48.5,
-  "battery_voltage": 14.8,
-  "current": 5.2,
-  "current_a1": 2.1,
-  "maestro1": {...},
-  "maestro2": {...},
-  "stepper_motor": {...},
-  "shared_managers": {...}
-}
-```
-
-### **Camera Proxy API** (`http://[IP]:8081`)
-
-**Stream Control**
-```bash
-POST /stream/start    # Start camera stream
-POST /stream/stop     # Stop camera stream  
-GET  /stream/status   # Get stream status
-```
-
-**Camera Settings**
-```bash
-GET  /camera/settings                    # Get all settings
-POST /camera/settings                    # Update multiple settings
-POST /camera/setting/resolution?value=5  # Update single setting
-```
+3. **Observer Pattern**: Callbacks for hardware state changes and configuration updates
+4. **Factory Pattern**: Hardware abstraction with graceful fallbacks
+5. **Hot-Reload Pattern**: Configuration changes without system restart
 
 ---
 
 ## Configuration Files
 
 ### **hardware_config.json**
+Complete hardware configuration with stepper motor settings:
 ```json
 {
   "hardware": {
@@ -358,7 +259,7 @@ POST /camera/setting/resolution?value=5  # Update single setting
       "device_number": 12
     },
     "maestro2": {
-      "port": "/dev/ttyAMA0", 
+      "port": "/dev/ttyAMA0",
       "baud_rate": 9600,
       "device_number": 13
     },
@@ -368,151 +269,232 @@ POST /camera/setting/resolution?value=5  # Update single setting
       "motor_enable_pin": 13,
       "limit_switch_pin": 26,
       "emergency_stop_pin": 25
+    },
+    "stepper_motor": {
+      "steps_per_revolution": 800,
+      "lead_screw_pitch": 8.0,
+      "max_travel_cm": 20.0,
+      "homing_speed": 400,
+      "normal_speed": 1000,
+      "max_speed": 1200,
+      "acceleration": 800
+    },
+    "timing": {
+      "telemetry_interval": 0.2,
+      "servo_update_rate": 0.02
     }
   }
 }
 ```
 
 ### **scenes_config.json**
-- **Status**: ✅ Comprehensive scene definitions
-- **Features**: 33+ predefined scenes with categories
-- **Categories**: Happy, Sad, Curious, Angry, Surprise, Love, Calm, Sound Effect, Misc, Idle, Sleepy
+- **Status**: ✅ 33+ predefined scenes
+- **Categories**: Happy, Sad, Curious, Angry, Surprise, Love, Calm, Sound Effects, Misc, Idle, Sleepy
+- **Features**: Audio synchronization, emoji support, category organization
 
-### **camera_config.json** 
-- **ESP32 URL configuration**
-- **Quality and resolution settings**
-- **Connection timeout parameters**
+### **camera_config.json**
+- **ESP32-CAM Configuration**: URL, quality settings, resolution options
+- **Stream Control**: Manual start/stop, bandwidth testing
+- **Multi-client Support**: MJPEG rebroadcasting for multiple viewers
 
 ---
 
 ## Installation & Setup
 
-### **Automated Installation**
+### **Quick Start Installation**
 ```bash
-# 1. Clone and setup
-git clone <repository> ~/wall-e-robot
+# 1. Clone repository
+git clone <repository-url> ~/wall-e-robot
 cd ~/wall-e-robot
 
-# 2. Run comprehensive installer  
+# 2. Run automated installer
 chmod +x install.sh
 ./install.sh
 
-# 3. Start system
+# 3. Start the system
 ./start_walle.sh
 ```
 
-### **Key Installation Features**
-- **Python 3.9.13** via pyenv
+### **Installation Features**
+- **Python 3.9.13** via pyenv management
 - **Virtual environment** with all dependencies
-- **SMB file sharing** for network access
-- **Audio system** with TTS samples
-- **GPIO/I2C** interface enabling
-- **Systemd service** creation
+- **SMB file sharing** for network file access
+- **Audio system** with TTS samples and testing
+- **GPIO/I2C interface** enabling and configuration
+- **Systemd service** creation for auto-start
+
+### **Manual Configuration Steps**
+
+#### **1. Verify TB6600 DIP Switch Settings**
+Ensure your TB6600 driver is configured for 1/4 microstepping:
+- **SW1-3**: Configure for 1/4 step (OFF, OFF, ON)
+- **SW4-6**: Set current rating to match your NEMA 23 motor
+
+#### **2. Hardware Connections**
+- Connect TB6600 to Raspberry Pi GPIO pins (16, 12, 13)
+- Install limit switch on GPIO 26
+- Connect emergency stop to GPIO 25
+- Verify power supply (24V recommended for NEMA 23)
+
+#### **3. Test Motor Configuration**
+```bash
+# Start system in test mode
+python main.py --test-mode
+
+# Test stepper motor homing
+# Use WebSocket API to send test commands
+```
 
 ---
 
+## API Documentation
 
+### **WebSocket API** (`ws://[IP]:8766`)
 
-## Future Improvements
+#### **Stepper Motor Control**
+```json
+{
+  "type": "stepper",
+  "command": "move_to_position",
+  "position_cm": 15.0
+}
 
-### **🎯 Immediate Priorities**
+{
+  "type": "stepper", 
+  "command": "home"
+}
 
-1. **Sabertooth Integration** - Complete tank drive motor control
-2. **WebSocket Handler Extraction** - Improve maintainability  
-3. **Advanced Safety Systems** - Voltage/current based protection
-4. **Configuration Hot-Reload** - Runtime config updates
+{
+  "type": "stepper",
+  "command": "get_status"
+}
+```
 
-### **🚀 Medium Term**
+#### **Configuration Management**
+```json
+{
+  "type": "config",
+  "action": "reload",
+  "config_name": "hardware"
+}
 
-1. **Bluetooth Controller** - Direct Steam Deck integration
-2. **Scene Timeline Editor** - Complex sequence creation
-3. **Web Interface** - Browser-based control panel
-4. **Mobile App** - React Native control interface
+{
+  "type": "config",
+  "action": "update",
+  "config_name": "hardware",
+  "updates": {
+    "stepper_motor": {
+      "normal_speed": 1500
+    }
+  }
+}
+```
 
-### **🌟 Advanced Features**
+#### **Scene Management**
+```json
+{
+  "type": "scene",
+  "emotion": "happy"
+}
 
-1. **AI Behavior System** - Autonomous emotional responses
-2. **Voice Recognition** - Speech command processing
-3. **Computer Vision** - Advanced gesture and object detection
-4. **Multi-Robot Coordination** - Fleet management
+{
+  "type": "get_scenes"
+}
+
+{
+  "type": "test_scene",
+  "scene": {...}
+}
+```
 
 ---
 
 ## Troubleshooting
 
-### **Common Issues**
+### **TB6600 & Stepper Motor Issues**
 
-**Serial Communication**
+#### **Motor Not Moving**
 ```bash
-# Check devices
+# Check GPIO connections
+gpio readall
+
+# Verify TB6600 power supply
+# Check limit switch state
+# Ensure proper DIP switch configuration
+```
+
+#### **Motor Movement Too Noisy**
+- Verify 1/4 microstepping configuration (SW1-3: OFF, OFF, ON)
+- Check motor current setting (SW4-6)
+- Ensure proper motor wiring (A+, A-, B+, B-)
+
+#### **Homing Issues**
+```bash
+# Check limit switch connection
+# Verify GPIO 26 is properly configured
+# Test limit switch manually
+```
+
+### **Configuration Issues**
+
+#### **Hot-Reload Not Working**
+```bash
+# Check file watching permissions
+# Verify configuration file syntax
+# Review logs for validation errors
+tail -f logs/walle_enhanced_backend.log
+```
+
+#### **Serial Communication Problems**
+```bash
+# Check serial devices
 ls -la /dev/ttyAMA*
-ls -la /dev/ttyUSB*
 
-# Test serial connection  
+# Test serial connection
 screen /dev/ttyAMA0 9600
+
+# Verify Maestro device numbers (12 & 13)
 ```
 
-**Camera Issues**
+### **System Diagnostics**
 ```bash
-# Check ESP32 connectivity
-ping 10.1.1.203
-
-# Restart camera proxy
-./start_walle.sh --camera-only
-```
-
-**Python Environment**
-```bash
-# Verify Python version
-python --version  # Should be 3.9.13
-
-# Check virtual environment
-source venv/bin/activate
-pip list
-```
-
-**SMB File Sharing**
-```bash
-# Check SMB status
-./manage_smb.sh status
-
-# Restart services
-./manage_smb.sh restart
-```
-
-### **Debug Commands**
-
-```bash
-# Real-time logs
+# Real-time system logs
 tail -f logs/walle_enhanced_backend.log
 
-# System resources
-htop
-
-# I2C devices
+# Hardware status check
 i2cdetect -y 1
 
 # Network services
 netstat -tulpn | grep -E "(8766|8081)"
+
+# Python environment verification
+python --version  # Should be 3.9.13
+source venv/bin/activate && pip list
 ```
 
 ---
 
-## System Status Summary
+## System Status & Features
 
-### **✅ Production Ready Components**
-- Shared serial communication
-- NEMA 23 stepper control  
-- Camera streaming system
-- Scene management
-- Audio system
-- Telemetry monitoring
+### **✅ Production Ready**
+- Shared serial communication with priority queuing
+- NEMA 23 stepper control with TB6600 driver (1/4 microstepping)
+- Configuration management with hot-reload
+- ESP32-CAM streaming with multi-client support
+- Scene management with 33+ predefined scenes
+- Audio system with pygame integration
+- Telemetry monitoring with ADS1115 ADC
+- GPIO compatibility layer for different Pi models
 
+### **⚠️ In Progress**
+- Sabertooth tank drive integration
+- Advanced safety systems (voltage/current based)
+- Web-based configuration interface
 
-### **❌ Missing Components**
-- Sabertooth motor driver
-- Advanced safety systems
-- Bluetooth controller
-- Configuration hot-reload
+### **❌ Future Enhancements**
+- Bluetooth controller support
+- AI behavior system
+- Voice recognition
+- Advanced computer vision
 
-**Overall Assessment**: The system is well-architected with excellent hardware abstraction and safety considerations. The modular approach with shared serial management and priority queuing shows professional-grade robotics programming. Main areas for improvement are code organization and completing missing hardware integrations.
+**Overall Assessment**: The system demonstrates professional-grade robotics programming with excellent hardware abstraction, safety considerations, and modular architecture. The TB6600 stepper configuration with 1/4 microstepping provides optimal balance of precision, torque, and noise reduction for the WALL-E application.
