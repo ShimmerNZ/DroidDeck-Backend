@@ -52,12 +52,14 @@ class DirectServoHandler(BehaviorHandler):
         try:
             servo_channel = config.get('target')
             invert = config.get('invert', False)
+            sensitivity = config.get('sensitivity', 1.0)
             
             if not servo_channel or not self.hardware_service:
                 return False
             
-            # Apply inversion if configured
+            # Apply inversion and sensitivity
             value = -controller_input.raw_value if invert else controller_input.raw_value
+            value *= sensitivity
             pulse = self._clamp_pulse(value)
             
             # Send servo command
@@ -66,7 +68,7 @@ class DirectServoHandler(BehaviorHandler):
             )
             
             if success:
-                self.logger.debug(f"Direct servo {servo_channel}: {pulse} (raw: {controller_input.raw_value})")
+                self.logger.debug(f"Direct servo {servo_channel}: {pulse} (raw: {controller_input.raw_value:.2f})")
             
             return success
             
@@ -88,6 +90,7 @@ class JoystickPairHandler(BehaviorHandler):
             y_servo = config.get('y_servo')
             invert_x = config.get('invert_x', False)
             invert_y = config.get('invert_y', False)
+            sensitivity = config.get('sensitivity', 1.0)
             
             if not x_servo or not y_servo or not self.hardware_service:
                 return False
@@ -95,22 +98,23 @@ class JoystickPairHandler(BehaviorHandler):
             success = False
             
             # Handle X axis
-            if controller_input.control_name.endswith('_x') or controller_input.control_name == 'left_stick' or controller_input.control_name == 'right_stick':
-                if controller_input.control_name.endswith('_x'):
-                    value = -controller_input.raw_value if invert_x else controller_input.raw_value
-                    pulse = self._clamp_pulse(value)
-                    
-                    success = await self.hardware_service.set_servo_position(
-                        x_servo, pulse, "realtime"
-                    )
-                    
-                    if success:
-                        self.last_x_value = controller_input.raw_value
-                        self.logger.debug(f"Joystick X {x_servo}: {pulse}")
+            if controller_input.control_name.endswith('_x'):
+                value = -controller_input.raw_value if invert_x else controller_input.raw_value
+                value *= sensitivity
+                pulse = self._clamp_pulse(value)
+                
+                success = await self.hardware_service.set_servo_position(
+                    x_servo, pulse, "realtime"
+                )
+                
+                if success:
+                    self.last_x_value = controller_input.raw_value
+                    self.logger.debug(f"Joystick X {x_servo}: {pulse}")
             
             # Handle Y axis
             elif controller_input.control_name.endswith('_y'):
                 value = -controller_input.raw_value if invert_y else controller_input.raw_value
+                value *= sensitivity
                 pulse = self._clamp_pulse(value)
                 
                 success = await self.hardware_service.set_servo_position(
@@ -139,19 +143,20 @@ class DifferentialTracksHandler(BehaviorHandler):
         try:
             left_servo = config.get('left_servo')
             right_servo = config.get('right_servo')
-            sensitivity = config.get('turn_sensitivity', 1.0)
+            turn_sensitivity = config.get('turn_sensitivity', 1.0)
+            forward_sensitivity = config.get('forward_sensitivity', 1.0)
             
             if not left_servo or not right_servo or not self.hardware_service:
                 return False
             
             # Determine if this is forward/backward or turn input
             if controller_input.control_name.endswith('_y'):
-                self.last_forward = controller_input.raw_value
+                self.last_forward = controller_input.raw_value * forward_sensitivity
             elif controller_input.control_name.endswith('_x'):
-                self.last_turn = controller_input.raw_value * sensitivity
+                self.last_turn = controller_input.raw_value * turn_sensitivity
             else:
                 # For non-axis inputs, treat as forward/backward
-                self.last_forward = controller_input.raw_value
+                self.last_forward = controller_input.raw_value * forward_sensitivity
             
             # Calculate differential steering
             left_speed, right_speed = self._calculate_differential_steering(
@@ -210,7 +215,7 @@ class SceneTriggerHandler(BehaviorHandler):
         try:
             scene_name = config.get('scene')
             trigger_timing = config.get('trigger_timing', 'on_press')
-            threshold = 0.5
+            threshold = config.get('threshold', 0.5)
             
             if not scene_name or not self.scene_engine:
                 return False
@@ -235,7 +240,7 @@ class SceneTriggerHandler(BehaviorHandler):
             if should_trigger:
                 success = await self.scene_engine.play_scene(scene_name)
                 if success:
-                    self.logger.debug(f"Scene triggered: {scene_name}")
+                    self.logger.info(f"Scene triggered: {scene_name}")
                 return success
             
             return True  # No error, just no trigger
@@ -257,7 +262,7 @@ class ToggleScenesHandler(BehaviorHandler):
             scene_1 = config.get('scene_1')
             scene_2 = config.get('scene_2')
             trigger_timing = config.get('trigger_timing', 'on_press')
-            threshold = 0.5
+            threshold = config.get('threshold', 0.5)
             
             if not scene_1 or not scene_2 or not self.scene_engine:
                 return False
@@ -286,7 +291,7 @@ class ToggleScenesHandler(BehaviorHandler):
                 
                 success = await self.scene_engine.play_scene(scene_to_trigger)
                 if success:
-                    self.logger.debug(f"Toggle scene triggered: {scene_to_trigger}")
+                    self.logger.info(f"Toggle scene triggered: {scene_to_trigger}")
                 return success
             
             return True  # No error, just no trigger
@@ -316,6 +321,155 @@ class ControllerInputProcessor:
         self.controller_mappings = {}
         self.active_inputs = {}  # Track active controller inputs
         
+        # Controller type specific configurations
+        self.controller_mappings_by_type = {
+            "xbox": {
+                # Drive system - left stick controls tracks
+                "left_stick_x": {
+                    "behavior": "differential_tracks",
+                    "left_servo": "m2_ch0",
+                    "right_servo": "m2_ch1",
+                    "turn_sensitivity": 0.8,
+                    "forward_sensitivity": 1.0
+                },
+                "left_stick_y": {
+                    "behavior": "differential_tracks", 
+                    "left_servo": "m2_ch0",
+                    "right_servo": "m2_ch1",
+                    "turn_sensitivity": 0.8,
+                    "forward_sensitivity": 1.0
+                },
+                
+                # Head control - right stick
+                "right_stick_x": {
+                    "behavior": "direct_servo",
+                    "target": "m1_ch0",
+                    "invert": False,
+                    "sensitivity": 0.8
+                },
+                "right_stick_y": {
+                    "behavior": "direct_servo",
+                    "target": "m1_ch1", 
+                    "invert": False,
+                    "sensitivity": 0.8
+                },
+                
+                # Arm controls - shoulders
+                "shoulder_left": {
+                    "behavior": "direct_servo",
+                    "target": "m1_ch5",
+                    "invert": False,
+                    "sensitivity": 0.7
+                },
+                "shoulder_right": {
+                    "behavior": "direct_servo",
+                    "target": "m1_ch6",
+                    "invert": False,
+                    "sensitivity": 0.7
+                },
+                
+                # Trigger controls
+                "trigger_left": {
+                    "behavior": "direct_servo",
+                    "target": "m1_ch7",
+                    "invert": False,
+                    "sensitivity": 0.6
+                },
+                "trigger_right": {
+                    "behavior": "direct_servo",
+                    "target": "m1_ch8",
+                    "invert": False,
+                    "sensitivity": 0.6
+                },
+                
+                # Scene triggers - face buttons (note: button_b also used for navigation)
+                "button_a": {
+                    "behavior": "scene_trigger",
+                    "scene": "Happy",
+                    "trigger_timing": "on_press"
+                },
+                "button_x": {
+                    "behavior": "scene_trigger",
+                    "scene": "Curious",
+                    "trigger_timing": "on_press"
+                },
+                "button_y": {
+                    "behavior": "scene_trigger",
+                    "scene": "Excited",
+                    "trigger_timing": "on_press"
+                },
+                
+                # Back/Start buttons for additional scenes
+                "button_back": {
+                    "behavior": "scene_trigger",
+                    "scene": "Confused",
+                    "trigger_timing": "on_press"
+                },
+                "button_start": {
+                    "behavior": "scene_trigger",
+                    "scene": "Alert",
+                    "trigger_timing": "on_press"
+                }
+            },
+            
+            "steam_deck": {
+                # Same as Xbox for now - Steam Deck uses similar layout
+                "left_stick_x": {
+                    "behavior": "differential_tracks",
+                    "left_servo": "m2_ch0",
+                    "right_servo": "m2_ch1",
+                    "turn_sensitivity": 0.8,
+                    "forward_sensitivity": 1.0
+                },
+                "left_stick_y": {
+                    "behavior": "differential_tracks",
+                    "left_servo": "m2_ch0", 
+                    "right_servo": "m2_ch1",
+                    "turn_sensitivity": 0.8,
+                    "forward_sensitivity": 1.0
+                },
+                "right_stick_x": {
+                    "behavior": "direct_servo",
+                    "target": "m1_ch0",
+                    "invert": False,
+                    "sensitivity": 0.8
+                },
+                "right_stick_y": {
+                    "behavior": "direct_servo",
+                    "target": "m1_ch1",
+                    "invert": False,
+                    "sensitivity": 0.8
+                },
+                "shoulder_left": {
+                    "behavior": "direct_servo",
+                    "target": "m1_ch5",
+                    "invert": False,
+                    "sensitivity": 0.7
+                },
+                "shoulder_right": {
+                    "behavior": "direct_servo",
+                    "target": "m1_ch6",
+                    "invert": False,
+                    "sensitivity": 0.7
+                },
+                "button_a": {
+                    "behavior": "scene_trigger",
+                    "scene": "Happy",
+                    "trigger_timing": "on_press"
+                },
+                "button_x": {
+                    "behavior": "scene_trigger",
+                    "scene": "Curious", 
+                    "trigger_timing": "on_press"
+                },
+                "button_y": {
+                    "behavior": "scene_trigger",
+                    "scene": "Excited",
+                    "trigger_timing": "on_press"
+                }
+            }
+        }
+        
         # Statistics
         self.stats = {
             "inputs_processed": 0,
@@ -324,10 +478,29 @@ class ControllerInputProcessor:
             "last_input_time": 0.0
         }
         
-        logger.info("🎮 Controller input processor initialized")
+        logger.info("Controller input processor initialized")
+    
+    def load_controller_config_by_type(self, controller_type: str) -> bool:
+        """Load controller configuration based on detected controller type"""
+        try:
+            if controller_type in self.controller_mappings_by_type:
+                self.controller_mappings = self.controller_mappings_by_type[controller_type].copy()
+                logger.info(f"Loaded {controller_type} controller configuration with {len(self.controller_mappings)} mappings")
+                return True
+            else:
+                logger.warning(f"No configuration found for controller type: {controller_type}")
+                # Fall back to generic Xbox configuration
+                if "xbox" in self.controller_mappings_by_type:
+                    self.controller_mappings = self.controller_mappings_by_type["xbox"].copy()
+                    logger.info("Loaded fallback Xbox configuration")
+                    return True
+                return False
+        except Exception as e:
+            logger.error(f"Failed to load controller config by type: {e}")
+            return False
     
     def load_controller_config(self, config_dict: Dict[str, Any]) -> bool:
-        """Load controller configuration mappings"""
+        """Load controller configuration mappings from dict"""
         try:
             self.controller_mappings = config_dict.copy()
             
@@ -339,11 +512,11 @@ class ControllerInputProcessor:
                 else:
                     logger.warning(f"Invalid controller config for {control_name}: {config}")
             
-            logger.info(f"🎮 Loaded {valid_configs}/{len(self.controller_mappings)} valid controller mappings")
+            logger.info(f"Loaded {valid_configs}/{len(self.controller_mappings)} valid controller mappings")
             return valid_configs > 0
             
         except Exception as e:
-            logger.error(f"❌ Failed to load controller config: {e}")
+            logger.error(f"Failed to load controller config: {e}")
             return False
     
     def _validate_config(self, control_name: str, config: Dict[str, Any]) -> bool:
@@ -510,8 +683,9 @@ class ControllerInputProcessor:
     
     def cleanup(self):
         """Clean up controller input processor"""
-        logger.info("🧹 Cleaning up controller input processor...")
+        logger.info("Cleaning up controller input processor...")
         self.active_inputs.clear()
         self.controller_mappings.clear()
 
+# Alias for backward compatibility
 ControllerInputHandler = ControllerInputProcessor

@@ -36,6 +36,10 @@ class WebSocketMessageHandler:
             "get_all_servo_positions": self._handle_get_all_servo_positions,
             "get_maestro_info": self._handle_get_maestro_info,
             "get_controller_info": self._handle_get_controller_info,
+            "start_calibration_mode": self._handle_start_calibration_mode,
+            "stop_calibration_mode": self._handle_stop_calibration_mode,
+            "save_calibration": self._handle_save_calibration,
+            "get_controller_status": self._handle_get_controller_status,
             
             # Stepper motor control
             "stepper": self._handle_stepper_command,
@@ -70,6 +74,9 @@ class WebSocketMessageHandler:
             "nema_home": self._handle_nema_home,
             "nema_enable": self._handle_nema_enable,
             "nema_get_status": self._handle_nema_get_status,
+
+            "navigation": self._handle_navigation_command,
+
             
             # Mode control
             "failsafe": self._handle_failsafe,
@@ -118,6 +125,174 @@ class WebSocketMessageHandler:
             await self._send_error_response(websocket, f"Message handling error: {str(e)}")
             return False
     
+    async def _handle_navigation_command(self, websocket, data: Dict[str, Any]):
+        """Handle navigation commands from controller and broadcast to frontend"""
+        try:
+            action = data.get("action")
+            
+            if not action:
+                await self._send_error_response(websocket, "Missing action parameter")
+                return
+            
+            # Validate action
+            valid_actions = ['up', 'down', 'left', 'right', 'select', 'exit']
+            if action not in valid_actions:
+                await self._send_error_response(websocket, f"Invalid action: {action}")
+                return
+            
+            # Broadcast navigation command to all connected clients (especially frontend)
+            navigation_message = {
+                "type": "navigation",
+                "action": action,
+                "timestamp": time.time(),
+                "source": "controller"
+            }
+            
+            # Broadcast to all clients
+            await self.backend.broadcast_message(navigation_message)
+            
+            logger.debug(f"Broadcasted navigation command: {action}")
+            
+        except Exception as e:
+            logger.error(f"Navigation command error: {e}")
+            await self._send_error_response(websocket, f"Navigation error: {str(e)}")
+
+
+    async def _handle_start_calibration_mode(self, websocket, data: Dict[str, Any]):
+        """Start controller calibration mode - enables real-time streaming"""
+        try:
+            if hasattr(self.backend, 'bluetooth_controller'):
+                # FIXED: Set the correct attribute name
+                self.backend.bluetooth_controller.calibration_streaming = True
+                
+                await self._send_websocket_message(websocket, {
+                    "type": "calibration_mode_started",
+                    "success": True,
+                    "message": "Calibration streaming enabled"
+                })
+                
+                # Also send current controller info
+                controller_info = self.backend.bluetooth_controller.get_controller_info()
+                await self._send_websocket_message(websocket, {
+                    "type": "controller_info",
+                    **controller_info
+                })
+                
+                logger.info("Calibration mode started successfully")
+            else:
+                await self._send_error_response(websocket, "No bluetooth controller available")
+                
+        except Exception as e:
+            logger.error(f"Start calibration mode error: {e}")
+            await self._send_error_response(websocket, f"Calibration mode error: {str(e)}")
+
+    async def _handle_stop_calibration_mode(self, websocket, data: Dict[str, Any]):
+        """Stop controller calibration mode"""
+        try:
+            if hasattr(self.backend, 'bluetooth_controller'):
+                # FIXED: Set the correct attribute name
+                self.backend.bluetooth_controller.calibration_streaming = False
+                
+                await self._send_websocket_message(websocket, {
+                    "type": "calibration_mode_stopped",
+                    "success": True,
+                    "message": "Calibration streaming disabled"
+                })
+                
+                logger.info("Calibration mode stopped successfully")
+            else:
+                await self._send_error_response(websocket, "No bluetooth controller available")
+                
+        except Exception as e:
+            logger.error(f"Stop calibration mode error: {e}")
+            await self._send_error_response(websocket, f"Stop calibration mode error: {str(e)}")
+
+
+    async def _handle_get_controller_status(self, websocket, data: Dict[str, Any]):
+        """Get current controller connection status"""
+        try:
+            if hasattr(self.backend, 'bluetooth_controller'):
+                controller_info = self.backend.bluetooth_controller.get_controller_info()
+                await self._send_websocket_message(websocket, {
+                    "type": "controller_status",
+                    **controller_info
+                })
+            else:
+                await self._send_websocket_message(websocket, {
+                    "type": "controller_status",
+                    "connected": False,
+                    "controller_name": "No controller service available"
+                })
+        except Exception as e:
+            logger.error(f"Get controller status error: {e}")
+            await self._send_error_response(websocket, f"Controller status error: {str(e)}")
+
+    async def _handle_save_calibration(self, websocket, data: Dict[str, Any]):
+        """Save calibration data from frontend wizard"""
+        try:
+            if hasattr(self.backend, 'bluetooth_controller'):
+                calibration_data = data.get('calibration', {})
+                
+                logger.info(f"Received calibration data: {calibration_data}")
+                
+                # Use the corrected save method
+                success = await self.backend.bluetooth_controller.save_calibration(calibration_data)
+                
+                if success:
+                    await self._send_websocket_message(websocket, {
+                        "type": "calibration_saved",
+                        "success": True,
+                        "message": "Calibration data saved successfully"
+                    })
+                    
+                    # Broadcast calibration update to all clients
+                    await self.backend.broadcast_message({
+                        "type": "calibration_updated",
+                        "calibrated": True,
+                        "timestamp": time.time()
+                    })
+                else:
+                    await self._send_error_response(websocket, "Failed to save calibration data")
+            else:
+                await self._send_error_response(websocket, "No bluetooth controller available")
+                
+        except Exception as e:
+            logger.error(f"Save calibration error: {e}")
+            await self._send_error_response(websocket, f"Save calibration error: {str(e)}")
+
+    async def _handle_controller_calibration(self, websocket, data: Dict[str, Any]):
+        """Handle automatic controller calibration request"""
+        try:
+            if hasattr(self.backend, 'bluetooth_controller'):
+                success = await self.backend.bluetooth_controller.perform_startup_calibration()
+                await self._send_websocket_message(websocket, {
+                    "type": "controller_calibration_result",
+                    "success": success,
+                    "message": "Automatic calibration completed" if success else "Calibration failed"
+                })
+            else:
+                await self._send_error_response(websocket, "No bluetooth controller available")
+        except Exception as e:
+            logger.error(f"Controller calibration error: {e}")
+            await self._send_error_response(websocket, f"Calibration error: {str(e)}")
+
+    async def _handle_manual_controller_calibration(self, websocket, data: Dict[str, Any]):
+        """Handle manual controller calibration request"""
+        try:
+            if hasattr(self.backend, 'bluetooth_controller'):
+                success = await self.backend.bluetooth_controller.manual_calibration_sequence()
+                await self._send_websocket_message(websocket, {
+                    "type": "manual_calibration_result",
+                    "success": success,
+                    "message": "Manual calibration completed" if success else "Manual calibration failed"
+                })
+            else:
+                await self._send_error_response(websocket, "No bluetooth controller available")
+        except Exception as e:
+            logger.error(f"Manual controller calibration error: {e}")
+            await self._send_error_response(websocket, f"Manual calibration error: {str(e)}")
+
+
     # ==================== SERVO CONTROL HANDLERS ====================
     
     async def _handle_servo_command(self, websocket, data: Dict[str, Any]):
@@ -917,3 +1092,49 @@ class WebSocketMessageHandler:
             logger.error(f"Camera config update error: {e}")
             await self._send_error_response(websocket, f"Camera config error: {str(e)}")
 
+        """Apply calibration data from frontend wizard"""
+        try:
+            controller = self.backend.bluetooth_controller
+            
+            # Apply joystick ranges
+            joystick_ranges = calibration_data.get("joystick_ranges", {})
+            
+            for stick_name, ranges in joystick_ranges.items():
+                if stick_name == "left_stick":
+                    base_axis = 0
+                elif stick_name == "right_stick":
+                    base_axis = 2
+                else:
+                    continue
+                
+                # Set X and Y axis ranges
+                x_range = ranges.get('x', [0, 0])
+                y_range = ranges.get('y', [0, 0])
+                
+                if x_range != [0, 0]:
+                    controller.calibration.axis_min[base_axis] = x_range[0]
+                    controller.calibration.axis_max[base_axis] = x_range[1]
+                    controller.calibration.axis_center[base_axis] = (x_range[0] + x_range[1]) / 2
+                
+                if y_range != [0, 0]:
+                    controller.calibration.axis_min[base_axis + 1] = y_range[0]
+                    controller.calibration.axis_max[base_axis + 1] = y_range[1]
+                    controller.calibration.axis_center[base_axis + 1] = (y_range[0] + y_range[1]) / 2
+            
+            # Apply dead zones
+            dead_zones = calibration_data.get("dead_zones", {})
+            if "left_stick" in dead_zones or "right_stick" in dead_zones:
+                # Use the higher of the two dead zones as global dead zone
+                left_dz = dead_zones.get("left_stick", 0.15)
+                right_dz = dead_zones.get("right_stick", 0.15)
+                controller.calibration.dead_zone = max(left_dz, right_dz)
+            
+            # Mark as calibrated
+            controller.calibration.calibrated = True
+            
+            # Save to file
+            return controller.calibration.save_calibration()
+            
+        except Exception as e:
+            logger.error(f"Failed to apply calibration data: {e}")
+            return False
