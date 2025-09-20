@@ -1,0 +1,33 @@
+{
+  "left_trigger": {
+    "behavior": "direct_servo",
+    "input_type": "trigger",
+    "target": "m1_ch7",
+    "invert": false
+  },
+  "button_x": {
+    "behavior": "toggle_scenes",
+    "input_type": "button",
+    "scene_1": "Curious",
+    "scene_2": "Alert",
+    "trigger_timing": "on_press"
+  },
+  "left_stick_y": {
+    "behavior": "differential_tracks",
+    "left_servo": "m2_ch0",
+    "right_servo": "m2_ch1"
+  },
+  "left_stick_x": {
+    "behavior": "differential_tracks",
+    "left_servo": "m2_ch0",
+    "right_servo": "m2_ch1"
+  },
+  "button_y": {
+    "behavior": "nema_stepper",
+    "min_position": 5.0,
+    "max_position": 15.0,
+    "normal_speed": 4800,
+    "acceleration": 5163,
+    "nema_behavior": "toggle_positions"
+  }
+}

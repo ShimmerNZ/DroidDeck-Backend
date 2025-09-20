@@ -3,38 +3,39 @@
         "maestro1": {
             "port": "/dev/ttyAMA0",
             "baud_rate": 9600,
-            "device_number": 12
+            "device_number": 12,
+            "description": "Primary Maestro for head and upper body servos"
         },
         "maestro2": {
-            "port": "/dev/ttyAMA0",
+            "port": "/dev/ttyAMA0", 
             "baud_rate": 9600,
-            "device_number": 13
+            "device_number": 13,
+            "description": "Secondary Maestro for arm and body servos"
         },
         "sabertooth": {
             "port": "/dev/ttyAMA1",
-            "baud_rate": 9600
+            "baud_rate": 9600,
+            "description": "Sabertooth 2x60 motor controller (future use)"
         },
         "gpio": {
             "motor_step_pin": 16,
             "motor_dir_pin": 12,
             "motor_enable_pin": 13,
             "limit_switch_pin": 26,
-            "emergency_stop_pin": 25
+            "emergency_stop_pin": 25,
+            "description": "GPIO pin assignments for stepper motor and safety"
         },
         "timing": {
-            "telemetry_interval": 0.2,
-            "servo_update_rate": 0.02
+            "telemetry_interval": 1.0,
+            "servo_update_rate": 0.02,
+            "controller_dpad_rate": 0.008,
+            "controller_analog_rate": 0.016,
+            "description": "OPTIMIZED: Separated controller and telemetry timing to reduce latency"
         },
         "audio": {
             "directory": "audio",
-            "volume": 0.7
-        },
-        "stepper_motor": {
-            "steps_per_revolution": 800,
-            "homing_speed": 1600,
-            "normal_speed": 4000,
-            "max_speed": 4800,
-            "acceleration": 3200
+            "volume": 0.7,
+            "description": "Audio system configuration"
         }
     }
 }

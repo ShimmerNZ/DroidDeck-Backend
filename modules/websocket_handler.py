@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import time
+import os
 from typing import Dict, Any, Optional, Callable
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ class WebSocketMessageHandler:
             "stop_calibration_mode": self._handle_stop_calibration_mode,
             "save_calibration": self._handle_save_calibration,
             "get_controller_status": self._handle_get_controller_status,
+            "save_controller_config": self._handle_save_controller_config,
             
             # Stepper motor control
             "stepper": self._handle_stepper_command,
@@ -125,6 +127,46 @@ class WebSocketMessageHandler:
             await self._send_error_response(websocket, f"Message handling error: {str(e)}")
             return False
     
+    async def _handle_save_controller_config(self, websocket, data: Dict[str, Any]):
+        """Handle saving controller configuration"""
+        try:
+            config = data.get("config", {})
+            
+            if not isinstance(config, dict):
+                await self._send_error_response(websocket, "Controller config must be a dictionary")
+                return
+            
+            # Save to backend's config file
+            backend_config_path = "configs/controller_config.json"
+            
+            # Create configs directory if it doesn't exist
+            os.makedirs("configs", exist_ok=True)
+            
+            # Save config
+            with open(backend_config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+            
+            # Reload config in controller input processor
+            if hasattr(self.backend, 'controller_input_processor'):
+                success = self.backend.controller_input_processor.load_controller_config(config)
+                if success:
+                    logger.info(f"Reloaded controller config with {len(config)} mappings")
+                else:
+                    logger.warning("Failed to reload controller config in processor")
+            
+            await self._send_websocket_message(websocket, {
+                "type": "controller_config_saved",
+                "success": True,
+                "message": f"Controller configuration saved with {len(config)} mappings",
+                "timestamp": time.time()
+            })
+            
+            logger.info(f"Controller configuration saved and reloaded")
+            
+        except Exception as e:
+            logger.error(f"Save controller config error: {e}")
+            await self._send_error_response(websocket, f"Error saving controller config: {str(e)}")
+    
     async def _handle_navigation_command(self, websocket, data: Dict[str, Any]):
         """Handle navigation commands from controller and broadcast to frontend"""
         try:
@@ -157,12 +199,11 @@ class WebSocketMessageHandler:
             logger.error(f"Navigation command error: {e}")
             await self._send_error_response(websocket, f"Navigation error: {str(e)}")
 
-
     async def _handle_start_calibration_mode(self, websocket, data: Dict[str, Any]):
-        """Start controller calibration mode - enables real-time streaming"""
+        """Start controller calibration mode - FIXED for proper streaming"""
         try:
             if hasattr(self.backend, 'bluetooth_controller'):
-                # FIXED: Set the correct attribute name
+                # Enable calibration streaming
                 self.backend.bluetooth_controller.calibration_streaming = True
                 
                 await self._send_websocket_message(websocket, {
@@ -171,14 +212,14 @@ class WebSocketMessageHandler:
                     "message": "Calibration streaming enabled"
                 })
                 
-                # Also send current controller info
+                # Send current controller info
                 controller_info = self.backend.bluetooth_controller.get_controller_info()
                 await self._send_websocket_message(websocket, {
                     "type": "controller_info",
                     **controller_info
                 })
                 
-                logger.info("Calibration mode started successfully")
+                logger.info("Calibration mode started - streaming enabled")
             else:
                 await self._send_error_response(websocket, "No bluetooth controller available")
                 
@@ -187,10 +228,10 @@ class WebSocketMessageHandler:
             await self._send_error_response(websocket, f"Calibration mode error: {str(e)}")
 
     async def _handle_stop_calibration_mode(self, websocket, data: Dict[str, Any]):
-        """Stop controller calibration mode"""
+        """Stop controller calibration mode - FIXED"""
         try:
             if hasattr(self.backend, 'bluetooth_controller'):
-                # FIXED: Set the correct attribute name
+                # Disable calibration streaming
                 self.backend.bluetooth_controller.calibration_streaming = False
                 
                 await self._send_websocket_message(websocket, {
@@ -199,7 +240,7 @@ class WebSocketMessageHandler:
                     "message": "Calibration streaming disabled"
                 })
                 
-                logger.info("Calibration mode stopped successfully")
+                logger.info("Calibration mode stopped - streaming disabled")
             else:
                 await self._send_error_response(websocket, "No bluetooth controller available")
                 
@@ -207,9 +248,8 @@ class WebSocketMessageHandler:
             logger.error(f"Stop calibration mode error: {e}")
             await self._send_error_response(websocket, f"Stop calibration mode error: {str(e)}")
 
-
     async def _handle_get_controller_status(self, websocket, data: Dict[str, Any]):
-        """Get current controller connection status"""
+        """Get current controller connection status - ENHANCED"""
         try:
             if hasattr(self.backend, 'bluetooth_controller'):
                 controller_info = self.backend.bluetooth_controller.get_controller_info()
@@ -217,6 +257,42 @@ class WebSocketMessageHandler:
                     "type": "controller_status",
                     **controller_info
                 })
+                
+                # If in calibration mode, also send sample data immediately
+                if self.backend.bluetooth_controller.calibration_streaming:
+                    # Send a sample calibration data packet
+                    if hasattr(self.backend.bluetooth_controller, 'joystick') and self.backend.bluetooth_controller.joystick:
+                        import pygame
+                        pygame.event.pump()
+                        
+                        sample_data = {
+                            "type": "calibration_data",
+                            "left_stick_x": self.backend.bluetooth_controller.joystick.get_axis(0) if self.backend.bluetooth_controller.joystick.get_numaxes() > 0 else 0.0,
+                            "left_stick_y": -self.backend.bluetooth_controller.joystick.get_axis(1) if self.backend.bluetooth_controller.joystick.get_numaxes() > 1 else 0.0,
+                            "right_stick_x": self.backend.bluetooth_controller.joystick.get_axis(2) if self.backend.bluetooth_controller.joystick.get_numaxes() > 2 else 0.0,
+                            "right_stick_y": -self.backend.bluetooth_controller.joystick.get_axis(3) if self.backend.bluetooth_controller.joystick.get_numaxes() > 3 else 0.0,
+                            "left_trigger": max(0, self.backend.bluetooth_controller.joystick.get_axis(4)) if self.backend.bluetooth_controller.joystick.get_numaxes() > 4 else 0.0,
+                            "right_trigger": max(0, self.backend.bluetooth_controller.joystick.get_axis(5)) if self.backend.bluetooth_controller.joystick.get_numaxes() > 5 else 0.0,
+                            "timestamp": time.time()
+                        }
+                        
+                        # Add button states
+                        for button_id in range(self.backend.bluetooth_controller.joystick.get_numbuttons()):
+                            button_name = self.backend.bluetooth_controller.button_map.get(button_id, f"button_{button_id}")
+                            sample_data[button_name] = bool(self.backend.bluetooth_controller.joystick.get_button(button_id))
+                        
+                        # Add D-pad states
+                        if self.backend.bluetooth_controller.joystick.get_numhats() > 0:
+                            hat_x, hat_y = self.backend.bluetooth_controller.joystick.get_hat(0)
+                            sample_data.update({
+                                "dpad_up": hat_y > 0,
+                                "dpad_down": hat_y < 0,
+                                "dpad_left": hat_x < 0,
+                                "dpad_right": hat_x > 0,
+                            })
+                        
+                        await self._send_websocket_message(websocket, sample_data)
+                        
             else:
                 await self._send_websocket_message(websocket, {
                     "type": "controller_status",
@@ -228,14 +304,14 @@ class WebSocketMessageHandler:
             await self._send_error_response(websocket, f"Controller status error: {str(e)}")
 
     async def _handle_save_calibration(self, websocket, data: Dict[str, Any]):
-        """Save calibration data from frontend wizard"""
+        """Save calibration data from frontend wizard - ENHANCED"""
         try:
             if hasattr(self.backend, 'bluetooth_controller'):
                 calibration_data = data.get('calibration', {})
                 
                 logger.info(f"Received calibration data: {calibration_data}")
                 
-                # Use the corrected save method
+                # Use the optimized save method
                 success = await self.backend.bluetooth_controller.save_calibration(calibration_data)
                 
                 if success:
@@ -251,6 +327,8 @@ class WebSocketMessageHandler:
                         "calibrated": True,
                         "timestamp": time.time()
                     })
+                    
+                    logger.info("Controller calibration saved and broadcasted")
                 else:
                     await self._send_error_response(websocket, "Failed to save calibration data")
             else:

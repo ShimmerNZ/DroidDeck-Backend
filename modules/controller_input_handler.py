@@ -20,6 +20,7 @@ class BehaviorType(Enum):
     DIFFERENTIAL_TRACKS = "differential_tracks"
     SCENE_TRIGGER = "scene_trigger"
     TOGGLE_SCENES = "toggle_scenes"
+    NEMA_STEPPER = "nema_stepper" 
 
 @dataclass
 class ControllerInput:
@@ -303,10 +304,10 @@ class ToggleScenesHandler(BehaviorHandler):
 class ControllerInputProcessor:
     """Main controller input processing system"""
     
-    def __init__(self, hardware_service=None, scene_engine=None, stepper_service=None):
+    def __init__(self, hardware_service=None, scene_engine=None, stepper_controller=None):
         self.hardware_service = hardware_service
         self.scene_engine = scene_engine
-        self.stepper_service = stepper_service
+        self.stepper_controller = stepper_controller
         
         # Initialize behavior handlers
         self.handlers = {
@@ -314,7 +315,8 @@ class ControllerInputProcessor:
             BehaviorType.JOYSTICK_PAIR: JoystickPairHandler(hardware_service, scene_engine, logger),
             BehaviorType.DIFFERENTIAL_TRACKS: DifferentialTracksHandler(hardware_service, scene_engine, logger),
             BehaviorType.SCENE_TRIGGER: SceneTriggerHandler(hardware_service, scene_engine, logger),
-            BehaviorType.TOGGLE_SCENES: ToggleScenesHandler(hardware_service, scene_engine, logger)
+            BehaviorType.TOGGLE_SCENES: ToggleScenesHandler(hardware_service, scene_engine, logger),
+            BehaviorType.NEMA_STEPPER: NemaStepperHandler(hardware_service, scene_engine, logger)
         }
         
         # Configuration storage
@@ -548,6 +550,8 @@ class ControllerInputProcessor:
                 return 'scene' in config
             elif behavior_type == BehaviorType.TOGGLE_SCENES:
                 return 'scene_1' in config and 'scene_2' in config
+            elif behavior_type == BehaviorType.NEMA_STEPPER:  # Add this
+                return 'nema_behavior' in config
             
             return True
             
@@ -689,3 +693,101 @@ class ControllerInputProcessor:
 
 # Alias for backward compatibility
 ControllerInputHandler = ControllerInputProcessor
+
+class NemaStepperHandler(BehaviorHandler):
+    """Handle NEMA stepper control - backend version that controls actual hardware"""
+    
+    def __init__(self, hardware_service=None, scene_engine=None, logger=None):
+        super().__init__(hardware_service, scene_engine, logger)
+        self.last_button_states = {}  # Track button press states
+        self.toggle_states = {}       # Track toggle positions for each button
+        
+    async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
+        try:
+            behavior_type = config.get('nema_behavior', 'toggle_positions')
+            trigger_timing = config.get('trigger_timing', 'on_press')
+            threshold = 0.5
+            
+            # Only handle button presses for toggle_positions
+            if behavior_type == "toggle_positions":
+                return await self._handle_toggle_positions(controller_input, config, trigger_timing, threshold)
+            
+            # Add other behaviors later if needed
+            self.logger.warning(f"NEMA behavior '{behavior_type}' not implemented yet")
+            return False
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error in NEMA stepper handler: {e}")
+            return False
+    
+    async def _handle_toggle_positions(self, controller_input: ControllerInput, config: Dict[str, Any], 
+                                     trigger_timing: str, threshold: float) -> bool:
+        """Toggle between min and max positions on button press"""
+        control_name = controller_input.control_name
+        raw_value = controller_input.raw_value
+        
+        # Track button state for proper press/release detection
+        was_pressed = self.last_button_states.get(control_name, False)
+        is_pressed = raw_value > threshold
+        self.last_button_states[control_name] = is_pressed
+        
+        # Only trigger on the specified timing
+        should_trigger = False
+        if trigger_timing == 'on_press':
+            should_trigger = is_pressed and not was_pressed
+        elif trigger_timing == 'on_release':
+            should_trigger = not is_pressed and was_pressed
+        
+        if should_trigger:
+            # Get NEMA config
+            min_pos = config.get('min_position', 0.0)
+            max_pos = config.get('max_position', 20.0)
+            speed = config.get('normal_speed', 1000)
+            acceleration = config.get('acceleration', 800)
+            
+            # Check if we have a stepper service available
+            if hasattr(self.hardware_service, 'stepper_controller') and self.hardware_service.stepper_controller:
+                stepper = self.hardware_service.stepper_controller
+                
+                try:
+                    # Get the current toggle state for this button (default to False = at min)
+                    is_at_max = self.toggle_states.get(control_name, False)
+                    
+                    # Determine target position based on toggle state
+                    if is_at_max:
+                        target_pos = min_pos
+                        new_toggle_state = False
+                        self.logger.info(f"Toggling {control_name}: MAX -> MIN ({target_pos}cm)")
+                    else:
+                        target_pos = max_pos
+                        new_toggle_state = True
+                        self.logger.info(f"Toggling {control_name}: MIN -> MAX ({target_pos}cm)")
+                    
+                    # Update stepper config with our desired speed/acceleration
+                    stepper_config_update = {
+                        "normal_speed": speed,
+                        "acceleration": acceleration
+                    }
+                    stepper.update_config(stepper_config_update)
+                    
+                    # Send move command
+                    success = await stepper.move_to_position_cm(target_pos)
+                    
+                    if success:
+                        # Only update toggle state if movement was successful
+                        self.toggle_states[control_name] = new_toggle_state
+                        self.logger.info(f"NEMA stepper moving to {target_pos}cm (button: {control_name})")
+                    else:
+                        self.logger.error(f"NEMA stepper move command failed")
+                    
+                    return success
+                    
+                except Exception as e:
+                    self.logger.error(f"NEMA stepper control error: {e}")
+                    return False
+            else:
+                self.logger.warning("No stepper controller available for NEMA control")
+                return False
+        
+        return True  # No error, just no trigger

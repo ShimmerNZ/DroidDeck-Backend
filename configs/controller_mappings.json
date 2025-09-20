@@ -1,0 +1,61 @@
+{
+  "xbox": {
+    "button_map": {
+      "0": "button_a",
+      "1": "button_b", 
+      "2": "button_x",
+      "3": "button_y",
+      "4": "shoulder_left",
+      "5": "shoulder_right",
+      "6": "button_back",
+      "7": "button_start",
+      "8": "button_guide",
+      "9": "left_stick_click",
+      "10": "right_stick_click"
+    },
+    "axis_map": {
+      "0": "left_stick_x",
+      "1": "left_stick_y",
+      "2": "right_stick_x", 
+      "3": "right_stick_y",
+      "4": "left_trigger",
+      "5": "right_trigger"
+    },
+    "dpad_map": {
+      "up": "dpad_up",
+      "down": "dpad_down",
+      "left": "dpad_left",
+      "right": "dpad_right"
+    }
+  },
+  "steam_deck": {
+    "button_map": {
+      "0": "button_b",
+      "1": "button_a",
+      "2": "button_x", 
+      "3": "button_y",
+      "4": "button_start",
+      "5": "shoulder_left",
+      "6": "shoulder_right",
+      "7": "left_trigger_btn",
+      "8": "right_trigger_btn",
+      "9": "button_back",
+      "10": "button_y",
+      "11": "button_guide"
+    },
+    "axis_map": {
+      "0": "left_stick_x",
+      "1": "left_stick_y",
+      "2": "right_stick_x",
+      "3": "right_stick_y",
+      "7": "left_trigger",
+      "8": "right_trigger"
+    },
+    "dpad_map": {
+      "up": "dpad_up",
+      "down": "dpad_down", 
+      "left": "dpad_left",
+      "right": "dpad_right"
+    }
+  }
+}

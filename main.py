@@ -440,13 +440,14 @@ class WALLEBackend:
             return False
 
     # ==================== TELEMETRY LOOP ====================
-    
     async def telemetry_loop(self):
-        """Background telemetry data collection and broadcasting"""
-        logger.info("Starting telemetry loop")
+        """Background telemetry data collection and broadcasting - OPTIMIZED"""
+        logger.info("Starting optimized telemetry loop")
         
-        # Get telemetry interval from config
+        # Get telemetry interval from config - now uses longer interval
         telemetry_interval = self.config.get("hardware", {}).get("timing", {}).get("telemetry_interval", 1.0)
+        
+        logger.info(f"Telemetry running at {telemetry_interval}s intervals (optimized for controller responsiveness)")
         
         while self.running:
             try:
@@ -456,10 +457,10 @@ class WALLEBackend:
                 # Add camera status
                 hardware_status.update({
                     "camera_proxy": self.get_camera_proxy_status(),
-                    "stream_latency": 0.0  # TODO: Get from camera proxy
+                    "stream_latency": 0.0
                 })
 
-                # Get audio status directly from audio controller
+                # Get audio status
                 audio_connected = False
                 if self.audio_controller:
                     try:
@@ -469,13 +470,12 @@ class WALLEBackend:
                         logger.debug(f"Failed to get audio status: {e}")
                         audio_connected = False
                 
-                # Add to hardware_status for telemetry
                 hardware_status["audio_system_ready"] = audio_connected
 
                 # Collect telemetry data
                 reading = await self.telemetry_system.update(hardware_status)
                 
-                # Get controller info
+                # Get controller info (now includes optimization status)
                 controller_info = {}
                 if hasattr(self, 'bluetooth_controller'):
                     controller_info = self.bluetooth_controller.get_controller_info()
@@ -493,16 +493,20 @@ class WALLEBackend:
                     "current_electronics": reading.current_electronics,
                     "maestro1": hardware_status.get("hardware", {}).get("maestro1", {"connected": False}),
                     "maestro2": hardware_status.get("hardware", {}).get("maestro2", {"connected": False}),
-                
                     "audio_system": {
                         "connected": hardware_status.get("audio_system_ready", False)
                     },
-                    "controller": controller_info,  # Add controller info to telemetry
+                    "controller": controller_info,
                     "hardware_status": hardware_status,
                     "system_state": self.state.value,
                     "adc_available": reading.adc_available,
                     "connected_clients": len(self.connected_clients),
-                    "camera_proxy": self.get_camera_proxy_status()
+                    "camera_proxy": self.get_camera_proxy_status(),
+                    "optimization_status": {
+                        "telemetry_interval": telemetry_interval,
+                        "controller_optimized": hasattr(self.bluetooth_controller, 'dpad_update_rate'),
+                        "separated_loops": True
+                    }
                 }
                 
                 await self.broadcast_message(telemetry_message)
@@ -514,8 +518,38 @@ class WALLEBackend:
                 break
             except Exception as e:
                 logger.error(f"Telemetry loop error: {e}")
-                await asyncio.sleep(1.0)  # Brief delay before retrying
-    
+                await asyncio.sleep(1.0)
+
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """Get system performance statistics including controller optimization"""
+        try:
+            base_stats = {
+                "system_state": self.state.value,
+                "uptime": time.time() - self.start_time,
+                "connected_clients": len(self.connected_clients),
+            }
+            
+            # Add controller optimization stats if available
+            if hasattr(self.bluetooth_controller, 'dpad_update_rate'):
+                base_stats["controller_optimization"] = {
+                    "enabled": True,
+                    "dpad_rate_hz": int(1.0 / self.bluetooth_controller.dpad_update_rate),
+                    "analog_rate_hz": int(1.0 / self.bluetooth_controller.analog_update_rate),
+                    "navigation_cooldown_ms": int(self.bluetooth_controller.navigation_cooldown * 1000),
+                    "separated_loops": True
+                }
+            else:
+                base_stats["controller_optimization"] = {
+                    "enabled": False,
+                    "legacy_mode": True
+                }
+                
+            return base_stats
+            
+        except Exception as e:
+            logger.error(f"Failed to get performance stats: {e}")
+            return {"error": str(e)}
+        
     # ==================== SYSTEM STATUS & CONTROL ====================
     
     async def get_system_status(self) -> Dict[str, Any]:

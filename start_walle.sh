@@ -217,5 +217,9 @@ echo ""
 print_status "Press Ctrl+C to stop all services"
 echo ""
 
+#initialize Joystick control
+sudo modprobe joydev
+sudo modprobe uinput
+
 # Start main WALL-E system (this will block until stopped)
 python main.py
