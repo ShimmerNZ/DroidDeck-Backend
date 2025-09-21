@@ -64,6 +64,7 @@ class WebSocketMessageHandler:
             # Gesture detection
             "gesture": self._handle_gesture,
             "tracking": self._handle_tracking,
+            "get_gesture_stats": self._handle_get_gesture_stats,
             
             # Heartbeat
             "heartbeat": self._handle_heartbeat,
@@ -990,26 +991,85 @@ class WebSocketMessageHandler:
     
     
     # ==================== GESTURE & TRACKING HANDLERS ====================
-    
+
     async def _handle_gesture(self, websocket, data: Dict[str, Any]):
-        """Handle gesture detection event"""
+        """Enhanced gesture detection handler with callback bypass"""
         gesture_name = data.get("name")
         confidence = data.get("confidence", 1.0)
         
         logger.info(f"👋 Gesture detected: {gesture_name} (confidence: {confidence})")
         
-        # Trigger appropriate scene based on gesture
-        if gesture_name == "wave":
-            await self.scene_engine.play_scene("wave_response")
+        # Map gesture names to scene names
+        gesture_scene_mapping = {
+            "left_wave": "left hand wave",
+            "right_wave": "right hand wave", 
+            "hands_up": "hands up",
+        }
         
-        # Broadcast gesture event to all clients
+        scene_name = gesture_scene_mapping.get(gesture_name)
+        if scene_name:
+            try:
+                # SOLUTION: Temporarily disable all callbacks to avoid deadlock
+                original_started = self.scene_engine.scene_started_callback
+                original_completed = self.scene_engine.scene_completed_callback
+                original_error = self.scene_engine.scene_error_callback
+                
+                # Disable callbacks completely
+                self.scene_engine.scene_started_callback = None
+                self.scene_engine.scene_completed_callback = None
+                self.scene_engine.scene_error_callback = None
+                
+                # Play scene without any callbacks
+                success = await self.scene_engine.play_scene(scene_name)
+                
+                # Restore callbacks immediately
+                self.scene_engine.scene_started_callback = original_started
+                self.scene_engine.scene_completed_callback = original_completed
+                self.scene_engine.scene_error_callback = original_error
+                
+                logger.info(f"🎭 Triggered scene '{scene_name}' for gesture '{gesture_name}' (no callbacks)")
+                
+            except Exception as e:
+                # Always restore callbacks even on error
+                self.scene_engine.scene_started_callback = original_started
+                self.scene_engine.scene_completed_callback = original_completed
+                self.scene_engine.scene_error_callback = original_error
+                logger.error(f"Failed to trigger scene '{scene_name}': {e}")
+        else:
+            logger.warning(f"No scene mapping found for gesture: {gesture_name}")
+        
+        # Broadcast gesture event (this should work since it's outside callback context)
         await self.backend.broadcast_message({
             "type": "gesture_detected",
             "name": gesture_name,
             "confidence": confidence,
+            "scene_triggered": scene_name,
             "timestamp": time.time()
         })
-    
+
+    async def _handle_get_gesture_stats(self, websocket, data: Dict[str, Any]):
+        """Get gesture detection statistics"""
+        try:
+            # This would be called by the frontend to get gesture detection status
+            stats = {
+                "type": "gesture_stats",
+                "supported_gestures": ["left_wave", "right_wave", "hands_up"],
+                "scene_mappings": {
+                    "left_wave": "left_wave_response",
+                    "right_wave": "right_wave_response", 
+                    "hands_up": "hands_up_response"
+                },
+                "detection_enabled": True,  # This would come from system state
+                "timestamp": time.time()
+            }
+            
+            await self._send_websocket_message(websocket, stats)
+            
+        except Exception as e:
+            logger.error(f"Error getting gesture stats: {e}")
+            await self._send_error_response(websocket, f"Error getting gesture stats: {str(e)}")
+
+
     async def _handle_tracking(self, websocket, data: Dict[str, Any]):
         """Handle tracking enable/disable"""
         state = data.get("state", False)

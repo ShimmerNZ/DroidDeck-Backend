@@ -34,6 +34,8 @@ from modules.hardware_service import HardwareService, create_hardware_service
 from modules.config_manager import ConfigurationManager
 from modules.bluetooth_controller import BackendBluetoothController
 from modules.controller_input_handler import ControllerInputProcessor
+from modules.webapp import DroidDeckWebServer
+
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,7 @@ class WALLEBackend:
         self.loop = None
         self.running = False
         self.start_time = 0
+        self.home_screen_ref = None
         
         # Camera proxy tracking
         self.camera_proxy_pid = None
@@ -85,11 +88,22 @@ class WALLEBackend:
             audio_controller=self.audio_controller
         )
         
+
+        # Initialize web server (add this after your other component initialization)
+        self.web_server = DroidDeckWebServer(
+            backend_ref=self,
+            config_dict=config_dict
+        )
+
         # Initialize controller input processor BEFORE websocket handler
         self.controller_input_processor = ControllerInputProcessor(
             hardware_service=self.hardware_service,
-            scene_engine=self.scene_engine
+            scene_engine=self.scene_engine,
+            stepper_controller=None,  # You don't have this parameter
+            backend_ref=self  # ADD THIS
         )
+
+        
         
         # WebSocket message handler
         self.websocket_handler = WebSocketMessageHandler(
@@ -248,6 +262,13 @@ class WALLEBackend:
             except Exception as e:
                 logger.debug(f"Error broadcasting to client: {e}")
                 disconnected_clients.add(websocket)
+
+            # Add web server broadcast
+        if hasattr(self, 'web_server') and self.web_server.running:
+            try:
+                self.web_server.broadcast_message(message)
+            except Exception as e:
+                logger.debug(f"Web broadcast error: {e}")
         
         # Remove disconnected clients
         for websocket in disconnected_clients:
@@ -611,7 +632,10 @@ class WALLEBackend:
         self.start_time = time.time()
         self.running = True
         self.loop = asyncio.get_running_loop()
-        
+                
+        self.web_server.start()
+        logger.info("Web interface available at: http://0.0.0.0:5000")
+
         try:
             logger.info("Starting WALL-E Backend System")
             
@@ -677,6 +701,9 @@ class WALLEBackend:
         logger.info("Shutting down WALL-E Backend...")
         
         self.running = False
+
+        if hasattr(self, 'web_server'):
+            self.web_server.stop()
         
         try:
             # 1. First notify clients BEFORE closing connections
@@ -821,32 +848,42 @@ class WALLEBackend:
     
     async def handle_scene_started(self, scene_name: str, scene_data: Dict[str, Any]):
         """Handle scene started event"""
-        await self.broadcast_message({
-            "type": "scene_started",
-            "scene_name": scene_name,
-            "duration": scene_data.get("duration", 2.0),
-            "timestamp": time.time()
-        })
+        try:
+            # Create a background task instead of awaiting
+            asyncio.create_task(self.broadcast_message({
+                "type": "scene_started",
+                "scene_name": scene_name,
+                "duration": scene_data.get("duration", 2.0),
+                "timestamp": time.time()
+            }))
+        except Exception as e:
+            logger.error(f"Scene started broadcast error: {e}")
     
     async def handle_scene_completed(self, scene_name: str, scene_data: Dict[str, Any], success: bool):
         """Handle scene completed event"""
-        await self.broadcast_message({
-            "type": "scene_completed",
-            "scene_name": scene_name,
-            "success": success,
-            "timestamp": time.time()
-        })
+        try:
+            asyncio.create_task(self.broadcast_message({
+                "type": "scene_completed",
+                "scene_name": scene_name,
+                "success": success,
+                "timestamp": time.time()
+            }))
+        except Exception as e:
+            logger.error(f"Scene completed broadcast error: {e}")
         
     async def handle_scene_error(self, scene_name: str, scene_data: Dict[str, Any], error: str):
         """Handle scene error event"""
-        await self.broadcast_message({
-            "type": "scene_error",
-            "scene_name": scene_name,
-            "error": error,
-            "timestamp": time.time()
-        })
+        try:
+            asyncio.create_task(self.broadcast_message({
+                "type": "scene_error",
+                "scene_name": scene_name,
+                "error": error,
+                "timestamp": time.time()
+            }))
+        except Exception as e:
+            logger.error(f"Scene error broadcast error: {e}")
     
-    async def handle_track_started(self, track_name: str):
+    async def handle_track_started(self, track_name: str, track_path: str):
         """Handle audio track started"""
         await self.broadcast_message({
             "type": "audio_track_started",

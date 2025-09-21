@@ -172,7 +172,7 @@ class OptimizedBluetoothController:
         inputs.extend(self.axis_map.values())
         inputs.extend(self.dpad_map.values())
         return inputs
-        
+  
     def initialize_controller(self) -> bool:
         """Try to connect to first available joystick with improved reconnection handling"""
         try:
@@ -234,6 +234,7 @@ class OptimizedBluetoothController:
         self.current_state.controller_name = ""
         return False
 
+
     async def health_check(self):
         """Periodic health check to detect sleeping/disconnected controllers"""
         if not self.current_state.connected or not self.joystick:
@@ -243,17 +244,24 @@ class OptimizedBluetoothController:
             # Try to read controller state - this will fail if controller is asleep/disconnected
             pygame.event.pump()
             self.joystick.get_button(0)  # Simple test read
+            if self.joystick.get_numaxes() > 0:
+                self.joystick.get_axis(0)  # Test axis read
+                
             return True
-        except (pygame.error, AttributeError):
-            logger.warning("Controller health check failed - marking as disconnected")
-            self.current_state.connected = False
-            if self.joystick:
-                try:
-                    self.joystick.quit()
-                except:
-                    pass
-                self.joystick = None
-            return False
+        except (pygame.error, AttributeError, OSError) as e:
+                logger.warning(f"Controller health check failed ({type(e).__name__}): {e}")
+                logger.info("Marking controller as disconnected for reconnection")
+                
+                # Clean up the dead joystick handle
+                self.current_state.connected = False
+                if self.joystick:
+                    try:
+                        self.joystick.quit()
+                    except:
+                        pass
+                    self.joystick = None
+                    
+                return False
 
     def load_controller_mappings(self):
         """Load controller mappings from config file"""
@@ -337,8 +345,34 @@ class OptimizedBluetoothController:
 
     async def process_dpad_events(self):
         """High-priority D-pad event processing loop"""
-        while self.running and self.current_state.connected:
+        last_count_check = 0
+        
+        while self.running:
             try:
+                current_time = time.time()
+                
+                # Check joystick count every 2 seconds to detect disconnections
+                if current_time - last_count_check > 2.0:
+                    last_count_check = current_time
+                    
+                    # Check count without reinitializing pygame joystick system
+                    joystick_count = pygame.joystick.get_count()
+                    
+                    if joystick_count == 0 and self.current_state.connected:
+                        self.logger.warning("Controller disconnected - no joysticks found")
+                        self.current_state.connected = False
+                        if self.joystick:
+                            try:
+                                self.joystick.quit()
+                            except:
+                                pass
+                            self.joystick = None
+                        continue
+                
+                if not self.current_state.connected or not self.joystick:
+                    await asyncio.sleep(0.1)
+                    continue
+                    
                 pygame.event.pump()
                 
                 # Process only button and hat events for minimal latency
@@ -388,7 +422,7 @@ class OptimizedBluetoothController:
                         # Also send to input processor if mapped
                         if self.controller_input_processor:
                             for direction, control_name in [('up', 'dpad_up'), ('down', 'dpad_down'), 
-                                                          ('left', 'dpad_left'), ('right', 'dpad_right')]:
+                                                            ('left', 'dpad_left'), ('right', 'dpad_right')]:
                                 value = 1.0 if (
                                     (direction == 'up' and hat_y == 1) or 
                                     (direction == 'down' and hat_y == -1) or 
@@ -406,16 +440,62 @@ class OptimizedBluetoothController:
                 # FIXED: High-frequency D-pad polling for responsiveness
                 await asyncio.sleep(self.dpad_update_rate)
                 
+            except (pygame.error, AttributeError) as e:
+                self.logger.warning(f"Controller error in D-pad processing: {e}")
+                self.current_state.connected = False
+                if self.joystick:
+                    try:
+                        self.joystick.quit()
+                    except:
+                        pass
+                    self.joystick = None
+                await asyncio.sleep(0.1)
             except Exception as e:
-                logger.error(f"D-pad processing error: {e}")
+                self.logger.error(f"D-pad processing error: {e}")
                 await asyncio.sleep(0.1)
 
     async def process_analog_inputs(self):
         """Separate analog input processing loop"""
-        while self.running and self.current_state.connected:
+        last_count_check = 0
+        
+        while self.running:
             try:
-                if not self.joystick:
+                current_time = time.time()
+                
+                # Check joystick count every 2 seconds to detect disconnections
+                if current_time - last_count_check > 2.0:
+                    last_count_check = current_time
+                    
+                    # Check count without reinitializing pygame joystick system
+                    joystick_count = pygame.joystick.get_count()
+                    
+                    if joystick_count == 0 and self.current_state.connected:
+                        self.logger.warning("Controller disconnected - no joysticks found")
+                        self.current_state.connected = False
+                        if self.joystick:
+                            try:
+                                self.joystick.quit()
+                            except:
+                                pass
+                            self.joystick = None
+                        continue
+                
+                if not self.current_state.connected or not self.joystick:
                     await asyncio.sleep(1.0)
+                    continue
+                    
+                # Check if joystick is still valid before using it
+                try:
+                    # Test if joystick is still responsive
+                    if not self.joystick.get_init():
+                        self.logger.warning("Joystick lost initialization")
+                        self.current_state.connected = False
+                        self.joystick = None
+                        continue
+                except:
+                    self.logger.warning("Joystick became invalid")
+                    self.current_state.connected = False
+                    self.joystick = None
                     continue
                     
                 # Read analog axes
@@ -441,22 +521,40 @@ class OptimizedBluetoothController:
                             
                             self.last_sent_values[axis_name] = calibrated_value
                             
-                            # Send to input processor
+                            # Send to controller input processor
                             if self.controller_input_processor:
                                 asyncio.create_task(
                                     self.controller_input_processor.process_controller_input(
-                                        axis_name, calibrated_value, "axis"
+                                        axis_name, calibrated_value, "analog"
                                     )
                                 )
-                                
-                    except Exception as e:
-                        logger.debug(f"Axis {axis_id} read error: {e}")
+                            
+                    except (pygame.error, AttributeError) as e:
+                        self.logger.warning(f"Controller error reading axis {axis_id}: {e}")
+                        self.current_state.connected = False
+                        if self.joystick:
+                            try:
+                                self.joystick.quit()
+                            except:
+                                pass
+                            self.joystick = None
+                        break  # Exit the axis loop
                 
                 await asyncio.sleep(self.analog_update_rate)
                 
+            except (pygame.error, AttributeError) as e:
+                self.logger.warning(f"Controller error in analog processing: {e}")
+                self.current_state.connected = False
+                if self.joystick:
+                    try:
+                        self.joystick.quit()
+                    except:
+                        pass
+                    self.joystick = None
+                await asyncio.sleep(1.0)
             except Exception as e:
-                logger.error(f"Analog input processing error: {e}")
-                await asyncio.sleep(0.1)
+                self.logger.error(f"Analog processing error: {e}")
+                await asyncio.sleep(1.0)
 
     async def calibration_stream_loop(self):
         """Calibration data streaming loop - FIXED"""
@@ -582,7 +680,7 @@ class OptimizedBluetoothController:
                 current_time = time.time()
                 
                 # Health check every 10 seconds
-                if current_time - last_health_check > 10.0:
+                if current_time - last_health_check > 5.0:
                     last_health_check = current_time
                     await self.health_check()
                 
@@ -602,6 +700,7 @@ class OptimizedBluetoothController:
                     if current_time - last_reconnect_attempt > 3.0:  # Every 3 seconds
                         last_reconnect_attempt = current_time
                         
+                        # THIS IS THE PROBLEM: Only partial pygame reinitialization
                         # Force pygame to refresh its joystick list
                         pygame.joystick.quit()
                         pygame.joystick.init()

@@ -21,6 +21,7 @@ class BehaviorType(Enum):
     SCENE_TRIGGER = "scene_trigger"
     TOGGLE_SCENES = "toggle_scenes"
     NEMA_STEPPER = "nema_stepper" 
+    SYSTEM_CONTROL = "system_control"  
 
 @dataclass
 class ControllerInput:
@@ -131,6 +132,63 @@ class JoystickPairHandler(BehaviorHandler):
         except Exception as e:
             self.logger.error(f"Error in joystick pair handler: {e}")
             return False
+
+class SystemControlHandler(BehaviorHandler):
+    """Handle system control commands - route to frontend for processing"""
+    
+    def __init__(self, hardware_service=None, scene_engine=None, logger=None, backend_ref=None):
+        super().__init__(hardware_service, scene_engine, logger)
+        self.backend = backend_ref  # Reference to backend for message broadcasting
+        
+    async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
+        try:
+            action = config.get('system_action')
+            trigger_timing = config.get('trigger_timing', 'on_press')
+            threshold = 0.5
+            
+            if not action:
+                self.logger.warning("System control config missing 'system_action'")
+                return False
+            
+            # Check if this is a button press (for on_press timing)
+            if trigger_timing == 'on_press' and controller_input.raw_value > threshold:
+                # Route system control to frontend via WebSocket
+                await self._route_to_frontend(controller_input.control_name, action, config)
+                
+                self.logger.info(f"System control routed to frontend: {action}")
+                return True
+                
+            return False  # No error, just not triggered
+            
+        except Exception as e:
+            self.logger.error(f"Error in system control handler: {e}")
+            return False
+    
+    async def _route_to_frontend(self, control_name: str, action: str, config: Dict[str, Any]):
+        """Route system control command to frontend via WebSocket"""
+        try:
+            if not self.backend:
+                self.logger.error("No backend reference for system control routing")
+                return
+            
+            # Create system control message for frontend
+            system_control_message = {
+                "type": "system_control_command",
+                "control_name": control_name,
+                "action": action,
+                "config": config,
+                "timestamp": time.time(),
+                "source": "controller_backend"
+            }
+            
+            # Broadcast to all connected frontend clients
+            await self.backend.broadcast_message(system_control_message)
+            
+            self.logger.info(f"System control '{action}' routed to frontend")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to route system control to frontend: {e}")
+
 
 class DifferentialTracksHandler(BehaviorHandler):
     """Handle differential tracks control - tank steering"""
@@ -303,11 +361,12 @@ class ToggleScenesHandler(BehaviorHandler):
 
 class ControllerInputProcessor:
     """Main controller input processing system"""
-    
-    def __init__(self, hardware_service=None, scene_engine=None, stepper_controller=None):
+        
+    def __init__(self, hardware_service=None, scene_engine=None, stepper_controller=None, backend_ref=None):
         self.hardware_service = hardware_service
         self.scene_engine = scene_engine
         self.stepper_controller = stepper_controller
+        self.backend = backend_ref
         
         # Initialize behavior handlers
         self.handlers = {
@@ -316,7 +375,8 @@ class ControllerInputProcessor:
             BehaviorType.DIFFERENTIAL_TRACKS: DifferentialTracksHandler(hardware_service, scene_engine, logger),
             BehaviorType.SCENE_TRIGGER: SceneTriggerHandler(hardware_service, scene_engine, logger),
             BehaviorType.TOGGLE_SCENES: ToggleScenesHandler(hardware_service, scene_engine, logger),
-            BehaviorType.NEMA_STEPPER: NemaStepperHandler(hardware_service, scene_engine, logger)
+            BehaviorType.NEMA_STEPPER: NemaStepperHandler(hardware_service, scene_engine, logger),
+            BehaviorType.SYSTEM_CONTROL: SystemControlHandler(hardware_service, scene_engine, logger, backend_ref)
         }
         
         # Configuration storage
@@ -520,45 +580,47 @@ class ControllerInputProcessor:
         except Exception as e:
             logger.error(f"Failed to load controller config: {e}")
             return False
-    
+        
     def _validate_config(self, control_name: str, config: Dict[str, Any]) -> bool:
-        """Validate a controller configuration"""
-        try:
-            behavior = config.get('behavior')
-            if not behavior:
+            """Validate a controller configuration"""
+            try:
+                behavior = config.get('behavior')
+                if not behavior:
+                    return False
+                
+                # Check if behavior type is supported
+                behavior_type = None
+                for bt in BehaviorType:
+                    if bt.value == behavior:
+                        behavior_type = bt
+                        break
+                
+                if not behavior_type:
+                    logger.warning(f"Unsupported behavior type: {behavior}")
+                    return False
+                
+                # Behavior-specific validation
+                if behavior_type == BehaviorType.DIRECT_SERVO:
+                    return 'target' in config
+                elif behavior_type == BehaviorType.JOYSTICK_PAIR:
+                    return 'x_servo' in config and 'y_servo' in config
+                elif behavior_type == BehaviorType.DIFFERENTIAL_TRACKS:
+                    return 'left_servo' in config and 'right_servo' in config
+                elif behavior_type == BehaviorType.SCENE_TRIGGER:
+                    return 'scene' in config
+                elif behavior_type == BehaviorType.TOGGLE_SCENES:
+                    return 'scene_1' in config and 'scene_2' in config
+                elif behavior_type == BehaviorType.NEMA_STEPPER:
+                    return 'nema_behavior' in config
+                elif behavior_type == BehaviorType.SYSTEM_CONTROL:  # ADD THIS
+                    return 'system_action' in config
+                
+                return True
+                
+            except Exception as e:
+                logger.error(f"Config validation error: {e}")
                 return False
-            
-            # Check if behavior type is supported
-            behavior_type = None
-            for bt in BehaviorType:
-                if bt.value == behavior:
-                    behavior_type = bt
-                    break
-            
-            if not behavior_type:
-                logger.warning(f"Unsupported behavior type: {behavior}")
-                return False
-            
-            # Behavior-specific validation
-            if behavior_type == BehaviorType.DIRECT_SERVO:
-                return 'target' in config
-            elif behavior_type == BehaviorType.JOYSTICK_PAIR:
-                return 'x_servo' in config and 'y_servo' in config
-            elif behavior_type == BehaviorType.DIFFERENTIAL_TRACKS:
-                return 'left_servo' in config and 'right_servo' in config
-            elif behavior_type == BehaviorType.SCENE_TRIGGER:
-                return 'scene' in config
-            elif behavior_type == BehaviorType.TOGGLE_SCENES:
-                return 'scene_1' in config and 'scene_2' in config
-            elif behavior_type == BehaviorType.NEMA_STEPPER:  # Add this
-                return 'nema_behavior' in config
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Config validation error: {e}")
-            return False
-    
+
     async def process_controller_input(self, control_name: str, raw_value: float, input_type: str = "unknown") -> bool:
         """Process controller input through appropriate behavior handler"""
         try:
@@ -791,3 +853,4 @@ class NemaStepperHandler(BehaviorHandler):
                 return False
         
         return True  # No error, just no trigger
+

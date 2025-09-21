@@ -37,8 +37,8 @@ class NativeAudioController:
         self.shuffle_mode = False
         self.repeat_mode = False
         
-        # Threading for audio management
-        self.audio_lock = threading.Lock()
+        # Threading for audio management - Use RLock for reentrancy
+        self.audio_lock = threading.RLock()
         
         # Callbacks for audio events
         self.track_started_callback: Optional[Callable] = None
@@ -49,7 +49,7 @@ class NativeAudioController:
         self.setup_audio_system()
         self.scan_audio_files()
         
-        logger.info(f"🎵 Audio controller initialized - Files: {len(self.audio_files)}")
+        logger.info(f"Audio controller initialized - Files: {len(self.audio_files)}")
     
     def setup_audio_system(self) -> bool:
         """Initialize audio system with graceful error handling"""
@@ -67,11 +67,11 @@ class NativeAudioController:
             pygame.mixer.music.set_volume(self.current_volume)
             
             self.connected = True
-            logger.info("✅ Native audio system initialized successfully")
+            logger.info("Native audio system initialized successfully")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to initialize audio system: {e}")
+            logger.error(f"Failed to initialize audio system: {e}")
             self.connected = False
             return False
     
@@ -84,7 +84,7 @@ class NativeAudioController:
         """
         if not self.audio_directory.exists():
             self.audio_directory.mkdir(parents=True, exist_ok=True)
-            logger.info(f"📁 Created audio directory: {self.audio_directory}")
+            logger.info(f"Created audio directory: {self.audio_directory}")
         
         # Supported audio formats
         audio_extensions = ['.mp3', '.wav', '.ogg', '.m4a', '.flac']
@@ -104,110 +104,99 @@ class NativeAudioController:
             # Create playlist from available files
             self.playlist = list(self.audio_files.keys())
             
-            logger.info(f"🎵 Found {file_count} audio files in {self.audio_directory}")
+            logger.info(f"Found {file_count} audio files in {self.audio_directory}")
             
             # Log some example files for debugging
             if file_count > 0:
                 example_files = list(self.audio_files.keys())[:3]
-                logger.debug(f"📝 Example files: {example_files}")
+                logger.debug(f"Example files: {example_files}")
             
             return file_count
             
         except Exception as e:
-            logger.error(f"❌ Failed to scan audio files: {e}")
+            logger.error(f"Failed to scan audio files: {e}")
             return 0
     
     def play_track(self, track_identifier) -> bool:
         """
         Play audio track by number, name, or filename
-        
-        Args:
-            track_identifier: Track name, filename, or index
-            
-        Returns:
-            bool: True if playback started successfully
+        Uses non-blocking lock to prevent deadlocks
         """
         if not self.connected:
-            logger.warning("⚠️ Audio system not available")
+            logger.warning("Audio system not available")
             return False
         
-        with self.audio_lock:
-            try:
-                # Stop current playback
-                self.stop()
-                
-                audio_file = self._resolve_track_identifier(track_identifier)
-                
-                if not audio_file or not audio_file.exists():
-                    logger.warning(f"⚠️ Audio file not found: {track_identifier}")
-                    return False
-                
-                # Load and play the audio file
-                pygame.mixer.music.load(str(audio_file))
-                pygame.mixer.music.set_volume(self.current_volume)
-                pygame.mixer.music.play()
-                
-                # Update state
-                self.is_playing = True
-                self.current_track = track_identifier
-                self.current_track_path = audio_file
-                
-                logger.info(f"🎵 Playing: {audio_file.name}")
-                
-                # Notify callback
-                if self.track_started_callback:
-                    try:
-                        self.track_started_callback(track_identifier, str(audio_file))
-                    except Exception as e:
-                        logger.error(f"Track started callback error: {e}")
-                
-                return True
-                
-            except Exception as e:
-                logger.error(f"❌ Failed to play track {track_identifier}: {e}")
-                return False
-    
-    def _resolve_track_identifier(self, track_identifier) -> Optional[Path]:
-        """
-        Resolve track identifier to file path
+        # Use non-blocking lock acquisition to prevent deadlocks
+        if not self.audio_lock.acquire(blocking=False):
+            logger.warning("Audio controller busy, skipping playback to avoid deadlock")
+            return False
         
-        Args:
-            track_identifier: Track name, filename, or index
-            
-        Returns:
-            Path object or None if not found
-        """
         try:
-            # Try by exact key match first
-            if isinstance(track_identifier, str) and track_identifier in self.audio_files:
-                return self.audio_files[track_identifier]
+            # Stop current playback
+            self.stop_internal()
             
-            # Try by filename (with or without extension)
-            if isinstance(track_identifier, str):
-                # Remove extension if present
-                base_name = track_identifier
-                if '.' in base_name:
-                    base_name = Path(base_name).stem
-                
-                if base_name in self.audio_files:
-                    return self.audio_files[base_name]
-                
-                # Try case-insensitive match
-                for key, path in self.audio_files.items():
-                    if key.lower() == base_name.lower():
-                        return path
+            audio_file = self._resolve_track_identifier(track_identifier)
             
-            # Try by index
-            if isinstance(track_identifier, int):
-                if 0 <= track_identifier < len(self.playlist):
-                    track_key = self.playlist[track_identifier]
-                    return self.audio_files[track_key]
+            if not audio_file or not audio_file.exists():
+                logger.warning(f"Audio file not found: {track_identifier}")
+                return False
             
-            return None
+            # Load and play the audio file
+            pygame.mixer.music.load(str(audio_file))
+            pygame.mixer.music.set_volume(self.current_volume)
+            pygame.mixer.music.play()
+            
+            # Update state
+            self.is_playing = True
+            self.current_track = track_identifier
+            self.current_track_path = audio_file
+            
+            logger.info(f"Playing: {audio_file.name}")
+            
+            # Notify callback
+            if self.track_started_callback:
+                try:
+                    import asyncio
+                    if asyncio.iscoroutinefunction(self.track_started_callback):
+                        # For async callbacks, schedule but don't wait
+                        loop = asyncio.get_event_loop()
+                        loop.create_task(self.track_started_callback(track_identifier, str(audio_file)))
+                    else:
+                        # For sync callbacks, call directly
+                        self.track_started_callback(track_identifier, str(audio_file))
+                except Exception as e:
+                    logger.error(f"Track started callback error: {e}")
+            
+            return True
             
         except Exception as e:
-            logger.error(f"❌ Error resolving track identifier {track_identifier}: {e}")
-            return None
+            logger.error(f"Failed to play track {track_identifier}: {e}")
+            return False
+        finally:
+            self.audio_lock.release()
+    
+    def stop_internal(self):
+        """Internal stop method without acquiring lock (already held)"""
+        try:
+            if pygame.mixer.get_init():
+                pygame.mixer.music.stop()
+            
+            # Notify callback if track was playing
+            if self.is_playing and self.track_finished_callback:
+                try:
+                    self.track_finished_callback(self.current_track, "stopped")
+                except Exception as e:
+                    logger.error(f"Track finished callback error: {e}")
+            
+            # Reset state
+            self.is_playing = False
+            self.current_track = None
+            self.current_track_path = None
+            
+            logger.debug("Audio playback stopped")
+            
+        except Exception as e:
+            logger.error(f"Failed to stop audio: {e}")
     
     def stop(self) -> bool:
         """
@@ -218,26 +207,11 @@ class NativeAudioController:
         """
         try:
             with self.audio_lock:
-                if pygame.mixer.get_init():
-                    pygame.mixer.music.stop()
-                
-                # Notify callback if track was playing
-                if self.is_playing and self.track_finished_callback:
-                    try:
-                        self.track_finished_callback(self.current_track, "stopped")
-                    except Exception as e:
-                        logger.error(f"Track finished callback error: {e}")
-                
-                # Reset state
-                self.is_playing = False
-                self.current_track = None
-                self.current_track_path = None
-                
-                logger.debug("⏹️ Audio playback stopped")
+                self.stop_internal()
                 return True
                 
         except Exception as e:
-            logger.error(f"❌ Failed to stop audio: {e}")
+            logger.error(f"Failed to stop audio: {e}")
             return False
     
     def pause(self) -> bool:
@@ -250,12 +224,12 @@ class NativeAudioController:
         try:
             if self.is_playing and pygame.mixer.get_init():
                 pygame.mixer.music.pause()
-                logger.debug("⏸️ Audio paused")
+                logger.debug("Audio paused")
                 return True
             return False
             
         except Exception as e:
-            logger.error(f"❌ Failed to pause audio: {e}")
+            logger.error(f"Failed to pause audio: {e}")
             return False
     
     def resume(self) -> bool:
@@ -268,12 +242,12 @@ class NativeAudioController:
         try:
             if pygame.mixer.get_init():
                 pygame.mixer.music.unpause()
-                logger.debug("▶️ Audio resumed")
+                logger.debug("Audio resumed")
                 return True
             return False
             
         except Exception as e:
-            logger.error(f"❌ Failed to resume audio: {e}")
+            logger.error(f"Failed to resume audio: {e}")
             return False
     
     def set_volume(self, volume: float) -> bool:
@@ -296,7 +270,7 @@ class NativeAudioController:
                 if pygame.mixer.get_init():
                     pygame.mixer.music.set_volume(volume)
                 
-                logger.info(f"🔊 Volume set to {volume:.2f}")
+                logger.info(f"Volume set to {volume:.2f}")
                 
                 # Notify callback
                 if self.volume_changed_callback:
@@ -308,7 +282,7 @@ class NativeAudioController:
                 return True
                 
         except Exception as e:
-            logger.error(f"❌ Failed to set volume: {e}")
+            logger.error(f"Failed to set volume: {e}")
             return False
     
     def get_volume(self) -> float:
@@ -352,6 +326,48 @@ class NativeAudioController:
         """
         return list(self.audio_files.keys())
     
+    def _resolve_track_identifier(self, track_identifier) -> Optional[Path]:
+        """
+        Resolve track identifier to file path
+        
+        Args:
+            track_identifier: Track name, filename, or index
+            
+        Returns:
+            Path object or None if not found
+        """
+        try:
+            # Try by exact key match first
+            if isinstance(track_identifier, str) and track_identifier in self.audio_files:
+                return self.audio_files[track_identifier]
+            
+            # Try by filename (with or without extension)
+            if isinstance(track_identifier, str):
+                # Remove extension if present
+                base_name = track_identifier
+                if '.' in base_name:
+                    base_name = Path(base_name).stem
+                
+                if base_name in self.audio_files:
+                    return self.audio_files[base_name]
+                
+                # Try case-insensitive match
+                for key, path in self.audio_files.items():
+                    if key.lower() == base_name.lower():
+                        return path
+            
+            # Try by index
+            if isinstance(track_identifier, int):
+                if 0 <= track_identifier < len(self.playlist):
+                    track_key = self.playlist[track_identifier]
+                    return self.audio_files[track_key]
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error resolving track identifier {track_identifier}: {e}")
+            return None
+    
     def play_random_track(self) -> bool:
         """
         Play a random track from available files
@@ -360,11 +376,11 @@ class NativeAudioController:
             bool: True if random track started successfully
         """
         if not self.audio_files:
-            logger.warning("⚠️ No audio files available for random play")
+            logger.warning("No audio files available for random play")
             return False
         
         random_key = random.choice(list(self.audio_files.keys()))
-        logger.info(f"🎲 Playing random track: {random_key}")
+        logger.info(f"Playing random track: {random_key}")
         return self.play_track(random_key)
     
     def play_next_track(self) -> bool:
@@ -375,7 +391,7 @@ class NativeAudioController:
             bool: True if next track started successfully
         """
         if not self.playlist:
-            logger.warning("⚠️ Playlist is empty")
+            logger.warning("Playlist is empty")
             return False
         
         try:
@@ -391,16 +407,16 @@ class NativeAudioController:
                 if current_index >= 0:
                     next_index = (current_index + 1) % len(self.playlist)
                     next_track = self.playlist[next_index]
-                    logger.info(f"⏭️ Playing next track: {next_track}")
+                    logger.info(f"Playing next track: {next_track}")
                     return self.play_track(next_track)
             
             # If no current track or not found, play first track
             first_track = self.playlist[0]
-            logger.info(f"⏭️ Playing first track: {first_track}")
+            logger.info(f"Playing first track: {first_track}")
             return self.play_track(first_track)
             
         except Exception as e:
-            logger.error(f"❌ Failed to play next track: {e}")
+            logger.error(f"Failed to play next track: {e}")
             return False
     
     def play_previous_track(self) -> bool:
@@ -411,7 +427,7 @@ class NativeAudioController:
             bool: True if previous track started successfully
         """
         if not self.playlist:
-            logger.warning("⚠️ Playlist is empty")
+            logger.warning("Playlist is empty")
             return False
         
         try:
@@ -427,16 +443,16 @@ class NativeAudioController:
                 if current_index >= 0:
                     prev_index = (current_index - 1) % len(self.playlist)
                     prev_track = self.playlist[prev_index]
-                    logger.info(f"⏮️ Playing previous track: {prev_track}")
+                    logger.info(f"Playing previous track: {prev_track}")
                     return self.play_track(prev_track)
             
             # If no current track or not found, play last track
             last_track = self.playlist[-1]
-            logger.info(f"⏮️ Playing last track: {last_track}")
+            logger.info(f"Playing last track: {last_track}")
             return self.play_track(last_track)
             
         except Exception as e:
-            logger.error(f"❌ Failed to play previous track: {e}")
+            logger.error(f"Failed to play previous track: {e}")
             return False
     
     def get_audio_info(self, track_identifier) -> Optional[Dict[str, Any]]:
@@ -472,7 +488,7 @@ class NativeAudioController:
             return info
             
         except Exception as e:
-            logger.error(f"❌ Failed to get audio info for {track_identifier}: {e}")
+            logger.error(f"Failed to get audio info for {track_identifier}: {e}")
             return None
     
     def rescan_audio_files(self) -> int:
@@ -482,7 +498,7 @@ class NativeAudioController:
         Returns:
             int: Number of files found after rescan
         """
-        logger.info("🔄 Rescanning audio directory...")
+        logger.info("Rescanning audio directory...")
         return self.scan_audio_files()
     
     def get_audio_status(self) -> Dict[str, Any]:
@@ -520,7 +536,7 @@ class NativeAudioController:
             return status
             
         except Exception as e:
-            logger.error(f"❌ Failed to get audio status: {e}")
+            logger.error(f"Failed to get audio status: {e}")
             return {"error": str(e), "connected": False}
     
     def validate_audio_file(self, file_path: Path) -> bool:
@@ -561,77 +577,6 @@ class NativeAudioController:
             logger.debug(f"Audio file validation failed for {file_path}: {e}")
             return False
     
-    def create_playlist_from_category(self, category: str, scene_engine=None) -> List[str]:
-        """
-        Create a playlist based on scene category
-        
-        Args:
-            category: Scene category to filter by
-            scene_engine: Reference to scene engine for category matching
-            
-        Returns:
-            List of track keys matching the category
-        """
-        try:
-            if not scene_engine:
-                # Return all tracks if no scene engine available
-                return self.get_track_keys()
-            
-            # Get scenes from the specified category
-            category_scenes = scene_engine.get_scenes_by_category(category)
-            
-            # Extract audio files from those scenes
-            playlist = []
-            for scene in category_scenes:
-                scene_info = scene_engine.get_scene_info(scene["name"])
-                if scene_info and scene_info.get("audio_enabled") and scene_info.get("audio_file"):
-                    audio_file = scene_info["audio_file"]
-                    # Remove extension to get track key
-                    track_key = Path(audio_file).stem
-                    if track_key in self.audio_files:
-                        playlist.append(track_key)
-            
-            # Remove duplicates and return
-            return list(set(playlist))
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to create playlist for category '{category}': {e}")
-            return []
-    
-    def export_playlist(self, playlist_name: str, track_list: List[str]) -> bool:
-        """
-        Export a playlist to a file
-        
-        Args:
-            playlist_name: Name of the playlist
-            track_list: List of track keys
-            
-        Returns:
-            bool: True if exported successfully
-        """
-        try:
-            playlist_dir = self.audio_directory / "playlists"
-            playlist_dir.mkdir(exist_ok=True)
-            
-            playlist_file = playlist_dir / f"{playlist_name}.m3u"
-            
-            with open(playlist_file, 'w') as f:
-                f.write(f"#EXTM3U\n")
-                f.write(f"#PLAYLIST:{playlist_name}\n")
-                
-                for track_key in track_list:
-                    if track_key in self.audio_files:
-                        audio_file = self.audio_files[track_key]
-                        f.write(f"#EXTINF:-1,{track_key}\n")
-                        f.write(f"{audio_file.name}\n")
-            
-            logger.info(f"📝 Exported playlist '{playlist_name}' with {len(track_list)} tracks")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to export playlist '{playlist_name}': {e}")
-            return False
-    
     def test_audio_system(self) -> Dict[str, Any]:
         """
         Perform comprehensive audio system test
@@ -654,29 +599,29 @@ class NativeAudioController:
             # Test 1: pygame availability
             import pygame
             test_results["pygame_available"] = True
-            logger.debug("✅ pygame available")
+            logger.debug("pygame available")
             
             # Test 2: mixer initialization
             if pygame.mixer.get_init():
                 test_results["mixer_initialized"] = True
-                logger.debug("✅ mixer initialized")
+                logger.debug("mixer initialized")
             
             # Test 3: directory access
             if self.audio_directory.exists() and self.audio_directory.is_dir():
                 test_results["directory_accessible"] = True
-                logger.debug("✅ audio directory accessible")
+                logger.debug("audio directory accessible")
             
             # Test 4: file scanning
             file_count = self.get_file_count()
             test_results["files_found"] = file_count
             if file_count > 0:
-                logger.debug(f"✅ found {file_count} audio files")
+                logger.debug(f"found {file_count} audio files")
             
             # Test 5: volume control
             original_volume = self.get_volume()
             if self.set_volume(0.5) and self.set_volume(original_volume):
                 test_results["volume_control"] = True
-                logger.debug("✅ volume control working")
+                logger.debug("volume control working")
             
             # Test 6: sample playback (if files available)
             if file_count > 0:
@@ -686,7 +631,7 @@ class NativeAudioController:
                     time.sleep(0.1)  # Very brief playback
                     if self.stop():
                         test_results["sample_playback"] = True
-                        logger.debug("✅ sample playback successful")
+                        logger.debug("sample playback successful")
             
             # Overall status
             critical_tests = [
@@ -705,11 +650,11 @@ class NativeAudioController:
             else:
                 test_results["overall_status"] = "FAILED"
             
-            logger.info(f"🧪 Audio system test complete: {test_results['overall_status']}")
+            logger.info(f"Audio system test complete: {test_results['overall_status']}")
             return test_results
             
         except Exception as e:
-            logger.error(f"❌ Audio system test failed: {e}")
+            logger.error(f"Audio system test failed: {e}")
             test_results["error"] = str(e)
             return test_results
     
@@ -728,7 +673,7 @@ class NativeAudioController:
     
     def cleanup(self):
         """Clean up audio resources"""
-        logger.info("🧹 Cleaning up audio controller...")
+        logger.info("Cleaning up audio controller...")
         
         try:
             # Stop any playing audio
@@ -738,7 +683,7 @@ class NativeAudioController:
             if pygame.mixer.get_init():
                 pygame.mixer.quit()
             
-            logger.info("✅ Audio controller cleanup complete")
+            logger.info("Audio controller cleanup complete")
             
         except Exception as e:
-            logger.error(f"❌ Audio cleanup error: {e}")
+            logger.error(f"Audio cleanup error: {e}")
