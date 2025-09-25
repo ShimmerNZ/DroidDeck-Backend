@@ -34,7 +34,7 @@ from modules.hardware_service import HardwareService, create_hardware_service
 from modules.config_manager import ConfigurationManager
 from modules.bluetooth_controller import BackendBluetoothController
 from modules.controller_input_handler import ControllerInputProcessor
-from modules.webapp import DroidDeckWebServer
+from web.webapp import DroidDeckWebServer
 
 
 logger = logging.getLogger(__name__)
