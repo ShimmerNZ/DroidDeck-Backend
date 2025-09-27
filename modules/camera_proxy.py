@@ -376,34 +376,14 @@ class CameraProxy:
         logger.info("Camera stream worker stopped")
 
     def _process_frame_smart(self, jpeg_frame, current_time):
-        """Smart frame processing to prevent buffering"""
+        """Keep only the newest frame - simple and fast"""
         try:
             frame_size = len(jpeg_frame)
             if frame_size < 512:
                 return False
             
-            # Frame timing analysis
-            if self.last_frame_timestamp > 0:
-                frame_interval = current_time - self.last_frame_timestamp
-                self.frame_times.append(frame_interval)
-                
-                # Log timing stats periodically
-                if len(self.frame_times) >= 30 and self.frame_count % 60 == 0:
-                    avg_interval = sum(self.frame_times) / len(self.frame_times)
-                    fps = 1.0 / avg_interval if avg_interval > 0 else 0
-                    logger.info(f"Frame timing - Avg FPS: {fps:.1f}")
-            
-            self.last_frame_timestamp = current_time
-            
-            # Smart frame replacement - only keep the latest
+            # Always replace with newest - no complex logic
             with self.frame_lock:
-                # Check if we have a very recent frame (prevent over-accumulation)
-                if (self.current_frame and 
-                    current_time - self.current_frame['timestamp'] < 0.02):  # 20ms
-                    # Skip this frame to prevent accumulation
-                    self.dropped_frames += 1
-                    return False
-                    
                 self.current_frame = {
                     'data': jpeg_frame,
                     'size': frame_size,
@@ -412,51 +392,37 @@ class CameraProxy:
             
             self.frame_count += 1
             return True
-            
+                
         except Exception:
             return False
 
     def generate_stream(self):
-        """Smart stream generation with anti-buffering"""
+        """Stream generation without redundant age checking"""
         last_delivery_time = 0
         target_interval = 1.0 / self.target_fps
-        consecutive_skips = 0
-        
-        logger.info(f"Starting stream generation at {self.target_fps} FPS")
         
         while self.running:
             try:
                 current_time = time.time()
                 
-                # Rate limiting to prevent browser buffering
+                # Rate limiting
                 if current_time - last_delivery_time < target_interval:
-                    time.sleep(0.002)
+                    time.sleep(0.001)  # Tiny sleep to prevent CPU spin
                     continue
                 
                 with self.frame_lock:
-                    current_frame_info = self.current_frame
+                    frame_info = self.current_frame
                 
-                if current_frame_info and self.stream_active:
-                    # Anti-buffering: Skip old frames
-                    frame_age = current_time - current_frame_info['timestamp']
-                    if frame_age > self.max_frame_age:
-                        consecutive_skips += 1
-                        if consecutive_skips % 10 == 0:
-                            logger.warning(f"Skipping old frame (age: {frame_age:.3f}s)")
-                        time.sleep(0.01)
-                        continue
-                    
-                    consecutive_skips = 0
-                    
-                    # Deliver the frame
+                if frame_info and self.stream_active:
+                    # NO AGE CHECKING - trust the input filter
                     yield (b'--frame\r\n'
                         b'Content-Type: image/jpeg\r\n'
-                        b'Content-Length: ' + str(current_frame_info['size']).encode() + b'\r\n\r\n' +
-                        current_frame_info['data'] + b'\r\n')
+                        b'Content-Length: ' + str(frame_info['size']).encode() + b'\r\n\r\n' +
+                        frame_info['data'] + b'\r\n')
                     
                     last_delivery_time = current_time
                 else:
-                    # Placeholder when no stream
+                    # Placeholder
                     if not hasattr(self, '_cached_placeholder'):
                         self._cached_placeholder = self._create_placeholder_frame()
                     
@@ -464,11 +430,11 @@ class CameraProxy:
                         b'Content-Type: image/jpeg\r\n'
                         b'Content-Length: ' + str(len(self._cached_placeholder)).encode() + b'\r\n\r\n' +
                         self._cached_placeholder + b'\r\n')
-                    time.sleep(0.1)
+                    time.sleep(0.05)
                     
             except Exception as e:
-                logger.debug(f"Stream generation error: {e}")
-                time.sleep(0.02)
+                logger.debug(f"Stream error: {e}")
+                time.sleep(0.01)
 
     def _create_placeholder_frame(self):
         """Create cached placeholder frame"""

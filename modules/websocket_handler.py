@@ -25,7 +25,8 @@ class WebSocketMessageHandler:
         self.audio_controller = audio_controller
         self.telemetry_system = telemetry_system
         self.backend = backend_ref  # Reference to main backend for broadcasting
-        
+        self.last_navigation_time = 0
+        self.navigation_cooldown = 2.3 #debounce navigation commands
         # Message type routing table
         self.handlers = {
             # Servo control
@@ -45,6 +46,10 @@ class WebSocketMessageHandler:
             
             # Stepper motor control
             "stepper": self._handle_stepper_command,
+
+            # In websocket_handler.py __init__, add to handlers dict:
+            "frontend_controller": self._handle_frontend_controller,
+            "steamdeck_controller": self._handle_steamdeck_controller,  
             
             # Scene management
             "scene": self._handle_scene_command,
@@ -87,7 +92,81 @@ class WebSocketMessageHandler:
         }
         
         logger.info(f"🌐 WebSocket handler initialized with {len(self.handlers)} message types")
-    
+
+        
+    async def _handle_frontend_controller(self, websocket, data: Dict[str, Any]):
+        """Handle frontend controller input - same as steamdeck but different source"""
+        try:
+            axes = data.get("axes", {})
+            buttons = data.get("buttons", {})
+            timestamp = data.get("timestamp", time.time())
+            
+            # Process through existing controller input processor
+            if hasattr(self.backend, 'controller_input_processor'):
+                # Process all axes
+                for axis_name, axis_value in axes.items():
+                    await self.backend.controller_input_processor.process_controller_input(
+                        control_name=axis_name,
+                        raw_value=axis_value,
+                        input_type="axis"
+                    )
+                logger.info(f">>> LOOP: Axis {axis_name} processed successfully")
+                # Process all buttons
+                for button_name, button_pressed in buttons.items():
+                    # Convert boolean to float (1.0 or 0.0)
+                    button_value = 1.0 if button_pressed else 0.0
+                    await self.backend.controller_input_processor.process_controller_input(
+                        control_name=button_name,
+                        raw_value=button_value,
+                        input_type="button"
+                    )
+            
+        except Exception as e:
+            logger.error(f"Frontend controller error: {e}")
+            await self._send_error_response(websocket, f"Controller error: {str(e)}")
+
+    async def _handle_steamdeck_controller(self, websocket, data: Dict[str, Any]):
+        """Handle steamdeck controller input"""
+        try:
+            if hasattr(self.backend, 'controller_input_processor'):
+                mappings = self.backend.controller_input_processor.get_controller_mappings()
+            
+            axes = data.get("axes", {})
+            buttons = data.get("buttons", {})
+            
+            
+            if not hasattr(self.backend, 'controller_input_processor'):
+                logger.error("ERROR: No controller_input_processor available!")
+                return
+            
+            # Process axes
+            for axis_name, axis_value in axes.items():
+                try:
+                    await self.backend.controller_input_processor.process_controller_input(
+                        control_name=axis_name,
+                        raw_value=axis_value,
+                        input_type="axis"
+                    )
+                except Exception as axis_error:
+                    logger.error(f"Error processing axis {axis_name}: {axis_error}")
+
+            
+            # Process buttons
+            for button_name, is_pressed in buttons.items():
+                value = 1.0 if is_pressed else 0.0
+                try:
+                    await self.backend.controller_input_processor.process_controller_input(
+                        control_name=button_name,
+                        raw_value=value,
+                        input_type="button"
+                    )
+                except Exception as button_error:
+                    logger.error(f"Error processing button {button_name}: {button_error}")
+                
+                
+        except Exception as e:
+            logger.error(f"FATAL ERROR in steamdeck handler: {e}", exc_info=True)
+
     async def handle_message(self, websocket, message: str) -> bool:
         """
         Main message handling entry point.
@@ -106,8 +185,7 @@ class WebSocketMessageHandler:
             if not msg_type:
                 logger.warning("Received message without type field")
                 return False
-            
-            logger.debug(f"📨 Handling message type: {msg_type}")
+        
             
             # Route to appropriate handler
             handler = self.handlers.get(msg_type)
@@ -115,7 +193,6 @@ class WebSocketMessageHandler:
                 await handler(websocket, data)
                 return True
             else:
-                logger.warning(f"🚫 Unknown message type: {msg_type}")
                 await self._send_error_response(websocket, f"Unknown message type: {msg_type}")
                 return False
                 
@@ -171,6 +248,7 @@ class WebSocketMessageHandler:
     async def _handle_navigation_command(self, websocket, data: Dict[str, Any]):
         """Handle navigation commands from controller and broadcast to frontend"""
         try:
+            
             action = data.get("action")
             
             if not action:

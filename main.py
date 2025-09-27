@@ -187,7 +187,7 @@ class WALLEBackend:
             else:
                 logger.warning("No controller detected, will retry periodically")
                 # Still load Xbox config as fallback
-                self.controller_input_processor.load_controller_config_by_type("xbox")
+                self.controller_input_processor.load_controller_config_by_type("steam_deck")
             
             # Alternatively, try loading from config file if it exists
             controller_config_path = "configs/controller_config.json"
@@ -325,16 +325,16 @@ class WALLEBackend:
             await self.send_initial_status(websocket)
             
             # Handle messages from this client
-            try:
-                async for message in websocket:
-                    try:
-                        await self.websocket_handler.handle_message(websocket, message)
-                    except Exception as e:
-                        logger.error(f"Error handling message from {client_info}: {e}")
-            except websockets.exceptions.ConnectionClosedError:
-                logger.info(f"Client {client_info} connection closed normally")
-            except websockets.exceptions.ConnectionClosedOK:
-                logger.info(f"Client {client_info} disconnected cleanly")
+            while True:
+                try:
+                    message = await websocket.recv()
+                    await self.websocket_handler.handle_message(websocket, message)
+                except websockets.exceptions.ConnectionClosed:
+                    logger.info(f"Client {client_info} connection closed normally")
+                    break
+                except Exception as e:
+                    logger.error(f"Error handling message from {client_info}: {e}")
+                    break
                 
         except Exception as e:
             logger.error(f"WebSocket connection error for {client_info}: {e}")
@@ -979,6 +979,9 @@ def setup_logging():
     # Set module-specific log levels
     logging.getLogger("websockets").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
+
+    logging.getLogger("modules.websocket_handler").setLevel(logging.INFO)
+    logging.getLogger("__main__").setLevel(logging.INFO)
 
 
 # ==================== MAIN ENTRY POINT ====================

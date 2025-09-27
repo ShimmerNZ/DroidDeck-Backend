@@ -49,6 +49,10 @@ class BehaviorHandler:
 
 class DirectServoHandler(BehaviorHandler):
     """Handle direct servo control - single axis to single servo"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.last_sent_values = {}  # Track last sent values per channel
+        self.change_threshold = 0.02  # 2% change required to send update
     
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
@@ -62,6 +66,11 @@ class DirectServoHandler(BehaviorHandler):
             # Apply inversion and sensitivity
             value = -controller_input.raw_value if invert else controller_input.raw_value
             value *= sensitivity
+
+            last_value = self.last_sent_values.get(servo_channel, None)
+            if last_value is not None and abs(value - last_value) < self.change_threshold:
+                return True  
+
             pulse = self._clamp_pulse(value)
             
             # Send servo command
@@ -71,7 +80,8 @@ class DirectServoHandler(BehaviorHandler):
             
             if success:
                 self.logger.debug(f"Direct servo {servo_channel}: {pulse} (raw: {controller_input.raw_value:.2f})")
-            
+                
+                self.last_sent_values[servo_channel] = value
             return success
             
         except Exception as e:
@@ -139,7 +149,9 @@ class SystemControlHandler(BehaviorHandler):
     def __init__(self, hardware_service=None, scene_engine=None, logger=None, backend_ref=None):
         super().__init__(hardware_service, scene_engine, logger)
         self.backend = backend_ref  # Reference to backend for message broadcasting
-        
+        self.last_navigation_time = 0
+        self.navigation_cooldown = 0.15  # 150ms debounce
+
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
             action = config.get('system_action')
@@ -152,6 +164,13 @@ class SystemControlHandler(BehaviorHandler):
             
             # Check if this is a button press (for on_press timing)
             if trigger_timing == 'on_press' and controller_input.raw_value > threshold:
+                # Debounce navigation commands
+                current_time = time.time()
+                if current_time - self.last_navigation_time < self.navigation_cooldown:
+                    return True  # Debounced, but no error
+                
+                self.last_navigation_time = current_time
+                
                 # Route system control to frontend via WebSocket
                 await self._route_to_frontend(controller_input.control_name, action, config)
                 
@@ -163,7 +182,7 @@ class SystemControlHandler(BehaviorHandler):
         except Exception as e:
             self.logger.error(f"Error in system control handler: {e}")
             return False
-    
+            
     async def _route_to_frontend(self, control_name: str, action: str, config: Dict[str, Any]):
         """Route system control command to frontend via WebSocket"""
         try:
@@ -171,24 +190,35 @@ class SystemControlHandler(BehaviorHandler):
                 self.logger.error("No backend reference for system control routing")
                 return
             
-            # Create system control message for frontend
-            system_control_message = {
-                "type": "system_control_command",
-                "control_name": control_name,
-                "action": action,
-                "config": config,
-                "timestamp": time.time(),
-                "source": "controller_backend"
-            }
+            # Navigation actions use "navigation" message type for home_screen
+            navigation_actions = ['up', 'down', 'left', 'right', 'select', 'exit']
+            
+            if action in navigation_actions:
+                # Send as navigation message for home_screen
+                message = {
+                    "type": "navigation",
+                    "action": action,
+                    "timestamp": time.time(),
+                    "source": "controller_backend"
+                }
+                self.logger.info(f"Navigation command '{action}' routed to frontend")
+            else:
+                # Send as system_control_command for system actions
+                message = {
+                    "type": "system_control_command",
+                    "action": action,
+                    "control_name": control_name,
+                    "config": config,
+                    "timestamp": time.time(),
+                    "source": "controller_backend"
+                }
+                self.logger.info(f"System control '{action}' routed to frontend")
             
             # Broadcast to all connected frontend clients
-            await self.backend.broadcast_message(system_control_message)
-            
-            self.logger.info(f"System control '{action}' routed to frontend")
+            await self.backend.broadcast_message(message)
             
         except Exception as e:
-            self.logger.error(f"Failed to route system control to frontend: {e}")
-
+            self.logger.error(f"Failed to route to frontend: {e}")
 
 class DifferentialTracksHandler(BehaviorHandler):
     """Handle differential tracks control - tank steering"""
@@ -197,6 +227,9 @@ class DifferentialTracksHandler(BehaviorHandler):
         super().__init__(*args, **kwargs)
         self.last_forward = 0.0
         self.last_turn = 0.0
+        self.last_sent_left = None
+        self.last_sent_right = None
+        self.change_threshold = 0.02
     
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
@@ -222,6 +255,12 @@ class DifferentialTracksHandler(BehaviorHandler):
                 self.last_turn, self.last_forward
             )
             
+            if (self.last_sent_left is not None and 
+                self.last_sent_right is not None and
+                abs(left_speed - self.last_sent_left) < self.change_threshold and
+                abs(right_speed - self.last_sent_right) < self.change_threshold):
+                return True  
+        
             # Convert to servo pulses
             left_pulse = self._clamp_pulse(left_speed)
             right_pulse = self._clamp_pulse(right_speed)
@@ -235,6 +274,8 @@ class DifferentialTracksHandler(BehaviorHandler):
             )
             
             if left_success and right_success:
+                self.last_sent_left = left_speed
+                self.last_sent_right = right_speed
                 self.logger.debug(f"Differential tracks L:{left_pulse} R:{right_pulse}")
             
             return left_success and right_success
@@ -514,11 +555,6 @@ class ControllerInputProcessor:
                     "invert": False,
                     "sensitivity": 0.7
                 },
-                "button_a": {
-                    "behavior": "scene_trigger",
-                    "scene": "Happy",
-                    "trigger_timing": "on_press"
-                },
                 "button_x": {
                     "behavior": "scene_trigger",
                     "scene": "Curious", 
@@ -527,6 +563,36 @@ class ControllerInputProcessor:
                 "button_y": {
                     "behavior": "scene_trigger",
                     "scene": "Excited",
+                    "trigger_timing": "on_press"
+                },
+                "dpad_up": {
+                    "behavior": "system_control",
+                    "system_action": "navigate_up",
+                    "trigger_timing": "on_press"
+                },
+                "dpad_down": {
+                    "behavior": "system_control",
+                    "system_action": "navigate_down",
+                    "trigger_timing": "on_press"
+                },
+                "dpad_left": {
+                    "behavior": "system_control",
+                    "system_action": "navigate_left",
+                    "trigger_timing": "on_press"
+                },
+                "dpad_right": {
+                    "behavior": "system_control",
+                    "system_action": "navigate_right",
+                    "trigger_timing": "on_press"
+                },
+                "button_a": {
+                    "behavior": "system_control",
+                    "system_action": "navigate_select",
+                    "trigger_timing": "on_press"
+                },
+                "button_b": {
+                    "behavior": "system_control",
+                    "system_action": "navigate_back",
                     "trigger_timing": "on_press"
                 }
             }

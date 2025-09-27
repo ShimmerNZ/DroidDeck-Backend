@@ -397,7 +397,7 @@ class NEMA23Controller:
         step_count = 0
         
         # Position update optimization - only update every N steps
-        position_update_interval = 50  # Update UI every 50 steps instead of every step
+        position_update_interval = 800  # Update UI every 50 steps instead of every step
         
         logger.debug(f"Movement profile: {accel_steps} accel + {constant_steps} constant + {decel_steps} decel steps")
         

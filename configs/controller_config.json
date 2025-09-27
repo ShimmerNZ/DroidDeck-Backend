@@ -29,5 +29,30 @@
     "normal_speed": 4800,
     "acceleration": 5163,
     "nema_behavior": "toggle_positions"
+  },
+  "dpad_up": {
+    "behavior": "system_control",
+    "system_action": "up",
+    "trigger_timing": "on_press"
+  },
+  "dpad_down": {
+      "behavior": "system_control",
+      "system_action": "down",
+      "trigger_timing": "on_press"
+  },
+  "dpad_left": {
+      "behavior": "system_control",
+      "system_action": "left",
+      "trigger_timing": "on_press"
+  },
+  "dpad_right": {
+      "behavior": "system_control",
+      "system_action": "right",
+      "trigger_timing": "on_press"
+  },
+  "button_a": {
+      "behavior": "system_control",
+      "system_action": "select",
+      "trigger_timing": "on_press"
   }
 }
