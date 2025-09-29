@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Droid Deck Web Server Module - Fixed Telemetry Integration
+Droid Deck Web Server Module - Fixed Socket.IO Connection Handler
 """
 
 import os
@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, send_from_directory, jsonify, request  # Added request import
 from flask_socketio import SocketIO, emit
 from typing import Dict, Any, Optional
 
@@ -31,6 +31,11 @@ class DroidDeckWebServer:
         self.webconfig_dir = Path("webconfig")
         self.webconfig_dir.mkdir(exist_ok=True)
         self.webconfig_file = self.webconfig_dir / "web_config.json"
+        
+        # Static files directory
+        self.module_dir = Path(__file__).parent
+        self.static_dir = self.module_dir / "static"
+        self.templates_dir = self.module_dir
         
         self.load_web_config()
         self.setup_flask_app()
@@ -77,7 +82,9 @@ class DroidDeckWebServer:
     
     def setup_flask_app(self):
         """Setup Flask application and routes"""
-        self.app = Flask(__name__)
+        self.app = Flask(__name__, 
+                         static_folder=str(self.static_dir),
+                         template_folder=str(self.templates_dir))
         self.app.config['SECRET_KEY'] = 'droid-deck-web-secret'
         
         self.socketio = SocketIO(
@@ -89,13 +96,97 @@ class DroidDeckWebServer:
         # Setup routes
         self.setup_routes()
         self.setup_socketio_events()
-    
+        
+    def _handle_get_audio_files(self, client_sid):
+        """Get list of available audio files"""
+        try:
+            audio_dir = Path("audio")
+            audio_files = []
+            
+            if audio_dir.exists():
+                for ext in ['*.mp3', '*.wav', '*.ogg']:
+                    audio_files.extend([f.name for f in audio_dir.glob(ext)])
+            
+            self.socketio.emit('backend_message', {
+                'type': 'audio_files',
+                'files': sorted(audio_files),
+                'count': len(audio_files),
+                'timestamp': time.time()
+            }, room=client_sid)
+            
+        except Exception as e:
+            logger.error(f"Error getting audio files: {e}")
+
+    def _handle_save_scene(self, client_sid, data):
+        """Save a scene configuration"""
+        try:
+            scene_data = data.get('scene_data')
+            if not scene_data:
+                self.socketio.emit('error', {'message': 'No scene data provided'}, room=client_sid)
+                return
+            
+            # Send to backend to save
+            if self.backend and hasattr(self.backend, 'scene_engine'):
+                # Add logic to save scene via backend
+                pass
+            
+            self.socketio.emit('backend_message', {
+                'type': 'scene_saved',
+                'scene_name': scene_data.get('label'),
+                'timestamp': time.time()
+            }, room=client_sid)
+            
+        except Exception as e:
+            logger.error(f"Error saving scene: {e}")
+            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
+    def _handle_delete_scene(self, client_sid, data):
+        """Delete a scene"""
+        try:
+            scene_name = data.get('scene_name')
+            if not scene_name:
+                self.socketio.emit('error', {'message': 'No scene name provided'}, room=client_sid)
+                return
+            
+            # Send to backend to delete
+            if self.backend and hasattr(self.backend, 'scene_engine'):
+                # Add logic to delete scene via backend
+                pass
+            
+            self.socketio.emit('backend_message', {
+                'type': 'scene_deleted',
+                'scene_name': scene_name,
+                'timestamp': time.time()
+            }, room=client_sid)
+            
+        except Exception as e:
+            logger.error(f"Error deleting scene: {e}")
+            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
     def setup_routes(self):
         """Setup Flask routes"""
         
         @self.app.route('/')
         def index():
-            return render_template_string(self.get_html_template())
+            """Serve the main index.html file"""
+            return send_from_directory(self.templates_dir, 'index.html')
+        
+        @self.app.route('/static/<path:filename>')
+        def serve_static(filename):
+            """Serve static files"""
+            return send_from_directory(self.static_dir, filename)
+        
+        @self.app.route('/static/css/<path:filename>')
+        def serve_css(filename):
+            """Serve CSS files"""
+            css_dir = self.static_dir / 'css'
+            return send_from_directory(css_dir, filename)
+        
+        @self.app.route('/static/js/<path:filename>')
+        def serve_js(filename):
+            """Serve JavaScript files"""
+            js_dir = self.static_dir / 'js'
+            return send_from_directory(js_dir, filename)
         
         @self.app.route('/api/status')
         def get_status():
@@ -109,59 +200,113 @@ class DroidDeckWebServer:
         """Setup Socket.IO event handlers"""
         
         @self.socketio.on('connect')
-        def handle_connect():
-            self.web_clients.add(request.sid)
-            logger.info(f"Web client connected: {request.sid}")
-            emit('backend_connected', {'connected': True})
+        def handle_connect(auth):  # FIXED: Accept auth parameter
+            """Handle client connection"""
+            # Get client session ID from Flask-SocketIO's request context
+            from flask import request as flask_request
+            client_sid = flask_request.sid
             
-            # Send initial data when client connects
-            self._send_initial_data_to_client(request.sid)
+            self.web_clients.add(client_sid)
+            logger.info(f"Web client connected: {client_sid}")
+            emit('backend_connected', {'connected': True})
+            self._send_initial_data_to_client(client_sid)
         
         @self.socketio.on('disconnect')
         def handle_disconnect():
-            self.web_clients.discard(request.sid)
-            logger.info(f"Web client disconnected: {request.sid}")
+            """Handle client disconnection"""
+            from flask import request as flask_request
+            client_sid = flask_request.sid
+            
+            self.web_clients.discard(client_sid)
+            logger.info(f"Web client disconnected: {client_sid}")
         
         @self.socketio.on('backend_command')
         def handle_backend_command(data):
             """Handle commands using real backend data"""
+            from flask import request as flask_request
+            client_sid = flask_request.sid
+            
             try:
                 cmd_type = data.get('type')
-                
-                if cmd_type == 'get_scenes':
-                    self._handle_get_scenes(request.sid)
-                elif cmd_type == 'get_controller_info':
-                    self._handle_get_controller_info(request.sid)
-                elif cmd_type == 'system_status':
-                    self._handle_system_status(request.sid)
-                elif cmd_type == 'get_all_servo_positions':
-                    self._handle_get_servo_positions(request.sid, data)
-                elif cmd_type in ['scene', 'servo', 'emergency_stop', 'nema_move_to_position', 'nema_home', 'nema_start_sweep', 'nema_stop_sweep']:
-                    # For action commands, send acknowledgment
+                        
+                if not self.backend:
+                    logger.warning(f"Backend not ready for command: {cmd_type}")
                     emit('backend_message', {
-                        'type': 'command_received',
-                        'command': cmd_type,
-                        'timestamp': time.time()
+                        'type': 'error',
+                        'message': 'Backend initializing, please wait...'
                     })
+                    return
+
+                if cmd_type == 'scene':
+                    # Forward scene playback to backend
+                    scene_name = data.get('emotion')
+                    logger.info(f"Web UI requesting scene: {scene_name}")
+                                    
+                    if self.backend and hasattr(self.backend, 'scene_engine'):
+                        # Use threading to call the async method safely
+                        import threading
+                        
+                        def play_scene_thread():
+                            import asyncio
+                            try:
+                                # Create a new event loop for this thread
+                                loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(loop)
+                                loop.run_until_complete(self.backend.scene_engine.play_scene(scene_name))
+                                loop.close()
+                            except Exception as e:
+                                logger.error(f"Error playing scene: {e}")
+                        
+                        # Start scene in background thread
+                        thread = threading.Thread(target=play_scene_thread, daemon=True)
+                        thread.start()
+                        
+                        emit('backend_message', {
+                            'type': 'scene_started',
+                            'scene_name': scene_name,
+                            'timestamp': time.time()
+                        })
+                    else:
+                        logger.error("Backend or scene_engine not available")
+                        emit('error', {'message': 'Scene engine not available'})
+                   
+                elif cmd_type == 'get_scenes':
+                    self._handle_get_scenes(client_sid)
+                elif cmd_type == 'get_controller_info':
+                    self._handle_get_controller_info(client_sid)
+                elif cmd_type == 'system_status':
+                    self._handle_system_status(client_sid)
+                elif cmd_type == 'get_all_servo_positions':
+                    self._handle_get_servo_positions(client_sid, data)
+                elif cmd_type in ['servo', 'emergency_stop', 'nema_move_to_position', 'nema_home', 'nema_start_sweep', 'nema_stop_sweep']:
+                    # Forward these commands to backend as well
+                    logger.info(f"Forwarding command to backend: {cmd_type}")
+                    
+                    if self.backend:
+                        import asyncio
+                        loop = asyncio.get_event_loop()
+                        # You'll need to route these through appropriate backend methods
+                        # For now, just acknowledge
+                        emit('backend_message', {
+                            'type': 'command_received',
+                            'command': cmd_type,
+                            'timestamp': time.time()
+                        })
+                    else:
+                        emit('error', {'message': 'Backend not available'})
                 else:
                     logger.debug(f"Unhandled command type: {cmd_type}")
                 
             except Exception as e:
                 logger.error(f"Failed to handle command: {e}")
                 emit('error', {'message': str(e)})
-    
+
     def _send_initial_data_to_client(self, client_sid):
         """Send initial data when client connects"""
         try:
-            # Send controller info
             self._handle_get_controller_info(client_sid)
-            
-            # Send scenes
             self._handle_get_scenes(client_sid)
-            
-            # Send system status
             self._handle_system_status(client_sid)
-            
         except Exception as e:
             logger.error(f"Error sending initial data: {e}")
     
@@ -214,7 +359,6 @@ class DroidDeckWebServer:
                     'timestamp': time.time()
                 }, room=client_sid)
             else:
-                # Fallback scenes
                 self.socketio.emit('backend_message', {
                     'type': 'scene_list',
                     'scenes': self._get_default_scenes(),
@@ -224,58 +368,68 @@ class DroidDeckWebServer:
                 
         except Exception as e:
             logger.error(f"Error getting scenes: {e}")
-    
+        
     def _handle_system_status(self, client_sid):
-        """Get real system status from backend using telemetry summary"""
+        """Get real system status from backend including hardware status"""
         try:
-            telemetry_data = {}
-            
-            if self.backend and hasattr(self.backend, 'telemetry_system'):
-                # Use get_telemetry_summary instead of get_latest_reading
-                summary = self.backend.telemetry_system.get_telemetry_summary()
+            if not self.backend:
+                return
                 
-                if summary:
-                    telemetry_data = {
-                        'type': 'telemetry',
-                        'cpu': summary.get('current_reading', {}).get('cpu_percent', 0),
-                        'memory': summary.get('current_reading', {}).get('memory_percent', 0),
-                        'battery_voltage': summary.get('current_reading', {}).get('battery_voltage', 0.0),
-                        'temperature': summary.get('current_reading', {}).get('temperature', 0),
-                        'current_left_track': summary.get('current_reading', {}).get('current_left_track', 0.0),
-                        'current_right_track': summary.get('current_reading', {}).get('current_right_track', 0.0),
-                        'current_electronics': summary.get('current_reading', {}).get('current_electronics', 0.0),
-                        'timestamp': time.time()
+            telemetry_data = {'type': 'telemetry'}
+            
+            # Get basic telemetry
+            if hasattr(self.backend, 'telemetry_system'):
+                summary = self.backend.telemetry_system.get_telemetry_summary()
+                if summary and 'current_reading' in summary:
+                    current = summary['current_reading']
+                    telemetry_data.update({
+                        'cpu': current.get('cpu_percent', 0),
+                        'memory': current.get('memory_percent', 0),
+                        'battery_voltage': current.get('battery_voltage', 0.0),
+                        'temperature': current.get('temperature', 0),
+                        'current_left_track': current.get('current_left_track', 0.0),
+                        'current_right_track': current.get('current_right_track', 0.0),
+                        'current_electronics': current.get('current_electronics', 0.0),
+                    })
+                    
+                    # ADD HARDWARE STATUS FROM TELEMETRY READING
+                    telemetry_data['maestro1'] = {
+                        'connected': current.get('maestro1_connected', False),
+                        'channel_count': current.get('maestro1_status', {}).get('channel_count', 0),
+                        'error_flags': current.get('maestro1_status', {}).get('error_flags', {'has_errors': False}),
+                        'moving': current.get('maestro1_status', {}).get('moving', False),
+                        'script_status': current.get('maestro1_status', {}).get('script_status', {'status': 'unknown'})
+                    }
+                    
+                    telemetry_data['maestro2'] = {
+                        'connected': current.get('maestro2_connected', False),
+                        'channel_count': current.get('maestro2_status', {}).get('channel_count', 0),
+                        'error_flags': current.get('maestro2_status', {}).get('error_flags', {'has_errors': False}),
+                        'moving': current.get('maestro2_status', {}).get('moving', False),
+                        'script_status': current.get('maestro2_status', {}).get('script_status', {'status': 'unknown'})
+                    }
+                    
+                    telemetry_data['audio_system'] = {
+                        'connected': current.get('audio_system_ready', False)
                     }
             
-            # If no telemetry data, send defaults
-            if not telemetry_data:
-                telemetry_data = {
-                    'type': 'telemetry',
-                    'cpu': 0,
-                    'memory': 0,
-                    'battery_voltage': 0.0,
-                    'temperature': 0,
-                    'current_left_track': 0.0,
-                    'current_right_track': 0.0,
-                    'current_electronics': 0.0,
-                    'timestamp': time.time()
-                }
+            telemetry_data['timestamp'] = time.time()
             
+            logger.debug(f"Sending telemetry - maestro1 connected: {telemetry_data.get('maestro1', {}).get('connected')}")
             self.socketio.emit('backend_message', telemetry_data, room=client_sid)
                 
         except Exception as e:
             logger.error(f"Error getting system status: {e}")
-    
+
     def _handle_get_servo_positions(self, client_sid, data):
         """Get servo positions from backend"""
         try:
             maestro = data.get('maestro', 1)
             
-            # Send a basic response - the actual servo positions would come from hardware service
             self.socketio.emit('backend_message', {
                 'type': 'all_servo_positions',
                 'maestro': maestro,
-                'positions': {},  # Would be populated by hardware service
+                'positions': {},
                 'timestamp': time.time()
             }, room=client_sid)
             
@@ -310,27 +464,6 @@ class DroidDeckWebServer:
                 'servo_count': 5
             }
         ]
-    
-    def get_html_template(self):
-        """Load HTML template from external file"""
-        try:
-            # Changed to index.html as you specified
-            template_path = Path(__file__).parent / "index.html"
-            with open(template_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except FileNotFoundError:
-            return """
-            <html>
-            <head><title>Droid Deck Web - Template Missing</title></head>
-            <body>
-                <h1>Template Not Found</h1>
-                <p>Please create modules/index.html with the complete web interface.</p>
-                <p>Copy the complete HTML from the artifact into that file.</p>
-            </body>
-            </html>
-            """
-        except Exception as e:
-            return f"<h1>Error loading template: {e}</h1>"
     
     def start(self):
         """Start the web server in a separate thread"""
@@ -368,11 +501,15 @@ class DroidDeckWebServer:
         """Stop the web server"""
         self.running = False
         logger.info("Droid Deck Web Server stopped")
-    
+        
     def broadcast_message(self, message: Dict[str, Any]):
         """Broadcast message to all web clients - called by main backend"""
         if self.socketio and self.web_clients:
             try:
+                # Log what we're broadcasting
+                if message.get('type') == 'telemetry':
+                    logger.debug(f"Broadcasting telemetry with maestro1: {message.get('maestro1')}, maestro2: {message.get('maestro2')}")
+                
                 self.socketio.emit('backend_message', message, broadcast=True)
             except Exception as e:
                 logger.debug(f"Broadcast error: {e}")
