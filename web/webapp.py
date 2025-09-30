@@ -276,9 +276,27 @@ class DroidDeckWebServer:
                     self._handle_get_controller_info(client_sid)
                 elif cmd_type == 'system_status':
                     self._handle_system_status(client_sid)
+                elif cmd_type == 'get_audio_files':
+                    self._handle_get_audio_files(client_sid)
                 elif cmd_type == 'get_all_servo_positions':
                     self._handle_get_servo_positions(client_sid, data)
-                elif cmd_type in ['servo', 'emergency_stop', 'nema_move_to_position', 'nema_home', 'nema_start_sweep', 'nema_stop_sweep']:
+                elif cmd_type == 'get_controller_config':
+                    self._handle_get_controller_config(client_sid)
+                elif cmd_type == 'emergency_stop':
+                    self._handle_emergency_stop(client_sid)
+                elif cmd_type == 'nema_move_to_position':
+                    self._handle_nema_move_to_position(client_sid, data)
+                elif cmd_type == 'nema_home':
+                    self._handle_nema_home(client_sid)
+                elif cmd_type == 'nema_start_sweep':
+                    self._handle_nema_start_sweep(client_sid, data)
+                elif cmd_type == 'nema_stop_sweep':
+                    self._handle_nema_stop_sweep(client_sid)
+                elif cmd_type == 'nema_get_status':
+                    self._handle_nema_get_status(client_sid)
+                elif cmd_type == 'nema_config_update':
+                    self._handle_nema_config_update(client_sid, data)    
+                elif cmd_type in ['servo']:
                     # Forward these commands to backend as well
                     logger.info(f"Forwarding command to backend: {cmd_type}")
                     
@@ -368,7 +386,373 @@ class DroidDeckWebServer:
                 
         except Exception as e:
             logger.error(f"Error getting scenes: {e}")
-        
+
+    def _handle_nema_move_to_position(self, client_sid, data):
+        """Handle NEMA move to position command"""
+        try:
+            position_cm = data.get('position_cm')
+            if position_cm is None:
+                self.socketio.emit('error', {'message': 'Missing position_cm parameter'}, room=client_sid)
+                return
+            
+            logger.info(f"Web UI requesting NEMA move to {position_cm}cm")
+            
+            if self.backend and hasattr(self.backend, 'hardware_service'):
+                import threading
+                
+                def nema_move_thread():
+                    import asyncio
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        # Call the stepper command handler
+                        result = loop.run_until_complete(
+                            self.backend.hardware_service.handle_stepper_command({
+                                'command': 'move_to_position',
+                                'position_cm': position_cm
+                            })
+                        )
+                        loop.close()
+                        
+                        logger.info(f"NEMA move command executed: {result}")
+                    except Exception as e:
+                        logger.error(f"Error in NEMA move: {e}")
+                
+                thread = threading.Thread(target=nema_move_thread, daemon=True)
+                thread.start()
+                
+                self.socketio.emit('backend_message', {
+                    'type': 'nema_command_sent',
+                    'command': 'move_to_position',
+                    'position_cm': position_cm,
+                    'timestamp': time.time()
+                }, room=client_sid)
+            else:
+                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
+                
+        except Exception as e:
+            logger.error(f"NEMA move error: {e}")
+            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
+    def _handle_nema_home(self, client_sid):
+        """Handle NEMA home command"""
+        try:
+            logger.info("Web UI requesting NEMA home")
+            
+            if self.backend and hasattr(self.backend, 'hardware_service'):
+                import threading
+                
+                def nema_home_thread():
+                    import asyncio
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        result = loop.run_until_complete(
+                            self.backend.hardware_service.handle_stepper_command({
+                                'command': 'home'
+                            })
+                        )
+                        loop.close()
+                        
+                        logger.info(f"NEMA home command executed: {result}")
+                    except Exception as e:
+                        logger.error(f"Error in NEMA home: {e}")
+                
+                thread = threading.Thread(target=nema_home_thread, daemon=True)
+                thread.start()
+                
+                self.socketio.emit('backend_message', {
+                    'type': 'nema_command_sent',
+                    'command': 'home',
+                    'timestamp': time.time()
+                }, room=client_sid)
+            else:
+                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
+                
+        except Exception as e:
+            logger.error(f"NEMA home error: {e}")
+            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
+    def _handle_nema_start_sweep(self, client_sid, data):
+        """Handle NEMA start sweep command"""
+        try:
+            min_cm = data.get('min_cm', 0)
+            max_cm = data.get('max_cm', 20)
+            normal_speed = data.get('normal_speed', 1000)
+            acceleration = data.get('acceleration', 800)
+            
+            logger.info(f"Web UI requesting NEMA sweep: {min_cm}-{max_cm}cm")
+            
+            if self.backend and hasattr(self.backend, 'hardware_service'):
+                import threading
+                
+                def nema_sweep_thread():
+                    import asyncio
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        result = loop.run_until_complete(
+                            self.backend.hardware_service.handle_stepper_command({
+                                'command': 'start_sweep',
+                                'min_cm': min_cm,
+                                'max_cm': max_cm,
+                                'normal_speed': normal_speed,
+                                'acceleration': acceleration
+                            })
+                        )
+                        loop.close()
+                        
+                        logger.info(f"NEMA sweep started: {result}")
+                    except Exception as e:
+                        logger.error(f"Error in NEMA sweep: {e}")
+                
+                thread = threading.Thread(target=nema_sweep_thread, daemon=True)
+                thread.start()
+                
+                self.socketio.emit('backend_message', {
+                    'type': 'nema_sweep_started',
+                    'min_cm': min_cm,
+                    'max_cm': max_cm,
+                    'timestamp': time.time()
+                }, room=client_sid)
+            else:
+                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
+                
+        except Exception as e:
+            logger.error(f"NEMA sweep error: {e}")
+            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
+    def _handle_nema_stop_sweep(self, client_sid):
+        """Handle NEMA stop sweep command"""
+        try:
+            logger.info("Web UI requesting NEMA stop sweep")
+            
+            if self.backend and hasattr(self.backend, 'hardware_service'):
+                import threading
+                
+                def nema_stop_thread():
+                    import asyncio
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        result = loop.run_until_complete(
+                            self.backend.hardware_service.handle_stepper_command({
+                                'command': 'stop_sweep'
+                            })
+                        )
+                        loop.close()
+                        
+                        logger.info(f"NEMA sweep stopped: {result}")
+                    except Exception as e:
+                        logger.error(f"Error stopping NEMA sweep: {e}")
+                
+                thread = threading.Thread(target=nema_stop_thread, daemon=True)
+                thread.start()
+                
+                self.socketio.emit('backend_message', {
+                    'type': 'nema_sweep_stopped',
+                    'timestamp': time.time()
+                }, room=client_sid)
+            else:
+                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
+                
+        except Exception as e:
+            logger.error(f"NEMA stop sweep error: {e}")
+            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
+    def _handle_nema_get_status(self, client_sid):
+        """Handle NEMA get status command"""
+        try:
+            if self.backend and hasattr(self.backend, 'hardware_service'):
+                import threading
+                
+                def nema_status_thread():
+                    import asyncio
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        result = loop.run_until_complete(
+                            self.backend.hardware_service.handle_stepper_command({
+                                'command': 'get_status'
+                            })
+                        )
+                        loop.close()
+                        
+                        # Send status back to client
+                        if result and result.get('success'):
+                            status = result.get('status', {})
+                            self.socketio.emit('backend_message', {
+                                'type': 'nema_status',
+                                'status': status,
+                                'timestamp': time.time()
+                            })
+                    except Exception as e:
+                        logger.error(f"Error getting NEMA status: {e}")
+                
+                thread = threading.Thread(target=nema_status_thread, daemon=True)
+                thread.start()
+            else:
+                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
+                
+        except Exception as e:
+            logger.error(f"NEMA get status error: {e}")
+            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
+    def _handle_nema_config_update(self, client_sid, data):
+        """Handle NEMA config update command"""
+        try:
+            config = data.get('config', {})
+            logger.info(f"Web UI updating NEMA config: {config}")
+            
+            if self.backend and hasattr(self.backend, 'hardware_service'):
+                import threading
+                
+                def nema_config_thread():
+                    import asyncio
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        
+                        result = loop.run_until_complete(
+                            self.backend.hardware_service.handle_stepper_command({
+                                'command': 'update_config',
+                                'config': config
+                            })
+                        )
+                        loop.close()
+                        
+                        logger.info(f"NEMA config updated: {result}")
+                    except Exception as e:
+                        logger.error(f"Error updating NEMA config: {e}")
+                
+                thread = threading.Thread(target=nema_config_thread, daemon=True)
+                thread.start()
+                
+                self.socketio.emit('backend_message', {
+                    'type': 'nema_config_updated',
+                    'timestamp': time.time()
+                }, room=client_sid)
+            else:
+                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
+                
+        except Exception as e:
+            logger.error(f"NEMA config update error: {e}")
+            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
+    def _handle_emergency_stop(self, client_sid):
+        """Handle emergency stop command - forward to backend"""
+        try:
+            logger.critical("🚨 EMERGENCY STOP requested from web UI")
+            
+            if self.backend and hasattr(self.backend, 'hardware_service'):
+                import threading
+                
+                def emergency_stop_thread():
+                    import asyncio
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(self.backend.hardware_service.emergency_stop_all())
+                        loop.close()
+                        logger.info("Emergency stop executed successfully")
+                    except Exception as e:
+                        logger.error(f"Error executing emergency stop: {e}")
+                
+                # Execute emergency stop in background thread
+                thread = threading.Thread(target=emergency_stop_thread, daemon=True)
+                thread.start()
+                
+                # Broadcast to all clients immediately
+                self.socketio.emit('backend_message', {
+                    'type': 'emergency_stop',
+                    'source': 'web_ui',
+                    'timestamp': time.time()
+                })
+                
+            else:
+                logger.error("Backend or hardware_service not available for emergency stop")
+                self.socketio.emit('error', {
+                    'message': 'Emergency stop failed - backend not available'
+                }, room=client_sid)
+            
+        except Exception as e:
+            logger.error(f"Emergency stop handler error: {e}")
+            self.socketio.emit('error', {
+                'message': f'Emergency stop error: {str(e)}'
+            }, room=client_sid)
+
+    def _handle_get_controller_config(self, client_sid):
+        """Get controller configuration from backend"""
+        try:
+            config_path = Path("configs/controller_config.json")
+            
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    controller_config = json.load(f)
+                
+                logger.info(f"Loaded controller config with {len(controller_config)} mappings")
+                
+                self.socketio.emit('backend_message', {
+                    'type': 'controller_config',
+                    'config': controller_config,
+                    'timestamp': time.time()
+                }, room=client_sid)
+            else:
+                logger.warning("Controller config file not found")
+                self.socketio.emit('backend_message', {
+                    'type': 'controller_config',
+                    'config': {},
+                    'timestamp': time.time()
+                }, room=client_sid)
+            
+        except Exception as e:
+            logger.error(f"Error loading controller config: {e}")
+            self.socketio.emit('backend_message', {
+                'type': 'controller_config',
+                'config': {},
+                'timestamp': time.time()
+            }, room=client_sid)
+
+    def _handle_get_audio_files(self, client_sid):
+        """Get list of available audio files from backend"""
+        try:
+            audio_files = []
+            
+            # Check if backend has audio controller
+            if self.backend and hasattr(self.backend, 'audio_controller'):
+                # Try to get audio files from the audio directory
+                audio_dir = Path("audio")
+                if audio_dir.exists() and audio_dir.is_dir():
+                    # Get all audio files
+                    for ext in ['*.mp3', '*.wav', '*.ogg', '*.m4a']:
+                        audio_files.extend([f.name for f in audio_dir.glob(ext)])
+            
+            # Sort alphabetically
+            audio_files.sort()
+            
+            logger.info(f"Found {len(audio_files)} audio files")
+            
+            self.socketio.emit('backend_message', {
+                'type': 'audio_files',
+                'files': audio_files,
+                'count': len(audio_files),
+                'timestamp': time.time()
+            }, room=client_sid)
+            
+        except Exception as e:
+            logger.error(f"Error getting audio files: {e}")
+            self.socketio.emit('backend_message', {
+                'type': 'audio_files',
+                'files': [],
+                'count': 0,
+                'timestamp': time.time()
+            }, room=client_sid)     
+
     def _handle_system_status(self, client_sid):
         """Get real system status from backend including hardware status"""
         try:

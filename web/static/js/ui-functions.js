@@ -500,66 +500,6 @@ function switchMaestro() {
     getAllServoPositions();
 }
 
-// NEMA Status Updates
-function updateNemaStatus(status) {
-    const indicator = document.getElementById('nemaIndicator');
-    const state = document.getElementById('nemaState');
-    const info = document.getElementById('nemaInfo');
-
-    nemaEnabled = status.enabled || false;
-    
-    if (indicator && state && info) {
-        state.textContent = status.state || 'Unknown';
-        
-        indicator.classList.remove('enabled', 'moving');
-        if (status.enabled) {
-            indicator.classList.add('enabled');
-        }
-        if (status.state === 'moving') {
-            indicator.classList.add('moving');
-        }
-        
-        const statusText = [];
-        if (status.homed) statusText.push('Homed');
-        if (status.enabled) statusText.push('Enabled');
-        if (status.safe_position) statusText.push('Safe Position');
-        
-        info.textContent = statusText.length > 0 ? statusText.join(' | ') : 'Standby';
-    }
-    
-    if (status.position_cm !== undefined) {
-        updateNemaPosition(status.position_cm);
-    }
-}
-
-function updateNemaButtons() {
-    const enableBtn = document.querySelector('button[onclick="enableNema()"]');
-    const disableBtn = document.querySelector('button[onclick="disableNema()"]');
-    
-    if (enableBtn && disableBtn) {
-        if (nemaEnabled) {
-            // Motor is enabled - highlight disable button
-            enableBtn.classList.remove('btn-success');
-            enableBtn.classList.add('btn-secondary');
-            disableBtn.classList.remove('btn-secondary');
-            disableBtn.classList.add('btn-danger');
-        } else {
-            // Motor is disabled - highlight enable button
-            enableBtn.classList.remove('btn-secondary');
-            enableBtn.classList.add('btn-success');
-            disableBtn.classList.remove('btn-danger');
-            disableBtn.classList.add('btn-secondary');
-        }
-    }
-}
-
-function updateNemaPosition(position) {
-    const positionDisplay = document.getElementById('nemaPosition');
-    if (positionDisplay) {
-        positionDisplay.textContent = position.toFixed(1);
-    }
-}
-
 // Controller Info Updates
 function updateControllerInfo(data) {
     const connected = data.connected || false;
@@ -965,5 +905,399 @@ function updateSystemStatus(data) {
     // If the data contains telemetry info, update health displays
     if (data.hardware_status || data.type === 'telemetry') {
         updateHealthData(data);
+    }
+}
+
+// ============================================
+// NEMA STEPPER MOTOR CONTROL FUNCTIONS
+// Add these to the end of ui-functions.js
+// ============================================
+
+// NEMA State
+let nemaConfig = {
+    lead_screw_pitch: 8.0,
+    max_travel_cm: 20.0,
+    min_position: 0.0,
+    max_position: 20.0,
+    homing_speed: 400,
+    normal_speed: 1000,
+    max_speed: 1200,
+    acceleration: 800,
+    current_position: 0.0,
+    state: 'DISABLED',
+    homed: false,
+    enabled: false
+};
+
+let nemaSweeping = false;
+
+// Initialize NEMA screen when shown
+function initializeNemaScreen() {
+    console.log('Initializing NEMA screen...');
+    loadNemaConfigFromStorage();
+    updateNemaUIFromConfig();
+    requestNemaStatus();
+    
+    // Start periodic status updates
+    if (!window.nemaStatusInterval) {
+        window.nemaStatusInterval = setInterval(() => {
+            if (currentScreen === 'nema') {
+                requestNemaStatus();
+            }
+        }, 2000);
+    }
+}
+
+// Load NEMA config from localStorage
+function loadNemaConfigFromStorage() {
+    const saved = localStorage.getItem('droidDeckNemaConfig');
+    if (saved) {
+        try {
+            const savedConfig = JSON.parse(saved);
+            Object.assign(nemaConfig, savedConfig);
+            console.log('Loaded NEMA config from storage:', nemaConfig);
+        } catch (e) {
+            console.error('Failed to load NEMA config:', e);
+        }
+    }
+}
+
+// Save NEMA config to localStorage
+function saveNemaConfigToStorage() {
+    localStorage.setItem('droidDeckNemaConfig', JSON.stringify(nemaConfig));
+}
+
+// Update UI elements from config
+function updateNemaUIFromConfig() {
+    // Physical configuration
+    document.getElementById('nemaLeadPitch').value = nemaConfig.lead_screw_pitch;
+    document.getElementById('nemaMaxTravel').value = nemaConfig.max_travel_cm;
+    
+    // Position limits
+    document.getElementById('nemaMinPos').value = nemaConfig.min_position;
+    document.getElementById('nemaMaxPos').value = nemaConfig.max_position;
+    
+    // Speed settings
+    document.getElementById('nemaHomingSpeed').value = nemaConfig.homing_speed;
+    document.getElementById('nemaNormalSpeed').value = nemaConfig.normal_speed;
+    document.getElementById('nemaMaxSpeed').value = nemaConfig.max_speed;
+    document.getElementById('nemaAccel').value = nemaConfig.acceleration;
+    
+    // Update slider range
+    const slider = document.getElementById('nemaPositionSlider');
+    slider.min = Math.round(nemaConfig.min_position * 10);
+    slider.max = Math.round(nemaConfig.max_position * 10);
+    slider.value = Math.round(nemaConfig.current_position * 10);
+    
+    // Update labels
+    document.getElementById('nemaSliderMin').textContent = nemaConfig.min_position.toFixed(1);
+    document.getElementById('nemaSliderMax').textContent = nemaConfig.max_position.toFixed(1);
+    
+    // Update speed displays
+    document.getElementById('nemaHomingSpeedValue').textContent = nemaConfig.homing_speed;
+    document.getElementById('nemaNormalSpeedValue').textContent = nemaConfig.normal_speed;
+    document.getElementById('nemaMaxSpeedValue').textContent = nemaConfig.max_speed;
+    document.getElementById('nemaAccelValue').textContent = nemaConfig.acceleration;
+    
+    updateNemaPositionDisplay();
+}
+
+// Update speed display labels (called on input)
+function updateNemaSpeedDisplay(elementId, value) {
+    document.getElementById(elementId).textContent = value;
+}
+
+// Update position display
+function updateNemaPositionDisplay() {
+    const slider = document.getElementById('nemaPositionSlider');
+    const position = (slider.value / 10).toFixed(1);
+    document.getElementById('nemaPositionDisplay').textContent = position + ' cm';
+}
+
+// Update NEMA config value
+function updateNemaConfig(key, value) {
+    nemaConfig[key] = parseFloat(value);
+    saveNemaConfigToStorage();
+    console.log(`NEMA ${key} updated to ${value}`);
+}
+
+// Update position limits
+function updateNemaPositionLimits() {
+    const minPos = parseFloat(document.getElementById('nemaMinPos').value);
+    const maxPos = parseFloat(document.getElementById('nemaMaxPos').value);
+    
+    if (minPos >= maxPos) {
+        showToast('Min position must be less than max position', 'error');
+        // Reset to previous values
+        document.getElementById('nemaMinPos').value = nemaConfig.min_position;
+        document.getElementById('nemaMaxPos').value = nemaConfig.max_position;
+        return;
+    }
+    
+    nemaConfig.min_position = minPos;
+    nemaConfig.max_position = maxPos;
+    
+    // Update slider
+    const slider = document.getElementById('nemaPositionSlider');
+    slider.min = Math.round(minPos * 10);
+    slider.max = Math.round(maxPos * 10);
+    
+    // Clamp current value if needed
+    if (slider.value < slider.min) slider.value = slider.min;
+    if (slider.value > slider.max) slider.value = slider.max;
+    
+    // Update labels
+    document.getElementById('nemaSliderMin').textContent = minPos.toFixed(1);
+    document.getElementById('nemaSliderMax').textContent = maxPos.toFixed(1);
+    
+    updateNemaPositionDisplay();
+    saveNemaConfigToStorage();
+    showToast('Position limits updated', 'success');
+}
+
+// Send position command to NEMA
+function sendNemaPosition() {
+    const slider = document.getElementById('nemaPositionSlider');
+    const position = slider.value / 10;
+    
+    sendWebSocketMessage({
+        type: 'nema_move_to_position',
+        position_cm: position
+    });
+    
+    console.log(`Moving NEMA to ${position.toFixed(1)}cm`);
+    showToast(`Moving to ${position.toFixed(1)}cm`, 'info');
+}
+
+// Move to specific position
+function moveNemaToPosition(position_cm) {
+    const slider = document.getElementById('nemaPositionSlider');
+    slider.value = Math.round(position_cm * 10);
+    updateNemaPositionDisplay();
+    sendNemaPosition();
+}
+
+// Toggle NEMA enable/disable
+function toggleNemaEnable() {
+    const btn = document.getElementById('nemaEnableBtn');
+    const willEnable = !nemaEnabled;
+    
+    sendWebSocketMessage({
+        type: 'nema_enable',
+        enabled: willEnable
+    });
+    
+    // Optimistic UI update
+    nemaEnabled = willEnable;
+    if (willEnable) {
+        btn.textContent = '🔴 DISABLE';
+        btn.classList.add('btn-danger');
+        btn.classList.remove('btn-success');
+    } else {
+        btn.textContent = '⚡ ENABLE';
+        btn.classList.remove('btn-danger');
+        btn.classList.add('btn-success');
+    }
+    
+    console.log(`NEMA motor ${willEnable ? 'enabled' : 'disabled'}`);
+}
+
+// Home NEMA stepper
+function homeNema() {
+    sendWebSocketMessage({ type: 'nema_home' });
+    showToast('Homing NEMA stepper...', 'info');
+    console.log('Homing NEMA...');
+}
+
+// Toggle sweep test
+function toggleNemaSweep() {
+    const btn = document.getElementById('nemaSweepBtn');
+    
+    if (nemaSweeping) {
+        // Stop sweep
+        sendWebSocketMessage({ type: 'nema_stop_sweep' });
+        btn.textContent = '▶️ TEST SWEEP';
+        btn.classList.remove('btn-warning-active');
+        nemaSweeping = false;
+        console.log('Stopping NEMA sweep');
+    } else {
+        // Start sweep
+        sendWebSocketMessage({
+            type: 'nema_start_sweep',
+            min_cm: nemaConfig.min_position,
+            max_cm: nemaConfig.max_position,
+            normal_speed: nemaConfig.normal_speed,
+            acceleration: nemaConfig.acceleration
+        });
+        btn.textContent = '⏹️ STOP SWEEP';
+        btn.classList.add('btn-warning-active');
+        nemaSweeping = true;
+        showToast(`Sweep: ${nemaConfig.min_position}cm ↔ ${nemaConfig.max_position}cm`, 'info');
+        console.log('Starting NEMA sweep');
+    }
+}
+
+// Stop NEMA
+function stopNema() {
+    sendWebSocketMessage({ type: 'nema_stop_sweep' });
+    sendWebSocketMessage({ type: 'emergency_stop' });
+    
+    // Reset UI
+    nemaSweeping = false;
+    const sweepBtn = document.getElementById('nemaSweepBtn');
+    sweepBtn.textContent = '▶️ TEST SWEEP';
+    sweepBtn.classList.remove('btn-warning-active');
+    
+    showToast('NEMA stopped', 'warning');
+    console.log('NEMA emergency stop');
+}
+
+// Save NEMA configuration to backend
+function saveNemaConfig() {
+    sendWebSocketMessage({
+        type: 'nema_config_update',
+        config: {
+            lead_screw_pitch: nemaConfig.lead_screw_pitch,
+            max_travel_cm: nemaConfig.max_travel_cm,
+            min_position: nemaConfig.min_position,
+            max_position: nemaConfig.max_position,
+            homing_speed: nemaConfig.homing_speed,
+            normal_speed: nemaConfig.normal_speed,
+            max_speed: nemaConfig.max_speed,
+            acceleration: nemaConfig.acceleration
+        }
+    });
+    
+    saveNemaConfigToStorage();
+    showToast('NEMA configuration saved', 'success');
+    console.log('NEMA config saved:', nemaConfig);
+}
+
+// Reset NEMA config to defaults
+function resetNemaConfig() {
+    if (!confirm('Reset NEMA configuration to defaults?')) return;
+    
+    nemaConfig = {
+        lead_screw_pitch: 8.0,
+        max_travel_cm: 20.0,
+        min_position: 0.0,
+        max_position: 20.0,
+        homing_speed: 400,
+        normal_speed: 1000,
+        max_speed: 1200,
+        acceleration: 800,
+        current_position: 0.0,
+        state: 'DISABLED',
+        homed: false,
+        enabled: false
+    };
+    
+    updateNemaUIFromConfig();
+    saveNemaConfig();
+    showToast('NEMA configuration reset', 'success');
+    console.log('NEMA config reset to defaults');
+}
+
+// Request NEMA status
+function requestNemaStatus() {
+    sendWebSocketMessage({ type: 'nema_get_status' });
+}
+
+// Update NEMA status from backend message
+function updateNemaStatus(data) {
+    if (!data.status) return;
+    
+    const status = data.status;
+    
+    // Update state
+    nemaConfig.state = status.state || 'UNKNOWN';
+    nemaConfig.homed = status.homed || false;
+    nemaConfig.enabled = status.enabled || false;
+    nemaConfig.current_position = status.position_cm || 0;
+    
+    // Update UI
+    const stateEl = document.getElementById('nemaState');
+    if (stateEl) {
+        stateEl.textContent = nemaConfig.state;
+        stateEl.className = `status-value status-${nemaConfig.state.toLowerCase()}`;
+    }
+    
+    const posEl = document.getElementById('nemaCurrentPos');
+    if (posEl) {
+        posEl.textContent = nemaConfig.current_position.toFixed(1) + ' cm';
+    }
+    
+    const homedEl = document.getElementById('nemaHomedIndicator');
+    if (homedEl) {
+        homedEl.textContent = nemaConfig.homed ? '✅' : '❌';
+    }
+    
+    const enabledEl = document.getElementById('nemaEnabledIndicator');
+    if (enabledEl) {
+        enabledEl.textContent = nemaConfig.enabled ? '✅' : '❌';
+    }
+    
+    // Update slider without triggering change event
+    const slider = document.getElementById('nemaPositionSlider');
+    if (slider) {
+        const oldValue = slider.value;
+        slider.value = Math.round(nemaConfig.current_position * 10);
+        
+        // Only update display if position changed
+        if (oldValue !== slider.value) {
+            updateNemaPositionDisplay();
+        }
+    }
+    
+    // Update enable button state
+    nemaEnabled = nemaConfig.enabled;
+    const enableBtn = document.getElementById('nemaEnableBtn');
+    if (enableBtn) {
+        if (nemaEnabled) {
+            enableBtn.textContent = '🔴 DISABLE';
+            enableBtn.classList.add('btn-danger');
+            enableBtn.classList.remove('btn-success');
+        } else {
+            enableBtn.textContent = '⚡ ENABLE';
+            enableBtn.classList.remove('btn-danger');
+            enableBtn.classList.add('btn-success');
+        }
+    }
+}
+
+// Handle NEMA position update
+function handleNemaPositionUpdate(data) {
+    nemaConfig.current_position = data.position_cm;
+    updateNemaStatus({ status: nemaConfig });
+}
+
+// Handle sweep status
+function handleNemaSweepStatus(data) {
+    nemaSweeping = data.sweeping || false;
+    const btn = document.getElementById('nemaSweepBtn');
+    
+    if (btn) {
+        if (nemaSweeping) {
+            btn.textContent = '⏹️ STOP SWEEP';
+            btn.classList.add('btn-warning-active');
+        } else {
+            btn.textContent = '▶️ TEST SWEEP';
+            btn.classList.remove('btn-warning-active');
+        }
+    }
+}
+
+// Cleanup when leaving NEMA screen
+function cleanupNemaScreen() {
+    if (window.nemaStatusInterval) {
+        clearInterval(window.nemaStatusInterval);
+        window.nemaStatusInterval = null;
+        console.log('NEMA status interval cleared');
+    }
+    
+    // Stop any active sweep
+    if (nemaSweeping) {
+        sendWebSocketMessage({ type: 'nema_stop_sweep' });
+        nemaSweeping = false;
     }
 }

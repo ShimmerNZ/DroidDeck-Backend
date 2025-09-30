@@ -1688,3 +1688,328 @@ body::before {
 .scene-list-item.selected.playing {
     background: linear-gradient(90deg, var(--accent-gradient), rgba(0, 255, 136, 0.3));
 }
+
+/* NEMA Screen Styles - Add to styles.css */
+/* Uses existing design system - glass cards, buttons, and variables */
+
+.nema-container {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+/* Use existing glass-card styling, just add specific overrides */
+.nema-config-panel,
+.nema-control-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+/* Configuration sections use existing surface styling */
+.config-section {
+    padding: 1.5rem;
+    background: var(--surface);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+}
+
+.config-section-title {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--accent-primary);
+    margin-bottom: 1rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.form-group label {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+/* Use existing setting-input styling */
+.form-input {
+    padding: 0.75rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    transition: all 0.3s;
+}
+
+.form-input:focus {
+    outline: none;
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.1);
+}
+
+/* Range sliders with existing theme colors */
+.form-range {
+    width: 100%;
+    height: 6px;
+    background: var(--surface);
+    border-radius: 3px;
+    outline: none;
+    -webkit-appearance: none;
+}
+
+.form-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    background: var(--accent-gradient);
+    border-radius: 50%;
+    cursor: pointer;
+    box-shadow: var(--shadow-md);
+    transition: transform 0.2s;
+}
+
+.form-range::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    background: var(--accent-gradient);
+    border-radius: 50%;
+    cursor: pointer;
+    border: none;
+    box-shadow: var(--shadow-md);
+}
+
+.form-range:hover::-webkit-slider-thumb,
+.form-range:hover::-moz-range-thumb {
+    transform: scale(1.2);
+}
+
+/* NEMA Status Display */
+.nema-status-display {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    padding: 1.5rem;
+    background: var(--surface);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+}
+
+.status-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem;
+    background: var(--bg-tertiary);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+}
+
+.status-label {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.status-value {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-family: 'Courier New', monospace;
+}
+
+/* Status color coding using existing variables */
+.status-value.status-moving { color: var(--info); }
+.status-value.status-idle { color: var(--success); }
+.status-value.status-homing { color: var(--warning); }
+.status-value.status-disabled { color: var(--text-muted); }
+.status-value.status-error { color: var(--error); }
+
+.status-indicator {
+    font-size: 1.125rem;
+}
+
+/* Position Control */
+.nema-position-control {
+    padding: 2rem 1.5rem;
+    background: var(--surface);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+}
+
+.position-display-large {
+    font-size: 3rem;
+    font-weight: 700;
+    text-align: center;
+    color: var(--accent-primary);
+    font-family: 'Courier New', monospace;
+    margin-bottom: 1.5rem;
+    text-shadow: 0 0 20px rgba(0, 212, 255, 0.4);
+}
+
+.control-label {
+    display: block;
+    text-align: center;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    margin-bottom: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.position-slider-container {
+    padding: 0 1.5rem;
+}
+
+.nema-position-slider {
+    width: 100%;
+    height: 8px;
+    background: linear-gradient(to right, 
+        rgba(255, 68, 68, 0.2) 0%, 
+        rgba(0, 212, 255, 0.2) 50%, 
+        rgba(255, 68, 68, 0.2) 100%);
+    border-radius: 4px;
+    outline: none;
+    -webkit-appearance: none;
+}
+
+.nema-position-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 24px;
+    height: 24px;
+    background: var(--accent-gradient);
+    border-radius: 50%;
+    cursor: pointer;
+    box-shadow: var(--shadow-glow);
+    border: 2px solid var(--text-primary);
+    transition: transform 0.2s;
+}
+
+.nema-position-slider::-moz-range-thumb {
+    width: 24px;
+    height: 24px;
+    background: var(--accent-gradient);
+    border-radius: 50%;
+    cursor: pointer;
+    box-shadow: var(--shadow-glow);
+    border: 2px solid var(--text-primary);
+}
+
+.nema-position-slider:active::-webkit-slider-thumb,
+.nema-position-slider:active::-moz-range-thumb {
+    transform: scale(1.2);
+}
+
+.slider-labels {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 0.75rem;
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+    font-family: 'Courier New', monospace;
+    font-weight: 600;
+}
+
+/* Control Buttons - use existing btn classes */
+.nema-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-top: 1.5rem;
+}
+
+/* Override for larger NEMA control buttons */
+.nema-controls .btn {
+    padding: 1.25rem;
+    font-size: 1rem;
+    min-height: 70px;
+}
+
+/* Warning state for sweep button */
+.btn-warning-active {
+    background: linear-gradient(135deg, var(--warning), #cc8800) !important;
+    animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+    0%, 100% {
+        box-shadow: 0 0 15px rgba(255, 170, 0, 0.4);
+    }
+    50% {
+        box-shadow: 0 0 30px rgba(255, 170, 0, 0.6);
+    }
+}
+
+/* Quick Positions */
+.quick-positions {
+    margin-top: 1.5rem;
+    padding: 1.5rem;
+    background: var(--surface);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+}
+
+.quick-positions h4 {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    margin-bottom: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.quick-pos-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 0.5rem;
+}
+
+.quick-pos-grid .btn-small {
+    padding: 0.75rem 0.5rem;
+    font-size: 0.75rem;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1024px) {
+    .nema-container {
+        grid-template-columns: 1fr;
+        gap: 1.5rem;
+    }
+    
+    .form-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    .quick-pos-grid {
+        grid-template-columns: repeat(3, 1fr);
+    }
+}
+
+@media (max-width: 768px) {
+    .nema-status-display {
+        grid-template-columns: 1fr;
+    }
+    
+    .nema-controls {
+        grid-template-columns: 1fr;
+    }
+    
+    .position-display-large {
+        font-size: 2.5rem;
+    }
+    
+    .quick-pos-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}

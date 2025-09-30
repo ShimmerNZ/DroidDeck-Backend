@@ -154,6 +154,13 @@ function handleBackendMessage(data) {
             showToast('Scene deleted successfully', 'success');
             loadScenes();
             break;
+        case 'controller_config':
+            if (data.config) {
+                controllerMappings = data.config;
+                updateMappingList();
+                showToast(`Loaded ${Object.keys(data.config).length} controller mappings`, 'success');
+            }
+            break;
         default:
             console.log('Unhandled message type:', data.type);
     }

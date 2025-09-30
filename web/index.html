@@ -185,72 +185,164 @@
 
         <!-- NEMA Screen -->
         <div id="nemaScreen" class="screen">
-            <div class="glass-card">
-                <div class="card-title">NEMA Stepper Motor Control</div>
-                <div class="nema-controls">
-                    <div class="nema-panel">
-                        <h4>Status & Position</h4>
-                        <div class="nema-status">
-                            <div class="nema-indicator" id="nemaIndicator"></div>
-                            <div>
-                                <div><strong id="nemaState">Unknown</strong></div>
-                                <div id="nemaInfo">Not connected</div>
+            <div class="nema-container">
+                <!-- Left Panel: Configuration -->
+                <div class="glass-card nema-config-panel">
+                    <div class="card-title">NEMA Configuration</div>
+                    
+                    <!-- Physical Configuration -->
+                    <div class="config-section">
+                        <h3 class="config-section-title">Physical Setup</h3>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Lead Screw Pitch (mm/rev):</label>
+                                <input type="number" id="nemaLeadPitch" class="form-input" 
+                                       value="8.0" min="1" max="20" step="0.5"
+                                       onchange="updateNemaConfig('lead_screw_pitch', this.value)">
+                            </div>
+                            <div class="form-group">
+                                <label>Max Travel (cm):</label>
+                                <input type="number" id="nemaMaxTravel" class="form-input" 
+                                       value="20.0" min="5" max="100" step="1"
+                                       onchange="updateNemaConfig('max_travel_cm', this.value)">
                             </div>
                         </div>
-                        <div class="position-display">
-                            <div class="position-value" id="nemaPosition">0.0</div>
-                            <span class="position-unit">cm</span>
+                    </div>
+
+                    <!-- Position Limits -->
+                    <div class="config-section">
+                        <h3 class="config-section-title">Position Limits</h3>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Min Position (cm):</label>
+                                <input type="number" id="nemaMinPos" class="form-input" 
+                                       value="0.0" min="0" step="0.1"
+                                       onchange="updateNemaPositionLimits()">
+                            </div>
+                            <div class="form-group">
+                                <label>Max Position (cm):</label>
+                                <input type="number" id="nemaMaxPos" class="form-input" 
+                                       value="20.0" min="0" step="0.1"
+                                       onchange="updateNemaPositionLimits()">
+                            </div>
                         </div>
                     </div>
 
-                    <div class="nema-panel">
-                        <h4>Movement Control</h4>
-                        <div class="control-group">
-                            <label class="control-label">
-                                <span>Target Position (cm):</span>
-                                <input type="number" id="nemaTargetPos" class="setting-input" min="0" max="30" step="0.1" value="0">
-                            </label>
+                    <!-- Speed Configuration -->
+                    <div class="config-section">
+                        <h3 class="config-section-title">Speed & Acceleration</h3>
+                        
+                        <div class="form-group">
+                            <label>Homing Speed: <span id="nemaHomingSpeedValue">400</span> steps/s</label>
+                            <input type="range" id="nemaHomingSpeed" class="form-range"
+                                   min="100" max="1000" value="400" step="50"
+                                   oninput="updateNemaSpeedDisplay('nemaHomingSpeedValue', this.value)"
+                                   onchange="updateNemaConfig('homing_speed', this.value)">
                         </div>
-                        <div class="action-grid">
-                            <button class="btn" onclick="moveNemaToPosition()">Move To</button>
-                            <button class="btn btn-secondary" onclick="homeNema()">Home</button>
+
+                        <div class="form-group">
+                            <label>Normal Speed: <span id="nemaNormalSpeedValue">1000</span> steps/s</label>
+                            <input type="range" id="nemaNormalSpeed" class="form-range"
+                                   min="200" max="2000" value="1000" step="50"
+                                   oninput="updateNemaSpeedDisplay('nemaNormalSpeedValue', this.value)"
+                                   onchange="updateNemaConfig('normal_speed', this.value)">
+                        </div>
+
+                        <div class="form-group">
+                            <label>Max Speed: <span id="nemaMaxSpeedValue">1200</span> steps/s</label>
+                            <input type="range" id="nemaMaxSpeed" class="form-range"
+                                   min="500" max="3000" value="1200" step="100"
+                                   oninput="updateNemaSpeedDisplay('nemaMaxSpeedValue', this.value)"
+                                   onchange="updateNemaConfig('max_speed', this.value)">
+                        </div>
+
+                        <div class="form-group">
+                            <label>Acceleration: <span id="nemaAccelValue">800</span> steps/s²</label>
+                            <input type="range" id="nemaAccel" class="form-range"
+                                   min="100" max="2000" value="800" step="50"
+                                   oninput="updateNemaSpeedDisplay('nemaAccelValue', this.value)"
+                                   onchange="updateNemaConfig('acceleration', this.value)">
                         </div>
                     </div>
 
-                    <div class="nema-panel">
-                        <h4>Sweep Control</h4>
-                        <div class="control-group">
-                            <label class="control-label">
-                                <span>Min Position (cm):</span>
-                                <input type="number" id="nemaSweepMin" class="setting-input" value="0" step="0.1">
-                            </label>
-                            <label class="control-label">
-                                <span>Max Position (cm):</span>
-                                <input type="number" id="nemaSweepMax" class="setting-input" value="20" step="0.1">
-                            </label>
+                    <!-- Save Configuration -->
+                    <div class="action-grid">
+                        <button class="btn" onclick="saveNemaConfig()">💾 Save Config</button>
+                        <button class="btn btn-secondary" onclick="resetNemaConfig()">↺ Reset to Defaults</button>
+                    </div>
+                </div>
+
+                <!-- Right Panel: Control -->
+                <div class="glass-card nema-control-panel">
+                    <div class="card-title">NEMA Control</div>
+
+                    <!-- Status Display -->
+                    <div class="nema-status-display">
+                        <div class="status-item">
+                            <span class="status-label">State:</span>
+                            <span class="status-value" id="nemaState">Unknown</span>
                         </div>
-                        <div class="action-grid">
-                            <button class="btn" onclick="startNemaSweep()">Start Sweep</button>
-                            <button class="btn btn-danger" onclick="stopNemaSweep()">Stop Sweep</button>
+                        <div class="status-item">
+                            <span class="status-label">Position:</span>
+                            <span class="status-value" id="nemaCurrentPos">--</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Homed:</span>
+                            <span class="status-indicator" id="nemaHomedIndicator">❌</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Enabled:</span>
+                            <span class="status-indicator" id="nemaEnabledIndicator">❌</span>
                         </div>
                     </div>
 
-                    <div class="nema-panel">
-                        <h4>Configuration</h4>
-                        <div class="control-group">
-                            <label class="control-label">
-                                <span>Speed (steps/sec):</span>
-                                <input type="number" id="nemaSpeed" class="setting-input" value="1000" min="100" max="5000" step="100">
-                            </label>
-                            <label class="control-label">
-                                <span>Acceleration:</span>
-                                <input type="number" id="nemaAccel" class="setting-input" value="800" min="100" max="3000" step="100">
-                            </label>
+                    <!-- Position Control -->
+                    <div class="nema-position-control">
+                        <div class="position-display-large" id="nemaPositionDisplay">
+                            0.0 cm
                         </div>
-                        <div class="action-grid">
-                            <button class="btn btn-secondary" onclick="updateNemaConfig()">Update Config</button>
-                            <button class="btn btn-secondary" onclick="enableNema()">Enable Motor</button>
-                            <button class="btn btn-danger" onclick="disableNema()">Disable Motor</button>
+
+                        <label class="control-label">Target Position</label>
+                        <div class="position-slider-container">
+                            <input type="range" id="nemaPositionSlider" class="nema-position-slider"
+                                   min="0" max="200" value="0" step="1"
+                                   oninput="updateNemaPositionDisplay()"
+                                   onchange="sendNemaPosition()">
+                            <div class="slider-labels">
+                                <span id="nemaSliderMin">0.0</span>
+                                <span id="nemaSliderMax">20.0</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Control Buttons -->
+                    <div class="nema-controls">
+                        <button class="btn btn-success" onclick="toggleNemaEnable()" id="nemaEnableBtn">
+                            ⚡ ENABLE
+                        </button>
+                        
+                        <button class="btn" onclick="homeNema()">
+                            🏠 HOME
+                        </button>
+
+                        <button class="btn" onclick="toggleNemaSweep()" id="nemaSweepBtn">
+                            ▶️ TEST SWEEP
+                        </button>
+
+                        <button class="btn btn-danger" onclick="stopNema()">
+                            ⏹️ STOP
+                        </button>
+                    </div>
+
+                    <!-- Quick Position Buttons -->
+                    <div class="quick-positions">
+                        <h4>Quick Positions</h4>
+                        <div class="quick-pos-grid">
+                            <button class="btn btn-small" onclick="moveNemaToPosition(0)">Min (0cm)</button>
+                            <button class="btn btn-small" onclick="moveNemaToPosition(5)">5cm</button>
+                            <button class="btn btn-small" onclick="moveNemaToPosition(10)">10cm</button>
+                            <button class="btn btn-small" onclick="moveNemaToPosition(15)">15cm</button>
+                            <button class="btn btn-small" onclick="moveNemaToPosition(20)">Max (20cm)</button>
                         </div>
                     </div>
                 </div>
