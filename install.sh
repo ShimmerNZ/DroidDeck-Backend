@@ -156,9 +156,6 @@ install_python_deps() {
     # Optional: Computer vision
     pip install "opencv-python==4.5.5.64" --no-cache-dir || print_warning "OpenCV install skipped"
     
-    # Optional: Bluetooth
-    pip install "pybluez>=0.23" || print_warning "PyBluez install skipped (optional)"
-    
     print_success "Python dependencies installed"
 }
 
