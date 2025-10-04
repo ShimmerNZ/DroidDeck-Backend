@@ -301,18 +301,28 @@ Complete hardware configuration with stepper motor settings:
 
 ## Installation & Setup
 
+sudo raspi-config
+>Interfaces >Enable SSH
+>Interfaces >Enable SPI
+>Interfaces >Enable I2C
+
+Finish
+
+sudo apt update && sudo apt install -y git
+
+
 ### **Quick Start Installation**
 ```bash
 # 1. Clone repository
-git clone <repository-url> ~/wall-e-robot
-cd ~/wall-e-robot
+git clone https://github.com/ShimmerNZ/DroidDeck-Backend.git
+cd DroidDeck
 
 # 2. Run automated installer
 chmod +x install.sh
 ./install.sh
 
 # 3. Start the system
-./start_walle.sh
+./DroidDeck.sh
 ```
 
 ### **Installation Features**
