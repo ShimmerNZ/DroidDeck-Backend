@@ -137,6 +137,7 @@ install_python_deps() {
     
     # Hardware control
     pip install \
+        gpiozero \
         rpi-lgpio \
         adafruit-circuitpython-ads1x15 \
         adafruit-blinka \
