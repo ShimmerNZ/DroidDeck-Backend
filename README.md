@@ -12,8 +12,9 @@
 6. [Software Architecture](#software-architecture)
 7. [Configuration Files](#configuration-files)
 8. [Installation & Setup](#installation--setup)
-9. [API Documentation](#api-documentation)
-10. [Troubleshooting](#troubleshooting)
+9. [Bluetooth Controller Setup](#bluetooth-controller-setup)
+10. [API Documentation](#api-documentation)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -77,6 +78,16 @@ WALL-E is a comprehensive robotics platform featuring advanced motion control, s
   - Dynamic scene loading and saving
   - Category-based organization with emoji support
 
+#### **6. Bluetooth Controller Support**
+- **File**: `modules/bluetooth_controller.py`
+- **Features**:
+  - PS4, Xbox, and generic gamepad support via pygame
+  - Automatic controller detection and connection
+  - Real-time input streaming to frontend
+  - Calibration system with persistent storage
+  - Button mapping and axis configuration
+  - Auto-reconnection on disconnect
+
 ---
 
 ## Hardware Configuration
@@ -113,6 +124,7 @@ WALL-E is a comprehensive robotics platform featuring advanced motion control, s
 - **ESP32-CAM**: WiFi camera with configurable settings and streaming
 - **Native Audio**: Built-in Raspberry Pi audio with pygame
 - **SMB Network Sharing**: Easy file access and management
+- **Bluetooth**: Controller support for PS4/Xbox/generic gamepads
 
 ---
 
@@ -230,6 +242,7 @@ WALLEBackend (main.py)
 ├── ConfigurationManager (config_manager.py)
 ├── SharedSerialPortManager (modules/shared_serial_manager.py)
 ├── NEMA23Controller (modules/nema23_controller.py)
+├── BluetoothController (modules/bluetooth_controller.py)
 ├── SceneEngine (scene_engine.py)
 ├── SafeTelemetrySystem (telemetry monitoring)
 ├── NativeAudioController (audio playback)
@@ -297,6 +310,12 @@ Complete hardware configuration with stepper motor settings:
 - **Stream Control**: Manual start/stop, bandwidth testing
 - **Multi-client Support**: MJPEG rebroadcasting for multiple viewers
 
+### **controller_config.json**
+- **Button Mappings**: Configurable button-to-action assignments
+- **Axis Calibration**: Per-axis calibration data (min, max, center, deadzone)
+- **Controller Settings**: Sensitivity, inversion, mapping profiles
+- **Auto-saved**: Calibration persists across restarts
+
 ---
 
 ## Installation & Setup
@@ -332,6 +351,7 @@ chmod +x install.sh
 - **Audio system** with TTS samples and testing
 - **GPIO/I2C interface** enabling and configuration
 - **Systemd service** creation for auto-start
+- **Bluetooth support** with pygame for controllers
 
 ### **Manual Configuration Steps**
 
@@ -357,6 +377,235 @@ python main.py --test-mode
 
 ---
 
+## Bluetooth Controller Setup
+
+The backend supports Bluetooth game controllers (PS4, Xbox, generic gamepads) for robot control.
+
+### **Pairing a Bluetooth Controller**
+
+#### **Step 1: Put Controller in Pairing Mode**
+
+- **PS4 DualShock 4**: Hold **Share + PS button** until light bar flashes white rapidly
+- **Xbox One**: Hold **pairing button** (small button on top) until Xbox button flashes rapidly
+- **Generic Bluetooth**: Refer to controller manual for pairing mode
+
+#### **Step 2: Pair via Raspberry Pi Terminal**
+
+SSH into your Raspberry Pi or use direct terminal access:
+
+```bash
+# Start Bluetooth control utility
+bluetoothctl
+
+# Enable scanning
+scan on
+
+# Wait for your controller to appear in scan results
+# Example output: [NEW] Device XX:XX:XX:XX:XX:XX Wireless Controller
+# Note the MAC address (XX:XX:XX:XX:XX:XX)
+
+# Pair with the controller (replace with your actual MAC address)
+pair XX:XX:XX:XX:XX:XX
+
+# If prompted for PIN, try: 0000 or 1234
+
+# Trust the device (enables auto-connect on future boots)
+trust XX:XX:XX:XX:XX:XX
+
+# Connect to the controller
+connect XX:XX:XX:XX:XX:XX
+
+# Turn off scanning
+scan off
+
+# Exit bluetoothctl
+exit
+```
+
+#### **Step 3: Verify Controller Detection**
+
+Test if the controller is recognized by pygame:
+
+```bash
+python3 << 'EOF'
+import pygame
+pygame.init()
+pygame.joystick.init()
+count = pygame.joystick.get_count()
+print(f"Controllers found: {count}")
+
+if count > 0:
+    controller = pygame.joystick.Joystick(0)
+    controller.init()
+    print(f"Controller name: {controller.get_name()}")
+    print(f"Axes: {controller.get_numaxes()}")
+    print(f"Buttons: {controller.get_numbuttons()}")
+    print(f"Hats (D-pads): {controller.get_numhats()}")
+else:
+    print("No controllers detected")
+EOF
+```
+
+Expected output:
+```
+Controllers found: 1
+Controller name: Wireless Controller
+Axes: 6
+Buttons: 14
+Hats (D-pads): 1
+```
+
+#### **Step 4: Restart Backend Service**
+
+```bash
+# If running as systemd service
+sudo systemctl restart walle-backend
+
+# Or if running manually
+./DroidDeck.sh
+```
+
+The backend will automatically detect and initialize the controller on startup.
+
+### **Controller Calibration**
+
+After pairing, use the frontend (DroidDeck-GUI) to calibrate:
+
+1. Launch the GUI application
+2. Navigate to **Controller Screen**
+3. Click **"Start Calibration Wizard"**
+4. Follow on-screen instructions:
+   - Center all sticks and triggers
+   - Move left stick to all extremes (up, down, left, right)
+   - Move right stick to all extremes
+   - Pull both triggers fully
+   - Test all buttons
+5. **Save Calibration** - data persists in `controller_config.json`
+
+The backend broadcasts real-time controller data during calibration for live feedback.
+
+### **Troubleshooting Controller Connection**
+
+#### **Controller Not Detected in Scan**
+
+```bash
+# Ensure Bluetooth is enabled and running
+sudo systemctl status bluetooth
+
+# If not running, start it
+sudo systemctl start bluetooth
+
+# Make controller discoverable again
+# For PS4: Hold Share + PS until rapid white flash
+# For Xbox: Hold pairing button until rapid flash
+
+# Try scanning again
+bluetoothctl
+scan on
+```
+
+#### **Pairing Fails**
+
+```bash
+# Remove old pairing and try again
+bluetoothctl
+remove XX:XX:XX:XX:XX:XX
+scan on
+# Wait for device to appear
+pair XX:XX:XX:XX:XX:XX
+```
+
+#### **Controller Pairs but Doesn't Connect**
+
+```bash
+# Check if device is trusted
+bluetoothctl
+info XX:XX:XX:XX:XX:XX
+# Should show "Trusted: yes"
+
+# If not trusted
+trust XX:XX:XX:XX:XX:XX
+
+# Try connecting manually
+connect XX:XX:XX:XX:XX:XX
+```
+
+#### **Controller Connects but No Input**
+
+```bash
+# Check if pygame detects it (should show count > 0)
+python3 -c "import pygame; pygame.init(); pygame.joystick.init(); print(f'Count: {pygame.joystick.get_count()}')"
+
+# Check backend logs for controller initialization
+tail -f logs/walle_enhanced_backend.log | grep -i controller
+
+# Restart backend to re-initialize
+sudo systemctl restart walle-backend
+```
+
+#### **Controller Keeps Disconnecting**
+
+```bash
+# Increase Bluetooth power management timeout
+sudo nano /etc/bluetooth/main.conf
+
+# Add or modify under [General] section:
+[General]
+IdleTimeout = 0
+FastConnectable = true
+AutoEnable = true
+
+# Save and restart Bluetooth
+sudo systemctl restart bluetooth
+
+# Reconnect controller
+bluetoothctl connect XX:XX:XX:XX:XX:XX
+```
+
+#### **Multiple Controllers / Wrong Controller Selected**
+
+```bash
+# List all paired Bluetooth devices
+bluetoothctl devices
+
+# Remove unwanted controllers
+bluetoothctl remove XX:XX:XX:XX:XX:XX
+
+# Backend automatically uses first detected controller (index 0)
+# Check logs to see which controller is active
+tail -f logs/walle_enhanced_backend.log
+```
+
+### **Auto-Connect on Boot**
+
+For the controller to auto-connect when the Pi boots:
+
+```bash
+# Ensure controller is trusted
+bluetoothctl trust XX:XX:XX:XX:XX:XX
+
+# Enable Bluetooth auto-start
+sudo systemctl enable bluetooth
+
+# Backend service will auto-detect on startup if running as systemd service
+```
+
+### **Testing Controller Without Frontend**
+
+You can test controller functionality directly via WebSocket:
+
+```bash
+# Use wscat or similar WebSocket client
+wscat -c ws://YOUR_PI_IP:8766
+
+# Send command to get controller status
+{"type": "get_controller_status"}
+
+# Response will show controller state, axes, buttons
+```
+
+---
+
 ## API Documentation
 
 ### **WebSocket API** (`ws://[IP]:8766`)
@@ -377,6 +626,29 @@ python main.py --test-mode
 {
   "type": "stepper",
   "command": "get_status"
+}
+```
+
+#### **Controller Management**
+```json
+{
+  "type": "get_controller_status"
+}
+
+{
+  "type": "save_calibration",
+  "calibration": {
+    "left_stick_x": {"min": -32768, "max": 32767, "center": 0, "deadzone": 0.1},
+    "left_stick_y": {"min": -32768, "max": 32767, "center": 0, "deadzone": 0.1}
+  }
+}
+
+{
+  "type": "start_calibration_mode"
+}
+
+{
+  "type": "stop_calibration_mode"
 }
 ```
 
@@ -445,6 +717,10 @@ gpio readall
 # Test limit switch manually
 ```
 
+### **Bluetooth Controller Issues**
+
+See detailed troubleshooting in [Bluetooth Controller Setup](#bluetooth-controller-setup) section above.
+
 ### **Configuration Issues**
 
 #### **Hot-Reload Not Working**
@@ -480,6 +756,10 @@ netstat -tulpn | grep -E "(8766|8081)"
 # Python environment verification
 python --version  # Should be 3.9.13
 source venv/bin/activate && pip list
+
+# Bluetooth status
+systemctl status bluetooth
+bluetoothctl devices
 ```
 
 ---
@@ -495,6 +775,7 @@ source venv/bin/activate && pip list
 - Audio system with pygame integration
 - Telemetry monitoring with ADS1115 ADC
 - GPIO compatibility layer for different Pi models
+- **Bluetooth controller support** (PS4/Xbox/generic gamepads)
 
 ### **⚠️ In Progress**
 - Sabertooth tank drive integration
@@ -502,7 +783,6 @@ source venv/bin/activate && pip list
 - Web-based configuration interface
 
 ### **❌ Future Enhancements**
-- Bluetooth controller support
 - AI behavior system
 - Voice recognition
 - Advanced computer vision
