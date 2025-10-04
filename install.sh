@@ -55,7 +55,7 @@ install_system_deps() {
         build-essential cmake pkg-config git curl wget \
         python3 python3-pip python3-venv python3-dev \
         i2c-tools python3-smbus minicom \
-        python3-rpi.gpio python3-gpiozero python3-lgpio lgpio-tools \
+        python3-rpi.gpio python3-gpiozero python3-lgpio \
         alsa-utils pulseaudio pulseaudio-utils portaudio19-dev libasound2-dev \
         ffmpeg sox libsox-fmt-all \
         samba samba-common-bin cifs-utils \
@@ -124,16 +124,16 @@ install_python_deps() {
     
     # Core backend
     pip install \
-        websockets>=10.0 \
-        pyserial>=3.5 \
-        psutil>=5.8.0 \
-        pygame>=2.1.0 \
-        requests>=2.25.0 \
-        flask>=2.0.0 \
-        flask-socketio>=5.0.0 \
-        python-engineio>=4.0.0 \
-        python-socketio>=5.0.0 \
-        numpy>=1.21.6
+        "websockets>=10.0" \
+        "pyserial>=3.5" \
+        "psutil>=5.8.0" \
+        "pygame>=2.1.0" \
+        "requests>=2.25.0" \
+        "flask>=2.0.0" \
+        "flask-socketio>=5.0.0" \
+        "python-engineio>=4.0.0" \
+        "python-socketio>=5.0.0" \
+        "numpy>=1.21.6"
     
     # Hardware control
     pip install \
@@ -144,19 +144,19 @@ install_python_deps() {
     
     # Modular backend
     pip install \
-        watchdog>=2.1.0 \
-        jsonschema>=3.2.0 \
-        dataclasses-json>=0.5.0 \
-        python-dateutil>=2.8.0
+        "watchdog>=2.1.0" \
+        "jsonschema>=3.2.0" \
+        "dataclasses-json>=0.5.0" \
+        "python-dateutil>=2.8.0"
     
     # Audio
     pip install pyaudio wave mutagen
     
     # Optional: Computer vision
-    pip install opencv-python==4.5.5.64 --no-cache-dir || print_warning "OpenCV install skipped"
+    pip install "opencv-python==4.5.5.64" --no-cache-dir || print_warning "OpenCV install skipped"
     
     # Optional: Bluetooth
-    pip install pybluez>=0.23 || print_warning "PyBluez install skipped (optional)"
+    pip install "pybluez>=0.23" || print_warning "PyBluez install skipped (optional)"
     
     print_success "Python dependencies installed"
 }
