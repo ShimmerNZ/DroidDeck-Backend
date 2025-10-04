@@ -42,7 +42,7 @@ const char* password = "EVEROCKS2025";
 struct CameraSettings {
   int xclk_freq = 10;        
   framesize_t resolution = FRAMESIZE_VGA;
-  int quality = 63;          // FIXED: Improved quality (was 10, keeping good balance)
+  int quality = 12;          // FIXED: Improved quality (was 10, keeping good balance)
   int brightness = 0;
   int contrast = 0;
   int saturation = 0;
@@ -248,7 +248,7 @@ void handleStream() {
   const unsigned long MIN_HEAP_THRESHOLD = 50000;
   
   // FIXED: Better frame timing for smoother video
-  const unsigned long TARGET_FRAME_INTERVAL = 50; // ~20 FPS (was 66ms/15fps)
+  const unsigned long TARGET_FRAME_INTERVAL = 66; // ~20 FPS (was 66ms/15fps)
   unsigned long last_successful_frame = 0;
   int consecutive_failures = 0;
   const int MAX_CONSECUTIVE_FAILURES = 10; // Increased tolerance
@@ -316,7 +316,7 @@ void handleStream() {
     // FIXED: Improved frame transmission
     if (send_success) {
       size_t bytes_sent = 0;
-      const size_t CHUNK_SIZE = 8192; // Larger chunks for better throughput
+      const size_t CHUNK_SIZE = 4096; // Larger chunks for better throughput
       
       while (bytes_sent < fb->len && send_success && client.connected()) {
         size_t bytes_to_send = min(CHUNK_SIZE, fb->len - bytes_sent);

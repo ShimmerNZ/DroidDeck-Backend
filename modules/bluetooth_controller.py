@@ -419,23 +419,6 @@ class OptimizedBluetoothController:
                         elif hat_x == 1:  # Right
                             await self.send_navigation_command('right')
                         
-                        # Also send to input processor if mapped
-                        if self.controller_input_processor:
-                            for direction, control_name in [('up', 'dpad_up'), ('down', 'dpad_down'), 
-                                                            ('left', 'dpad_left'), ('right', 'dpad_right')]:
-                                value = 1.0 if (
-                                    (direction == 'up' and hat_y == 1) or 
-                                    (direction == 'down' and hat_y == -1) or 
-                                    (direction == 'left' and hat_x == -1) or 
-                                    (direction == 'right' and hat_x == 1)
-                                ) else 0.0
-                                
-                                if value > 0:  # Only send on press, not release
-                                    asyncio.create_task(
-                                        self.controller_input_processor.process_controller_input(
-                                            control_name, value, "dpad"
-                                        )
-                                    )
                 
                 # FIXED: High-frequency D-pad polling for responsiveness
                 await asyncio.sleep(self.dpad_update_rate)

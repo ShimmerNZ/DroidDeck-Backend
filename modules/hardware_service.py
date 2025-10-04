@@ -613,18 +613,15 @@ class HardwareService:
     # ==================== ORIGINAL SERVO CONTROL METHODS (ENHANCED) ====================
     
     async def set_servo_position(self, channel_key: str, position: int, priority: str = "normal") -> bool:
-        """
-        Set servo position with priority
-        
-        Args:
-            channel_key: Servo channel identifier (e.g., "m1_ch5")
-            position: Target position (typically 992-2000)
-            priority: Command priority level
-            
-        Returns:
-            bool: True if command sent successfully
-        """
         try:
+            if hasattr(self, 'backend_reference'):
+                if self.backend_reference.is_track_channel(channel_key):
+                    if self.backend_reference.failsafe_active:
+                        logger.debug(f"Track command blocked by failsafe: {channel_key}")
+                        return False
+                    else:
+                        self.backend_reference.track_last_command_time[channel_key] = time.time()
+            
             maestro_num, channel = self._parse_servo_id(channel_key)
             maestro = self.maestro1 if maestro_num == 1 else self.maestro2
             
@@ -1849,18 +1846,13 @@ class HardwareService:
         except Exception as e:
             logger.error(f"Hardware cleanup error: {e}")
 
+    def set_backend_reference(self, backend):
+        """Set reference to backend for failsafe checking"""
+        self.backend_reference = backend
+
 
 # Factory function for creating hardware service
 def create_hardware_service(config_dict: Dict[str, Any]) -> HardwareService:
-    """
-    Factory function to create enhanced hardware service from configuration
-    
-    Args:
-        config_dict: Hardware configuration dictionary
-        
-    Returns:
-        Enhanced HardwareService instance with batch command support
-    """
     try:
         # Extract hardware config
         hw_config = config_dict.get("hardware", {})
@@ -1901,6 +1893,8 @@ def create_hardware_service(config_dict: Dict[str, Any]) -> HardwareService:
         logger.error(f"Failed to create enhanced hardware service: {e}")
         # Return service with default config
         return HardwareService(HardwareConfig())
+
+
 
 
 # Example usage and demonstration

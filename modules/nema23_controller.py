@@ -541,14 +541,8 @@ class StepperControlInterface:
             return
             
         try:
-            # Get the current event loop
-            loop = asyncio.get_running_loop()
-            
-            # Schedule the coroutine to run in the event loop
-            asyncio.run_coroutine_threadsafe(
-                self.websocket_broadcast_callback(message), 
-                loop
-            )
+            self.websocket_broadcast_callback(message)
+
             
         except RuntimeError:
             # No event loop running, try to create a task directly
@@ -572,22 +566,22 @@ class StepperControlInterface:
     
     def on_position_changed(self, steps: int, cm: float):
         """Handle position change notifications"""
-        if self.websocket_broadcast_callback:
-            self.websocket_broadcast_callback({
-                "type": "stepper_position_changed",
-                "position_steps": steps,
-                "position_cm": round(cm, 2),
-                "timestamp": time.time()
-            })
+        message = {
+            "type": "stepper_position_changed",
+            "position_steps": steps,
+            "position_cm": round(cm, 2),
+            "timestamp": time.time()
+        }
+        self._schedule_broadcast(message)
     
     def on_homing_complete(self, success: bool):
         """Handle homing completion"""
-        if self.websocket_broadcast_callback:
-            self.websocket_broadcast_callback({
-                "type": "stepper_homing_complete",
-                "success": success,
-                "timestamp": time.time()
-            })
+        message = {
+            "type": "stepper_homing_complete",
+            "success": success,
+            "timestamp": time.time()
+        }
+        self._schedule_broadcast(message)
     
     async def handle_command(self, data: dict) -> dict:
         """Handle stepper control commands from WebSocket"""

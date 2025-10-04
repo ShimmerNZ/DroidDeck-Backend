@@ -30,7 +30,6 @@ function initializeSocket() {
         updateConnectionStatus('ws', data.connected);
         if (data.connected) {
             showToast('Backend connected', 'success');
-            requestInitialData();
         } else {
             showToast('Backend disconnected', 'error');
             updateConnectionStatus('system', false);
@@ -73,6 +72,10 @@ function handleBackendMessage(data) {
         case 'scene_list':
             updateScenes(data.scenes);
             break;
+        case 'failsafe_status':
+            handleFailsafeStatus(data);
+            break;
+
         case 'scene_started':
             showToast(`Scene started: ${data.scene_name}`, 'success');
             scenePlayingLocked = true;
@@ -108,11 +111,6 @@ function handleBackendMessage(data) {
         case 'servo_position':
             updateServoPosition(data.channel, data.position);
             break;
-        case 'navigation':
-            if (currentScreen === 'home') {
-                handleNavigationCommand(data.action);
-            }
-            break;
         case 'all_servo_positions':
             updateAllServoPositions(data);
             break;
@@ -143,8 +141,14 @@ function handleBackendMessage(data) {
         case 'error':
             showToast(data.message, 'error');
             break;
+        case 'failsafe_toggle_response':
+            handleFailsafeToggleResponse(data);
+            break;
         case 'audio_files':
             handleAudioFilesResponse(data);
+            break;
+        case 'nema_config':
+            updateNemaConfig(data.config);
             break;
         case 'scene_saved':
             showToast('Scene saved successfully', 'success');
@@ -174,9 +178,39 @@ function requestInitialData() {
         requestControllerInfo();
         getAllServoPositions();
         getNemaStatus();
+        requestNemaConfig();
+
+        sendWebSocketMessage({ type: 'get_failsafe_status' });
+
     }, 500); // 500ms delay
 }
 
+function handleFailsafeToggleResponse(data) {
+    // Remove loading state from button
+    const failsafeBtn = document.getElementById('failsafeBtn') || document.getElementById('failsafeBtnMobile');
+    if (failsafeBtn) {
+        failsafeBtn.classList.remove('loading');
+        failsafeBtn.disabled = false;
+    }
+    
+    // Update global state
+    failsafeActive = data.failsafe_active;
+    updateFailsafeButton(data.failsafe_active);
+    
+    // Show success/error toast
+    if (data.success) {
+        showToast(data.message || 'Failsafe toggled', 'success');
+    } else {
+        showToast(data.message || 'Failsafe toggle failed', 'error');
+    }
+    
+    // Show NEMA error if present
+    if (data.nema && data.nema.error) {
+        showToast(`⚠️ NEMA Motor: ${data.nema.error}`, 'error', 5000);
+    }
+    
+    console.log('Failsafe toggle response:', data);
+}
 
 // Scene Management
 function loadScenes() {
@@ -218,6 +252,8 @@ function exportSceneConfig() {
     URL.revokeObjectURL(url);
     showToast('Scene configuration exported', 'success');
 }
+
+
 
 // Servo Control
 function setServoPosition(channel, position) {
@@ -311,7 +347,6 @@ function updateNemaConfig() {
     showToast('NEMA configuration updated', 'success');
 }
 
-// Find these two functions in socket-handler.js and replace them:
 
 function enableNema() {
     sendWebSocketMessage({
@@ -415,5 +450,98 @@ function updateNemaSweepStatus(data) {
             indicator.classList.remove('moving');
             showToast('NEMA sweep stopped', 'warning');
         }
+    }
+}
+
+function updateNemaConfig(config) {
+    console.log('Received NEMA config from backend:', config);
+    
+    // Update speed and acceleration inputs
+    const speedInput = document.getElementById('nemaSpeed');
+    const accelInput = document.getElementById('nemaAccel');
+    const sweepMinInput = document.getElementById('nemaSweepMin');
+    const sweepMaxInput = document.getElementById('nemaSweepMax');
+    
+    if (speedInput && config.normal_speed !== undefined) {
+        speedInput.value = config.normal_speed;
+    }
+    
+    if (accelInput && config.acceleration !== undefined) {
+        accelInput.value = config.acceleration;
+    }
+    
+    if (sweepMinInput && config.min_position !== undefined) {
+        sweepMinInput.value = config.min_position;
+    }
+    
+    if (sweepMaxInput && config.max_position !== undefined) {
+        sweepMaxInput.value = config.max_position;
+    }
+    
+    console.log('NEMA config UI updated');
+}
+
+function requestNemaConfig() {
+    sendWebSocketMessage({ type: 'get_nema_config' });
+}
+
+// ==================== FAILSAFE SYSTEM ====================
+
+let failsafeActive = true;  // Start assuming failsafe is active
+
+function toggleFailsafe() {
+    const btn = document.getElementById('failsafeBtn') || document.getElementById('failsafeBtnMobile');
+    if (!btn) return;
+    
+    const currentState = failsafeActive;
+    
+    // Set loading state
+    btn.classList.add('loading');
+    btn.disabled = true;
+    
+    // Send toggle command via Socket.IO
+    sendWebSocketMessage({
+        type: 'toggle_failsafe',
+        enable: !currentState
+    });
+}
+
+function updateFailsafeButton(active) {
+    const btn = document.getElementById('failsafeBtn') || document.getElementById('failsafeBtnMobile');
+    if (!btn) return;
+    
+    const icon = btn.querySelector('.failsafe-icon');
+    const text = btn.querySelector('.failsafe-text');
+    
+    failsafeActive = active;
+    
+    // Remove loading state
+    btn.classList.remove('loading');
+    btn.disabled = false;
+    
+    if (active) {
+        // Failsafe is ON - motors disabled (RED)
+        btn.classList.remove('failsafe-inactive');
+        btn.classList.add('failsafe-active');
+        if (icon) icon.textContent = '🛡️';
+        if (text) text.textContent = 'FAILSAFE';
+        btn.title = 'Click to disable failsafe and enable motors';
+    } else {
+        // Failsafe is OFF - motors enabled (GREEN)
+        btn.classList.remove('failsafe-active');
+        btn.classList.add('failsafe-inactive');
+        if (icon) icon.textContent = '✅';
+        if (text) text.textContent = 'ACTIVE';
+        btn.title = 'Click to enable failsafe and disable motors';
+    }
+}
+
+
+function openSettings() {
+    // Navigate to settings page
+    if (typeof switchScreen === 'function') {
+        switchScreen('settings');
+    } else {
+        showToast('Settings panel - Coming soon!', 'info');
     }
 }

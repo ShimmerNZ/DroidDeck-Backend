@@ -21,6 +21,17 @@
     <header class="header">
         <div class="header-content">
             <div class="logo">DROID DECK</div>
+            
+            <!-- Mobile failsafe button  -->
+            <button id="failsafeBtnMobile" 
+                    class="failsafe-btn failsafe-active mobile-failsafe-btn" 
+                    onclick="toggleFailsafe()"
+                    title="Toggle Failsafe Mode">
+                <span class="failsafe-icon">🛡️</span>
+                <span class="failsafe-text">FAILSAFE</span>
+            </button>
+            
+            <!-- Desktop stats  -->
             <div class="header-stats">
                 <div class="stat-item">
                     <div class="status-dot" id="wsStatus"></div>
@@ -34,16 +45,24 @@
                     <div class="status-dot" id="systemStatus"></div>
                     <span>System</span>
                 </div>
-                <div class="stat-item">
-                    <span id="clientCount">0</span>
-                    <span>Clients</span>
-                </div>
-                <button class="theme-toggle" onclick="toggleTheme()">
-                    <span id="themeText">Modern UI</span>
-                </button>
             </div>
         </div>
     </header>
+    <div class="mobile-status-bar">
+        <div class="stat-item">
+            <div class="status-dot" id="wsStatusMobile"></div>
+            <span>Backend</span>
+        </div>
+        <div class="stat-item">
+            <div class="status-dot" id="controllerStatusMobile"></div>
+            <span>Controller</span>
+        </div>
+        <div class="stat-item">
+            <div class="status-dot" id="systemStatusMobile"></div>
+            <span>System</span>
+        </div>
+    </div>
+
 
     <!-- Navigation -->
     <nav class="navigation">

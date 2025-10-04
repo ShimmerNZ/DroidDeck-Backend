@@ -856,6 +856,11 @@ function updateConnectionStatus(type, connected) {
         statusDot.classList.toggle('connected', connected);
     }
     
+    const statusDotMobile = document.getElementById(type + 'StatusMobile');
+    if (statusDotMobile) {
+        statusDotMobile.classList.toggle('connected', connected);
+    }
+
     if (type === 'ws') {
         const connInfo = document.getElementById('connectionInfo');
         if (connInfo) {
@@ -1301,3 +1306,56 @@ function cleanupNemaScreen() {
         nemaSweeping = false;
     }
 }
+
+/**
+ * Dynamic Viewport Controller
+ * Switches to desktop viewport in landscape to get perfect desktop layout
+ * Add this to your main JavaScript file or in a <script> tag in index.html
+ */
+
+(function() {
+    'use strict';
+    
+    // Get or create viewport meta tag
+    let viewportMeta = document.querySelector('meta[name="viewport"]');
+    if (!viewportMeta) {
+        viewportMeta = document.createElement('meta');
+        viewportMeta.name = 'viewport';
+        document.head.appendChild(viewportMeta);
+    }
+    
+    // Viewport configurations
+    const PORTRAIT_VIEWPORT = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
+    const LANDSCAPE_VIEWPORT = 'width=1024, initial-scale=1.0, maximum-scale=0.8, user-scalable=no';
+    
+    function updateViewport() {
+        const isLandscape = window.innerWidth > window.innerHeight;
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        
+        if (isMobile && isLandscape) {
+            // Mobile device in landscape - use desktop viewport
+            viewportMeta.setAttribute('content', LANDSCAPE_VIEWPORT);
+            console.log('Viewport: Desktop mode (landscape)');
+        } else {
+            // Portrait or desktop - use responsive viewport
+            viewportMeta.setAttribute('content', PORTRAIT_VIEWPORT);
+            console.log('Viewport: Mobile mode (portrait)');
+        }
+    }
+    
+    // Update on page load
+    updateViewport();
+    
+    // Update on orientation change
+    window.addEventListener('orientationchange', function() {
+        // Small delay to let browser finish orientation change
+        setTimeout(updateViewport, 100);
+    });
+    
+    // Fallback for devices that don't fire orientationchange
+    window.addEventListener('resize', function() {
+        updateViewport();
+    });
+    
+    console.log('Dynamic viewport controller initialized');
+})();

@@ -49,14 +49,35 @@ function loadSettings() {
     // Apply theme
     document.body.className = getThemeClass(savedTheme);
     
-    // Update UI elements
-    if (document.getElementById('themeSelect')) {
-        document.getElementById('themeSelect').value = savedTheme;
-        document.getElementById('wsUrl').value = savedWsUrl;
-        document.getElementById('autoReconnect').checked = savedAutoReconnect;
-        document.getElementById('updateInterval').value = savedUpdateInterval;
-        document.getElementById('enableAnimations').checked = savedAnimations;
-        document.getElementById('themeText').textContent = getThemeDisplayName(savedTheme);
+    // Update UI elements - with null checks
+    const themeSelect = document.getElementById('themeSelect');
+    if (themeSelect) {
+        themeSelect.value = savedTheme;
+    }
+
+    const wsUrl = document.getElementById('wsUrl');
+    if (wsUrl) {
+        wsUrl.value = savedWsUrl;
+    }
+
+    const autoReconnectEl = document.getElementById('autoReconnect');
+    if (autoReconnectEl) {
+        autoReconnectEl.checked = savedAutoReconnect;
+    }
+
+    const updateIntervalEl = document.getElementById('updateInterval');
+    if (updateIntervalEl) {
+        updateIntervalEl.value = savedUpdateInterval;
+    }
+
+    const animationsEl = document.getElementById('enableAnimations');
+    if (animationsEl) {
+        animationsEl.checked = savedAnimations;
+    }
+
+    const themeText = document.getElementById('themeText');
+    if (themeText) {
+        themeText.textContent = getThemeDisplayName(savedTheme);
     }
 }
 

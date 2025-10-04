@@ -88,6 +88,8 @@ class WebSocketMessageHandler:
             
             # Mode control
             "failsafe": self._handle_failsafe,
+            "toggle_failsafe": self._handle_toggle_failsafe,
+            "get_failsafe_status": self._handle_get_failsafe_status,
             "mode": self._handle_mode_control
         }
         
@@ -448,6 +450,52 @@ class WebSocketMessageHandler:
         except Exception as e:
             logger.error(f"Manual controller calibration error: {e}")
             await self._send_error_response(websocket, f"Manual calibration error: {str(e)}")
+
+    async def _handle_toggle_failsafe(self, websocket, data: Dict[str, Any]):
+        """Handle failsafe toggle request"""
+        try:
+            enable = data.get("enable", True)
+            result = await self.backend.toggle_failsafe(enable)
+            
+            # Broadcast to all clients
+            await self.backend.broadcast_message({
+                "type": "failsafe_status",
+                **result,
+                "timestamp": time.time()
+            })
+            
+            await self._send_websocket_message(websocket, {
+                "type": "failsafe_toggle_response",
+                **result,
+                "timestamp": time.time()
+            })
+        except Exception as e:
+            logger.error(f"Failsafe toggle error: {e}")
+            await self._send_error_response(websocket, f"Failsafe toggle error: {str(e)}")
+
+    async def _handle_get_failsafe_status(self, websocket, data: Dict[str, Any]):
+        """Get current failsafe status"""
+        try:
+            nema_status = {}
+            if self.backend.hardware_service.stepper_controller:
+                stepper = self.backend.hardware_service.stepper_controller
+                nema_status = {
+                    "enabled": not stepper.intentionally_disabled,
+                    "homed": stepper.home_position_found,
+                    "state": stepper.state.value
+                }
+            
+            await self._send_websocket_message(websocket, {
+                "type": "failsafe_status",
+                "failsafe_active": self.backend.failsafe_active,
+                "state": self.backend.state.value,
+                "nema": nema_status,
+                "track_channels": list(self.backend.track_channels),
+                "timestamp": time.time()
+            })
+        except Exception as e:
+            logger.error(f"Get failsafe status error: {e}")
+            await self._send_error_response(websocket, f"Error getting failsafe status: {str(e)}")        
 
 
     # ==================== SERVO CONTROL HANDLERS ====================
@@ -1175,8 +1223,19 @@ class WebSocketMessageHandler:
         logger.info(f"⚠️ Failsafe mode {'activated' if state else 'deactivated'}")
         
         # Update backend state
-        if hasattr(self.backend, 'set_failsafe_mode'):
-            await self.backend.set_failsafe_mode(state)
+        if hasattr(self.backend, 'toggle_failsafe'):
+            result = await self.backend.toggle_failsafe(state)
+            
+            # Send response back to client
+            await self._send_websocket_message(websocket, {
+                "type": "failsafe_response",
+                "success": result.get("success", False),
+                "failsafe_active": state,
+                "message": result.get("message", ""),
+                "nema": result.get("nema", {}),
+                "tracks_enabled": not state,
+                "timestamp": time.time()
+            })
     
     async def _handle_mode_control(self, websocket, data: Dict[str, Any]):
         """Handle system mode control"""

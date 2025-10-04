@@ -59,6 +59,13 @@ class WALLEBackend:
         self.running = False
         self.start_time = 0
         self.home_screen_ref = None
+        self.state = SystemState.FAILSAFE  # Start in failsafe
+        self.failsafe_active = True
+        self.track_channels = self._identify_track_channels()
+        self.track_home_position = 1500
+        self.track_last_command_time = {}
+        self.track_heartbeat_timeout = 2.0
+        self.track_heartbeat_task = None
         
         # Camera proxy tracking
         self.camera_proxy_pid = None
@@ -75,6 +82,7 @@ class WALLEBackend:
         
         # Initialize modular components
         self.hardware_service = create_hardware_service(config_dict)
+        self.hardware_service.set_backend_reference(self)
         self.audio_controller = NativeAudioController(
             audio_directory=config_dict.get("hardware", {}).get("audio", {}).get("directory", "audio"),
             volume=config_dict.get("hardware", {}).get("audio", {}).get("volume", 0.7)
@@ -128,6 +136,137 @@ class WALLEBackend:
         
         logger.info(f"WALL-E Backend initialized (websockets {WEBSOCKETS_VERSION})")
     
+    def _identify_track_channels(self) -> set:
+        """Identify which channels are tracks from controller config"""
+        track_channels = set()
+        try:
+            config_path = Path("resources/configs/controller_config.json")
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    controller_config = json.load(f)
+                
+                # Find all differential_tracks behaviors
+                for control_name, mapping in controller_config.items():
+                    if mapping.get('behavior') == 'differential_tracks':
+                        left = mapping.get('left_servo')
+                        right = mapping.get('right_servo')
+                        if left:
+                            track_channels.add(left)
+                        if right:
+                            track_channels.add(right)
+                
+                logger.info(f"Identified track channels: {track_channels}")
+        except Exception as e:
+            logger.error(f"Failed to identify track channels: {e}")
+            # Fallback to common defaults
+            track_channels = {'m2_ch0', 'm2_ch1'}
+        
+        return track_channels
+
+    def is_track_channel(self, channel_key: str) -> bool:
+        """Check if a channel is a track channel"""
+        return channel_key in self.track_channels
+    
+    async def toggle_failsafe(self, enable: bool) -> Dict[str, Any]:
+        """Toggle failsafe mode"""
+        try:
+            if enable:
+                # ENABLE FAILSAFE - Disable all motors
+                logger.warning("🛡️ ENABLING FAILSAFE MODE")
+                
+                # Set tracks to home position
+                for channel in self.track_channels:
+                    await self.hardware_service.set_servo_position(
+                        channel, self.track_home_position, "emergency"
+                    )
+                
+                # Disable NEMA
+                if self.hardware_service.stepper_controller:
+                    self.hardware_service.stepper_controller.disable_motor()
+                
+                self.failsafe_active = True
+                self.state = SystemState.FAILSAFE
+                
+                return {
+                    "success": True,
+                    "failsafe_active": True,
+                    "message": "Failsafe enabled - tracks and NEMA disabled",
+                    "nema_enabled": False,
+                    "nema_homed": self.hardware_service.stepper_controller.home_position_found if self.hardware_service.stepper_controller else False
+                }
+            else:
+                # DISABLE FAILSAFE - Enable motors
+                logger.info("✅ DISABLING FAILSAFE MODE - Enabling motors")
+                
+                nema_status = {"enabled": False, "homed": False, "error": None}
+                
+                # Check NEMA homing status
+                if self.hardware_service.stepper_controller:
+                    stepper = self.hardware_service.stepper_controller
+                    
+                    if stepper.home_position_found:
+                        logger.info("NEMA already homed - enabling motor")
+                        stepper.enable_motor()
+                        nema_status["enabled"] = True
+                        nema_status["homed"] = True
+                    else:
+                        logger.info("NEMA not homed - starting homing sequence")
+                        try:
+                            success = await stepper.home_motor()
+                            if success:
+                                logger.info("✅ NEMA homing successful")
+                                nema_status["enabled"] = True
+                                nema_status["homed"] = True
+                            else:
+                                logger.warning("⚠️ NEMA homing failed - motor remains disabled")
+                                nema_status["error"] = "Homing failed"
+                        except Exception as e:
+                            logger.error(f"❌ NEMA homing error: {e}")
+                            nema_status["error"] = str(e)
+                
+                self.failsafe_active = False
+                self.state = SystemState.NORMAL
+                
+                # Start track heartbeat monitor
+                if not self.track_heartbeat_task or self.track_heartbeat_task.done():
+                    self.track_heartbeat_task = asyncio.create_task(
+                        self.start_track_heartbeat_monitor()
+                    )
+                
+                return {
+                    "success": True,
+                    "failsafe_active": False,
+                    "message": "Failsafe disabled - system operational",
+                    "nema": nema_status,
+                    "tracks_enabled": True
+                }
+        except Exception as e:
+            logger.error(f"Error toggling failsafe: {e}")
+            return {"success": False, "error": str(e), "failsafe_active": self.failsafe_active}
+
+    async def start_track_heartbeat_monitor(self):
+        """Monitor track commands and return to home if no activity"""
+        logger.info("🔄 Track heartbeat monitor started")
+        while True:
+            try:
+                await asyncio.sleep(0.5)
+                
+                if self.failsafe_active:
+                    continue
+                
+                current_time = time.time()
+                for channel in self.track_channels:
+                    last_time = self.track_last_command_time.get(channel, 0)
+                    if current_time - last_time > self.track_heartbeat_timeout:
+                        if last_time > 0:
+                            logger.debug(f"Track {channel} timeout - returning to home")
+                        await self.hardware_service.set_servo_position(
+                            channel, self.track_home_position, "realtime"
+                        )
+            except Exception as e:
+                logger.error(f"Track heartbeat monitor error: {e}")
+                await asyncio.sleep(1.0)
+
     async def broadcast_websocket_message(self, message: dict):
         """Broadcast message to all connected WebSocket clients"""
         if hasattr(self, 'broadcast_message'):
@@ -161,9 +300,22 @@ class WALLEBackend:
             self.audio_controller.set_volume_changed_callback(self.handle_volume_changed)
             
             # Stepper motor callback for WebSocket broadcast
+           # Stepper motor callback for WebSocket broadcast
             if self.hardware_service.stepper_interface:
-                self.hardware_service.stepper_interface.websocket_broadcast_callback = self.broadcast_message
-            
+                # Wrap async broadcast_message in a sync function for the callback
+                def sync_broadcast_wrapper(message: dict):
+                    """Synchronous wrapper that properly schedules the async broadcast from ANY thread"""
+                    try:
+                        # Try to get the main event loop (the one that's running the backend)
+                        if hasattr(self, 'loop') and self.loop:
+                            # Schedule from any thread using the backend's loop reference
+                            coro = self.broadcast_message(message)
+                            asyncio.run_coroutine_threadsafe(coro, self.loop)
+                        else:
+                            logger.warning("Unable to broadcast: backend loop not available")
+                    except Exception as e:
+                        logger.error(f"Error scheduling broadcast: {e}")
+                self.hardware_service.stepper_interface.websocket_broadcast_callback = sync_broadcast_wrapper
             logger.info("Component callbacks configured")
             
         except Exception as e:
@@ -247,35 +399,35 @@ class WALLEBackend:
         return {"running": False}
 
     async def broadcast_message(self, message: Dict[str, Any]):
-        """Broadcast message to all connected clients"""
-        if not self.connected_clients:
-            return
+        """Broadcast message to all connected clients (both WebSocket and Web Server)"""
         
-        message_json = json.dumps(message)
-        disconnected_clients = set()
+        # Broadcast to WebSocket clients (PyQt app)
+        if self.connected_clients:
+            message_json = json.dumps(message)
+            disconnected_clients = set()
+            
+            for websocket in list(self.connected_clients):
+                try:
+                    await websocket.send(message_json)
+                except websockets.exceptions.ConnectionClosed:
+                    disconnected_clients.add(websocket)
+                except Exception as e:
+                    logger.debug(f"Error broadcasting to client: {e}")
+                    disconnected_clients.add(websocket)
+            
+            # Remove disconnected clients
+            for websocket in disconnected_clients:
+                self.connected_clients.discard(websocket)
+            
+            if disconnected_clients:
+                logger.debug(f"Removed {len(disconnected_clients)} disconnected clients")
         
-        for websocket in list(self.connected_clients):
-            try:
-                await websocket.send(message_json)
-            except websockets.exceptions.ConnectionClosed:
-                disconnected_clients.add(websocket)
-            except Exception as e:
-                logger.debug(f"Error broadcasting to client: {e}")
-                disconnected_clients.add(websocket)
-
-            # Add web server broadcast
-        if hasattr(self, 'web_server') and self.web_server.running:
+        # Also broadcast to web server (Socket.IO clients)
+        if hasattr(self, 'web_server') and self.web_server:
             try:
                 self.web_server.broadcast_message(message)
             except Exception as e:
-                logger.debug(f"Web broadcast error: {e}")
-        
-        # Remove disconnected clients
-        for websocket in disconnected_clients:
-            self.connected_clients.discard(websocket)
-        
-        if disconnected_clients:
-            logger.debug(f"Removed {len(disconnected_clients)} disconnected clients")
+                logger.debug(f"Error broadcasting to web server: {e}")
 
     def setup_signal_handlers(self):
         """Setup graceful shutdown signal handlers"""

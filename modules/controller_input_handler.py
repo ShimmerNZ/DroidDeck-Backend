@@ -241,6 +241,10 @@ class DifferentialTracksHandler(BehaviorHandler):
             if not left_servo or not right_servo or not self.hardware_service:
                 return False
             
+            if hasattr(self, 'backend') and self.backend and self.backend.failsafe_active:
+                # Failsafe is active - tracks should be disabled
+                return True 
+        
             # Determine if this is forward/backward or turn input
             if controller_input.control_name.endswith('_y'):
                 self.last_forward = controller_input.raw_value * forward_sensitivity
@@ -419,7 +423,9 @@ class ControllerInputProcessor:
             BehaviorType.NEMA_STEPPER: NemaStepperHandler(hardware_service, scene_engine, logger),
             BehaviorType.SYSTEM_CONTROL: SystemControlHandler(hardware_service, scene_engine, logger, backend_ref)
         }
-        
+
+        self.handlers[BehaviorType.DIFFERENTIAL_TRACKS].backend = backend_ref  
+
         # Configuration storage
         self.controller_mappings = {}
         self.active_inputs = {}  # Track active controller inputs
