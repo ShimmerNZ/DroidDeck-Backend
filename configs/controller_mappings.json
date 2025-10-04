@@ -1,17 +1,15 @@
 {
   "xbox": {
     "button_map": {
-      "0": "button_a",
-      "1": "button_b", 
+      "0": "button_b",
+      "1": "button_a", 
       "2": "button_x",
       "3": "button_y",
-      "4": "shoulder_left",
-      "5": "shoulder_right",
-      "6": "button_back",
-      "7": "button_start",
-      "8": "button_guide",
-      "9": "left_stick_click",
-      "10": "right_stick_click"
+      "4": "button_back",
+      "5": "shoulder_left",
+      "6": "shoulder_right",
+      "7": "left_trigger",
+      "8": "right_trigger"
     },
     "axis_map": {
       "0": "left_stick_x",
