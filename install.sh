@@ -203,6 +203,53 @@ create_directories() {
     print_success "Directories verified"
 }
 
+# Setup SMB share
+setup_smb_share() {
+    print_step "Setting up SMB file sharing..."
+    
+    BACKEND_DIR=$(pwd)
+    CURRENT_USER=$(whoami)
+    
+    # Backup existing smb.conf
+    if [ -f /etc/samba/smb.conf ]; then
+        sudo cp /etc/samba/smb.conf /etc/samba/smb.conf.backup.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+    fi
+    
+    # Create SMB configuration
+    cat > droiddeck_smb.conf << EOF
+# DroidDeck Backend Share
+[DroidDeck-Backend]
+    comment = DroidDeck Robot Backend (Guest Access)
+    path = $BACKEND_DIR
+    browseable = yes
+    read only = no
+    guest ok = yes
+    create mask = 0664
+    directory mask = 0775
+    force user = $CURRENT_USER
+    public = yes
+    writable = yes
+EOF
+
+    # Append to system smb.conf
+    sudo tee -a /etc/samba/smb.conf < droiddeck_smb.conf > /dev/null
+    
+    # Set permissions
+    chmod 775 "$BACKEND_DIR"
+    chmod 775 "$BACKEND_DIR/audio" 2>/dev/null || true
+    chmod 775 "$BACKEND_DIR/configs" 2>/dev/null || true
+    chmod 775 "$BACKEND_DIR/logs" 2>/dev/null || true
+    
+    # Start samba services
+    sudo systemctl enable smbd nmbd
+    sudo systemctl restart smbd nmbd
+    
+    # Cleanup
+    rm -f droiddeck_smb.conf
+    
+    print_success "SMB file sharing configured"
+}
+
 # Verify configs exist
 verify_configs() {
     print_step "Verifying configuration files..."
@@ -241,6 +288,7 @@ main() {
     install_python_deps
     configure_pi_interfaces
     create_directories
+    setup_smb_share
     verify_configs
     
     echo ""
@@ -252,11 +300,21 @@ main() {
     echo "  📦 All backend dependencies"
     echo "  🔧 Hardware interfaces configured"
     echo "  📁 Directory structure created"
+    echo "  📂 SMB file sharing enabled"
+    echo ""
+    
+    HOSTNAME=$(hostname)
+    IP_ADDRESS=$(hostname -I | awk '{print $1}' 2>/dev/null || echo "unknown")
+    
+    print_success "✅ Network Access:"
+    echo "  Windows: \\\\$HOSTNAME\\DroidDeck-Backend"
+    echo "  Mac/Linux: smb://$IP_ADDRESS/DroidDeck-Backend"
+    echo "  🔓 Guest access enabled (no password)"
     echo ""
     print_success "✅ Next Steps:"
     echo "  1. 🔄 Reboot to activate hardware: sudo reboot"
     echo "  2. 🚀 Start backend: python main.py"
-    echo "  3. 🌐 WebSocket server will run on ws://<your-ip>:8766"
+    echo "  3. 🌐 WebSocket server will run on ws://$IP_ADDRESS:8766"
     echo ""
     print_step "⚠️  IMPORTANT: Reboot Required"
     echo "  Hardware interfaces (I2C, SPI, UART) need reboot to activate"
