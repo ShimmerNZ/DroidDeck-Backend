@@ -119,7 +119,8 @@ class WALLEBackend:
             scene_engine=self.scene_engine,
             audio_controller=self.audio_controller,
             telemetry_system=self.telemetry_system,
-            backend_ref=self
+            backend_ref=self,
+            controller_input_processor=self.controller_input_processor
         )
         # Set camera proxy URL in websocket handler
         self.websocket_handler.camera_proxy_url = self.camera_proxy_url
@@ -663,7 +664,7 @@ class WALLEBackend:
                     "battery_voltage": reading.battery_voltage,
                     "current_left_track": reading.current_left_track,
                     "current_right_track": reading.current_right_track,
-                    "current_electronics": reading.current_electronics,
+                    "current_total": reading.current_total,
                     "maestro1": hardware_status.get("hardware", {}).get("maestro1", {"connected": False}),
                     "maestro2": hardware_status.get("hardware", {}).get("maestro2", {"connected": False}),
                     "audio_system": {
@@ -1136,6 +1137,16 @@ def setup_logging():
     logging.getLogger("__main__").setLevel(logging.INFO)
 
 
+
+async def play_startup_track(backend):
+    await asyncio.sleep(2)
+    success = backend.audio_controller.play_track('track_001')
+    if not success:
+        print("[audio] Could not play track_001.wav after startup")
+    else:
+        print("[audio] Played track_001.wav after startup")
+
+
 # ==================== MAIN ENTRY POINT ====================
 
 async def main():
@@ -1148,6 +1159,7 @@ async def main():
         
         # Create and start backend
         backend = WALLEBackend(config)
+        asyncio.create_task(play_startup_track(backend))
         await backend.start()
         
     except KeyboardInterrupt:

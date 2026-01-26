@@ -354,7 +354,7 @@ class DroidDeckWebServer:
         """Handle failsafe mode toggle from web UI"""
         try:
             enable = data.get('enable', False)
-            logger.warning(f"⚠️ Failsafe {'ENABLED' if enable else 'DISABLED'} from web UI")
+            logger.warning(f"âš ï¸ Failsafe {'ENABLED' if enable else 'DISABLED'} from web UI")
             
             if self.backend and hasattr(self.backend, 'set_failsafe_mode'):
                 import threading
@@ -365,26 +365,38 @@ class DroidDeckWebServer:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
                         
-                        # Execute failsafe toggle - returns dict with full status
-                        result = loop.run_until_complete(self.backend.toggle_failsafe(enable))
+                        # Execute failsafe toggle
+                        loop.run_until_complete(self.backend.set_failsafe_mode(enable))
+                        
+                        # Get NEMA status to check for errors
+                        nema_status = {'enabled': False, 'homed': False, 'error': None}
+                        try:
+                            if hasattr(self.backend, 'hardware_service') and hasattr(self.backend.hardware_service, 'stepper_interface'):
+                                if self.backend.hardware_service.stepper_interface:
+                                    stepper_status = self.backend.hardware_service.stepper_interface.stepper.get_status()
+                                    nema_status = {
+                                        'enabled': stepper_status.get('enabled', False),
+                                        'homed': stepper_status.get('homed', False),
+                                        'error': 'Homing failed' if not stepper_status.get('homed', False) else None
+                                    }
+                        except Exception as e:
+                            logger.error(f"Error getting NEMA status: {e}")
+                            nema_status['error'] = 'Status unavailable'
                         
                         loop.close()
-                        
-                        # Extract NEMA status from result
-                        nema_status = result.get('nema', {'enabled': False, 'homed': False, 'error': None})
                         
                         # Send response with NEMA status
                         self.socketio.emit('backend_message', {
                             'type': 'failsafe_toggle_response',
                             'failsafe_active': enable,
-                            'success': result.get('success', False),
+                            'success': True,
                             'nema': nema_status,
                             'tracks_enabled': not enable,
-                            'message': result.get('message', f'Failsafe {"enabled - system safe" if enable else "disabled - system operational"}'),
+                            'message': f'Failsafe {"enabled - system safe" if enable else "disabled - system operational"}',
                             'timestamp': time.time()
                         })
                         
-                        logger.info(f"Failsafe toggle result: {result}")
+                        logger.info(f"Failsafe toggle result: {{'success': True, 'failsafe_active': {enable}, 'message': 'Failsafe {'enabled' if enable else 'disabled'}', 'nema': {nema_status}, 'tracks_enabled': {not enable}}}")
                         
                     except Exception as e:
                         logger.error(f"Error toggling failsafe: {e}")
@@ -395,7 +407,7 @@ class DroidDeckWebServer:
                             'message': f'Failsafe toggle error: {str(e)}',
                             'timestamp': time.time()
                         })
-
+                
                 thread = threading.Thread(target=failsafe_thread, daemon=True)
                 thread.start()
                 
@@ -605,7 +617,7 @@ class DroidDeckWebServer:
                     for scene_name, scene_data in self.backend.scene_engine.scenes.items():
                         scenes_data.append({
                             'label': scene_data.get('label', scene_name),
-                            'emoji': scene_data.get('emoji', '🎭'),
+                            'emoji': scene_data.get('emoji', 'ðŸŽ­'),
                             'duration': scene_data.get('duration', 2.0),
                             'categories': scene_data.get('categories', ['Misc']),
                             'audio_enabled': scene_data.get('audio_enabled', False),
@@ -891,7 +903,7 @@ class DroidDeckWebServer:
     def _handle_emergency_stop(self, client_sid):
         """Handle emergency stop command - forward to backend"""
         try:
-            logger.critical("🚨 EMERGENCY STOP requested from web UI")
+            logger.critical("ðŸš¨ EMERGENCY STOP requested from web UI")
             
             if self.backend and hasattr(self.backend, 'hardware_service'):
                 import threading
@@ -1017,7 +1029,7 @@ class DroidDeckWebServer:
                         'temperature': current.get('temperature', 0),
                         'current_left_track': current.get('current_left_track', 0.0),
                         'current_right_track': current.get('current_right_track', 0.0),
-                        'current_electronics': current.get('current_electronics', 0.0),
+                        'current_total': current.get('current_total', 0.0),
                     })
                     
                     # ADD HARDWARE STATUS FROM TELEMETRY READING
@@ -1069,7 +1081,7 @@ class DroidDeckWebServer:
         return [
             {
                 'label': 'Happy',
-                'emoji': '😊',
+                'emoji': 'ðŸ˜Š',
                 'duration': 2.0,
                 'categories': ['Happy'],
                 'audio_enabled': False,
@@ -1077,7 +1089,7 @@ class DroidDeckWebServer:
             },
             {
                 'label': 'Sad',
-                'emoji': '😢',
+                'emoji': 'ðŸ˜¢',
                 'duration': 3.0,
                 'categories': ['Sad'],
                 'audio_enabled': False,
@@ -1085,7 +1097,7 @@ class DroidDeckWebServer:
             },
             {
                 'label': 'Excited',
-                'emoji': '🤩',
+                'emoji': 'ðŸ¤©',
                 'duration': 4.0,
                 'categories': ['Happy', 'Energetic'],
                 'audio_enabled': True,

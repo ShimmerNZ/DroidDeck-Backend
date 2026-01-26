@@ -30,32 +30,41 @@
     "acceleration": 5163,
     "nema_behavior": "toggle_positions"
   },
-  "right_trigger": {
+  "right_stick_x": {
     "behavior": "direct_servo",
-    "target": "m1_ch17"
+    "target": "m1_ch0",
+    "invert": false,
+    "sensitivity": 0.8
+  },
+  "right_stick_y": {
+    "behavior": "direct_servo",
+    "target": "m1_ch1",
+    "invert": false,
+    "sensitivity": 0.8
   },
   "dpad_up": {
     "behavior": "system_control",
-    "system_action": "up"
+    "system_action": "up",
+    "trigger_timing": "on_press"
   },
   "dpad_down": {
-    "behavior": "system_control",
-    "system_action": "down"
+      "behavior": "system_control",
+      "system_action": "down",
+      "trigger_timing": "on_press"
   },
   "dpad_left": {
-    "behavior": "system_control",
-    "system_action": "left"
+      "behavior": "system_control",
+      "system_action": "left",
+      "trigger_timing": "on_press"
   },
   "dpad_right": {
-    "behavior": "system_control",
-    "system_action": "right"
+      "behavior": "system_control",
+      "system_action": "right",
+      "trigger_timing": "on_press"
   },
   "button_a": {
-    "behavior": "system_control",
-    "system_action": "select"
-  },
-  "button_menu": {
-    "behavior": "system_control",
-    "system_action": "exit_app"
+      "behavior": "system_control",
+      "system_action": "select",
+      "trigger_timing": "on_press"
   }
 }

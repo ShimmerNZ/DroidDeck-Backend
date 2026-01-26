@@ -49,15 +49,15 @@ class StepperConfig:
     step_pin: int = 16
     dir_pin: int = 12
     enable_pin: int = 13
-    limit_switch_pin: int = 26
+    limit_switch_pin: int = 26  # Active-LOW with pull-up (Pi 5 compatible)
     
     # Motor specifications  
     steps_per_revolution: int = 800  # 1.8° per step
     lead_screw_pitch: float = 8.0    # 8mm per revolution
     
     # Movement parameters
-    max_travel_cm: float = 20.0      # Maximum travel distance
-    default_position_cm: float = 5.0  # Default position from home
+    max_travel_cm: float = 14.0      # Maximum travel distance
+    default_position_cm: float = 1.0  # Default position from home
     home_offset_cm: float = 0.5      # Distance to back off from limit switch
     
     # Speed settings (steps per second)
@@ -66,7 +66,7 @@ class StepperConfig:
     max_speed: int = 1200            # Maximum speed
     
     # Acceleration settings
-    acceleration: int = 800          # Steps per second²
+    acceleration: int = 800          # Steps per secondÂ²
     
     # Timing (microseconds)
     step_pulse_width: int = 5        # Minimum pulse width for TB6600
@@ -111,6 +111,12 @@ class NEMA23Controller:
         self.stop_movement = threading.Event()
         self.movement_lock = threading.Lock()
         
+        # Sweep control
+        self.sweep_active = False
+        self.sweep_task = None
+        self.sweep_min_cm = 0.0
+        self.sweep_max_cm = 0.0
+        
         # Callbacks
         self.position_changed_callback: Optional[Callable] = None
         self.state_changed_callback: Optional[Callable] = None
@@ -128,7 +134,7 @@ class NEMA23Controller:
     def setup_gpio(self):
         """Initialize GPIO pins for stepper control using compatibility layer"""
         if not is_gpio_available():
-            logger.warning("⚠️ GPIO not available - stepper control disabled")
+            logger.warning("⚠️ GPIO not available - stepper control disabled")
             return
         
         try:
@@ -137,17 +143,17 @@ class NEMA23Controller:
             dir_ok = setup_output_pin(self.config.dir_pin, initial_state=False)
             enable_ok = setup_output_pin(self.config.enable_pin, initial_state=True)  # Start disabled
             
-            # Setup input pin for limit switch (normally open)
-            limit_ok = setup_input_pin(self.config.limit_switch_pin, pull_down=True)
+            # Setup input pin for limit switch (normally open, connected to GND when pressed)
+            limit_ok = setup_input_pin(self.config.limit_switch_pin, pull_up=True)
             
             if all([step_ok, dir_ok, enable_ok, limit_ok]):
                 self.gpio_initialized = True
                 logger.info(f"✅ GPIO initialized for stepper motor using {get_gpio_library()}")
             else:
-                logger.error("❌ Failed to setup one or more GPIO pins")
+                logger.error("âŒ Failed to setup one or more GPIO pins")
             
         except Exception as e:
-            logger.error(f"❌ Failed to setup GPIO: {e}")
+            logger.error(f"âŒ Failed to setup GPIO: {e}")
             self.gpio_initialized = False
         
     def enable_motor(self):
@@ -188,9 +194,10 @@ class NEMA23Controller:
             set_output(self.config.step_pin, False)  # Pulse LOW
     
     def is_limit_switch_triggered(self) -> bool:
-        """Check if limit switch is triggered"""
+        """Check if limit switch is triggered (active LOW - pressed = 0)"""
         if self.gpio_initialized:
             state = read_input(self.config.limit_switch_pin)
+            # With pull-up: not pressed = 1 (HIGH), pressed = 0 (LOW)
             return bool(state) if state is not None else False
         return False
     
@@ -199,7 +206,7 @@ class NEMA23Controller:
         if new_state != self.state:
             old_state = self.state
             self.state = new_state
-            logger.info(f"🎯 Motor state: {old_state.value} → {new_state.value}")
+            logger.info(f"🎯 Motor state: {old_state.value} â†’ {new_state.value}")
             
             if self.state_changed_callback:
                 try:
@@ -357,7 +364,7 @@ class NEMA23Controller:
         
         with self.movement_lock:
             logger.info(f"🎯 Moving from {self.current_position_steps} to {target_steps} steps")
-            logger.info(f"    ({self.steps_to_cm(self.current_position_steps):.1f} cm → {self.steps_to_cm(target_steps):.1f} cm)")
+            logger.info(f"    ({self.steps_to_cm(self.current_position_steps):.1f} cm â†’ {self.steps_to_cm(target_steps):.1f} cm)")
             
             self.target_position_steps = target_steps
             self.set_state(MotorState.MOVING)
@@ -401,13 +408,18 @@ class NEMA23Controller:
         
         logger.debug(f"Movement profile: {accel_steps} accel + {constant_steps} constant + {decel_steps} decel steps")
         
+        # Calculate direction multiplier for position tracking
+        direction_multiplier = 1 if direction == MoveDirection.AWAY_FROM_HOME else -1
+        
         for step in range(total_steps):
             if self.stop_movement.is_set():
                 logger.warning("Movement interrupted")
                 break
             
-            # Check limit switch during movement toward home
-            if direction == MoveDirection.TOWARD_HOME and self.is_limit_switch_triggered():
+            # Check limit switch during movement toward home (only when close to home)
+            # Allow some margin - only check if within 2cm of home position
+            position_cm = self.steps_to_cm(self.current_position_steps + (step * direction_multiplier))
+            if direction == MoveDirection.TOWARD_HOME and position_cm < 2.0 and self.is_limit_switch_triggered():
                 logger.warning("Limit switch triggered during movement - stopping")
                 break
             
@@ -476,8 +488,108 @@ class NEMA23Controller:
         """Emergency stop - immediately disable motor"""
         logger.warning("🚨 EMERGENCY STOP - Stepper motor")
         self.stop_movement.set()
+        self.sweep_active = False
         self.disable_motor()
         self.set_state(MotorState.ERROR)
+    
+    async def start_sweep(self, min_cm: float, max_cm: float) -> bool:
+        """Start continuous sweep between two positions"""
+        try:
+            if not self.home_position_found:
+                logger.error("Cannot sweep - homing not completed")
+                return False
+            
+            if not self.is_movement_allowed():
+                logger.warning("Cannot sweep - motor is disabled")
+                return False
+            
+            if min_cm >= max_cm:
+                logger.error("Invalid sweep range")
+                return False
+            
+            # Stop any existing sweep
+            await self.stop_sweep()
+            
+            self.sweep_active = True
+            self.sweep_min_cm = min_cm
+            self.sweep_max_cm = max_cm
+
+            logger.info(f"Starting sweep: {min_cm} to {max_cm} cm")
+
+            # Start sweep task
+            self.sweep_task = asyncio.create_task(self._sweep_loop())
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to start sweep: {e}")
+            self.sweep_active = False
+            return False
+    
+    async def stop_sweep(self) -> bool:
+        """Stop the current sweep"""
+        try:
+            if not self.sweep_active:
+                return True
+            
+            logger.info("⏸️ Stopping sweep...")
+            self.sweep_active = False
+            
+            # Signal movement to stop immediately
+            self.stop_movement.set()
+            
+            # Cancel sweep task if running
+            if self.sweep_task and not self.sweep_task.done():
+                self.sweep_task.cancel()
+                try:
+                    await self.sweep_task
+                except asyncio.CancelledError:
+                    pass
+            
+            self.sweep_task = None
+            
+            # Clear the stop flag for future movements
+            self.stop_movement.clear()
+            
+            # Set state back to ready
+            self.set_state(MotorState.READY)
+            
+            logger.info("✅ Sweep stopped")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error stopping sweep: {e}")
+            return False
+    
+    async def _sweep_loop(self):
+        """Internal sweep loop - continuously moves between min and max"""
+        try:
+            direction_forward = True
+            
+            while self.sweep_active:
+                # Determine target based on direction
+                target = self.sweep_max_cm if direction_forward else self.sweep_min_cm
+                
+                # Move to target
+                success = await self.move_to_position_cm(target)
+                
+                if not success or not self.sweep_active:
+                    break
+                
+                # Flip direction for next iteration
+                direction_forward = not direction_forward
+                
+                # Delay before reversing - gives frontend time to send stop commands
+                await asyncio.sleep(0.5)
+            
+            logger.info("Sweep loop ended")
+            
+        except asyncio.CancelledError:
+            logger.info("Sweep cancelled")
+        except Exception as e:
+            logger.error(f"Sweep loop error: {e}")
+        finally:
+            self.sweep_active = False
     
     def get_status(self) -> dict:
         """Get comprehensive motor status"""
@@ -502,7 +614,10 @@ class NEMA23Controller:
             "max_travel_cm": self.config.max_travel_cm,
             "default_position_cm": self.config.default_position_cm,
             "steps_per_cm": round(self.steps_per_cm, 2),
-            "safe_position": self.is_position_safe(self.current_position_steps)
+            "safe_position": self.is_position_safe(self.current_position_steps),
+            "sweep_active": self.sweep_active,
+            "sweep_min_cm": self.sweep_min_cm if self.sweep_active else None,
+            "sweep_max_cm": self.sweep_max_cm if self.sweep_active else None
         }
     
     def cleanup(self):
@@ -537,22 +652,32 @@ class StepperControlInterface:
 
     def _schedule_broadcast(self, message: dict):
         """Safely schedule async broadcast from sync context"""
+        # Broadcast is optional - silently skip if not configured
         if not self.websocket_broadcast_callback:
             return
             
         try:
-            self.websocket_broadcast_callback(message)
-
+            # Check if the callback is a coroutine function
+            import inspect
+            if not inspect.iscoroutinefunction(self.websocket_broadcast_callback):
+                # Callback isn't async - skip silently
+                return
             
-        except RuntimeError:
-            # No event loop running, try to create a task directly
+            # Get the current event loop
             try:
-                asyncio.create_task(self.websocket_broadcast_callback(message))
+                loop = asyncio.get_running_loop()
+                # Schedule the coroutine to run in the event loop
+                asyncio.run_coroutine_threadsafe(
+                    self.websocket_broadcast_callback(message), 
+                    loop
+                )
             except RuntimeError:
-                # Still no luck, log the issue
-                logger.warning("Unable to broadcast message: no event loop available")
-        except Exception as e:
-            logger.error(f"Error scheduling broadcast: {e}")
+                # No event loop - this is normal during shutdown
+                pass
+                
+        except Exception:
+            # Silently ignore any broadcast errors
+            pass
 
     def on_state_changed(self, new_state, old_state):
         """Handle state change notifications"""
@@ -629,6 +754,20 @@ class StepperControlInterface:
                 self.stepper.emergency_stop()
                 return {"success": True, "message": "Emergency stop activated"}
             
+            elif command == "start_sweep":
+                min_cm = data.get("min_cm")
+                max_cm = data.get("max_cm")
+                
+                if min_cm is None or max_cm is None:
+                    return {"success": False, "message": "Missing min_cm or max_cm parameter"}
+                
+                success = await self.stepper.start_sweep(min_cm, max_cm)
+                return {"success": success, "message": f"Sweep started: {min_cm} to {max_cm} cm" if success else "Sweep failed to start"}
+            
+            elif command == "stop_sweep":
+                success = await self.stepper.stop_sweep()
+                return {"success": success, "message": "Sweep stopped" if success else "Failed to stop sweep"}
+            
             elif command == "get_status":
                 status = self.stepper.get_status()
                 return {"success": True, "status": status}
@@ -660,7 +799,7 @@ if __name__ == "__main__":
         print("1. Homing motor...")
         success = await stepper.home_motor()
         if not success:
-            print("❌ Homing failed")
+            print("âŒ Homing failed")
             return
         
         # Wait a moment

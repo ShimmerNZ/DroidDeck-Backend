@@ -34,18 +34,24 @@ class ControllerInput:
 class BehaviorHandler:
     """Base class for controller behavior handlers"""
     
-    def __init__(self, hardware_service=None, scene_engine=None, logger=None):
+    def __init__(self, hardware_service=None, scene_engine=None, logger=None, processor=None):
         self.hardware_service = hardware_service
         self.scene_engine = scene_engine
         self.logger = logger or logging.getLogger(__name__)
+        self.processor = processor  # Reference to ControllerInputProcessor for home positions
     
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         """Process controller input with behavior-specific logic"""
         raise NotImplementedError
     
-    def _clamp_pulse(self, value: float) -> int:
-        """Clamp servo pulse value to safe range"""
-        return max(1000, min(2000, int(1500 + value * 500)))
+    def _clamp_pulse(self, value: float, center_offset: int = 0) -> int:
+        """
+        Clamp servo pulse value to safe range
+        center_offset: offset from 1500 center (e.g., -250 means center at 1250)
+        """
+        center = 1500 + center_offset
+        pulse = int(center + value * 500)
+        return max(1000, min(2000, pulse))
 
 class DirectServoHandler(BehaviorHandler):
     """Handle direct servo control - single axis to single servo"""
@@ -60,6 +66,13 @@ class DirectServoHandler(BehaviorHandler):
             invert = config.get('invert', False)
             sensitivity = config.get('sensitivity', 1.0)
             
+            # Always get fresh center_offset from processor's servo_home_positions
+            # This allows dynamic updates without reloading controller config
+            if self.processor:
+                center_offset = self.processor.get_center_offset_for_servo(servo_channel)
+            else:
+                center_offset = config.get('center_offset', 0)
+            
             if not servo_channel or not self.hardware_service:
                 return False
             
@@ -71,7 +84,8 @@ class DirectServoHandler(BehaviorHandler):
             if last_value is not None and abs(value - last_value) < self.change_threshold:
                 return True  
 
-            pulse = self._clamp_pulse(value)
+            # Use center_offset to adjust center position
+            pulse = self._clamp_pulse(value, center_offset)
             
             # Send servo command
             success = await self.hardware_service.set_servo_position(
@@ -79,7 +93,7 @@ class DirectServoHandler(BehaviorHandler):
             )
             
             if success:
-                self.logger.debug(f"Direct servo {servo_channel}: {pulse} (raw: {controller_input.raw_value:.2f})")
+                self.logger.debug(f"Direct servo {servo_channel}: {pulse} (raw: {controller_input.raw_value:.2f}, offset: {center_offset})")
                 
                 self.last_sent_values[servo_channel] = value
             return success
@@ -104,6 +118,15 @@ class JoystickPairHandler(BehaviorHandler):
             invert_y = config.get('invert_y', False)
             sensitivity = config.get('sensitivity', 1.0)
             
+            # Always get fresh center offsets from processor's servo_home_positions
+            # This allows dynamic updates without reloading controller config
+            if self.processor:
+                x_center_offset = self.processor.get_center_offset_for_servo(x_servo)
+                y_center_offset = self.processor.get_center_offset_for_servo(y_servo)
+            else:
+                x_center_offset = config.get('x_center_offset', 0)
+                y_center_offset = config.get('y_center_offset', 0)
+            
             if not x_servo or not y_servo or not self.hardware_service:
                 return False
             
@@ -113,7 +136,7 @@ class JoystickPairHandler(BehaviorHandler):
             if controller_input.control_name.endswith('_x'):
                 value = -controller_input.raw_value if invert_x else controller_input.raw_value
                 value *= sensitivity
-                pulse = self._clamp_pulse(value)
+                pulse = self._clamp_pulse(value, x_center_offset)
                 
                 success = await self.hardware_service.set_servo_position(
                     x_servo, pulse, "realtime"
@@ -121,13 +144,13 @@ class JoystickPairHandler(BehaviorHandler):
                 
                 if success:
                     self.last_x_value = controller_input.raw_value
-                    self.logger.debug(f"Joystick X {x_servo}: {pulse}")
+                    self.logger.debug(f"Joystick X {x_servo}: {pulse} (offset: {x_center_offset})")
             
             # Handle Y axis
             elif controller_input.control_name.endswith('_y'):
                 value = -controller_input.raw_value if invert_y else controller_input.raw_value
                 value *= sensitivity
-                pulse = self._clamp_pulse(value)
+                pulse = self._clamp_pulse(value, y_center_offset)
                 
                 success = await self.hardware_service.set_servo_position(
                     y_servo, pulse, "realtime"
@@ -135,7 +158,7 @@ class JoystickPairHandler(BehaviorHandler):
                 
                 if success:
                     self.last_y_value = controller_input.raw_value
-                    self.logger.debug(f"Joystick Y {y_servo}: {pulse}")
+                    self.logger.debug(f"Joystick Y {y_servo}: {pulse} (offset: {y_center_offset})")
             
             return success
             
@@ -241,10 +264,6 @@ class DifferentialTracksHandler(BehaviorHandler):
             if not left_servo or not right_servo or not self.hardware_service:
                 return False
             
-            if hasattr(self, 'backend') and self.backend and self.backend.failsafe_active:
-                # Failsafe is active - tracks should be disabled
-                return True 
-        
             # Determine if this is forward/backward or turn input
             if controller_input.control_name.endswith('_y'):
                 self.last_forward = controller_input.raw_value * forward_sensitivity
@@ -413,19 +432,20 @@ class ControllerInputProcessor:
         self.stepper_controller = stepper_controller
         self.backend = backend_ref
         
-        # Initialize behavior handlers
+        # Load servo home positions to use as center offsets
+        self.servo_home_positions = self._load_servo_home_positions()
+        
+        # Initialize behavior handlers (pass self so they can access get_center_offset_for_servo)
         self.handlers = {
-            BehaviorType.DIRECT_SERVO: DirectServoHandler(hardware_service, scene_engine, logger),
-            BehaviorType.JOYSTICK_PAIR: JoystickPairHandler(hardware_service, scene_engine, logger),
+            BehaviorType.DIRECT_SERVO: DirectServoHandler(hardware_service, scene_engine, logger, self),
+            BehaviorType.JOYSTICK_PAIR: JoystickPairHandler(hardware_service, scene_engine, logger, self),
             BehaviorType.DIFFERENTIAL_TRACKS: DifferentialTracksHandler(hardware_service, scene_engine, logger),
             BehaviorType.SCENE_TRIGGER: SceneTriggerHandler(hardware_service, scene_engine, logger),
             BehaviorType.TOGGLE_SCENES: ToggleScenesHandler(hardware_service, scene_engine, logger),
             BehaviorType.NEMA_STEPPER: NemaStepperHandler(hardware_service, scene_engine, logger),
             BehaviorType.SYSTEM_CONTROL: SystemControlHandler(hardware_service, scene_engine, logger, backend_ref)
         }
-
-        self.handlers[BehaviorType.DIFFERENTIAL_TRACKS].backend = backend_ref  
-
+        
         # Configuration storage
         self.controller_mappings = {}
         self.active_inputs = {}  # Track active controller inputs
@@ -613,6 +633,113 @@ class ControllerInputProcessor:
         }
         
         logger.info("Controller input processor initialized")
+    
+    def _load_servo_home_positions(self) -> Dict[str, int]:
+        """Load servo home positions from controller_config.json center_offset values"""
+        try:
+            import json
+            from pathlib import Path
+            
+            # Load from the backend's controller_config.json
+            config_path = "configs/controller_config.json"
+            
+            if not Path(config_path).exists():
+                logger.warning(f"Controller config not found at: {config_path}")
+                return {}
+            
+            with open(config_path, 'r') as f:
+                controller_config = json.load(f)
+            
+            logger.debug(f"Loaded controller config from: {config_path}")
+            
+            # Extract home positions from center_offset values
+            home_positions = {}
+            for control_name, control_config in controller_config.items():
+                behavior = control_config.get('behavior')
+                
+                # Handle direct_servo behavior
+                if behavior == 'direct_servo':
+                    target = control_config.get('target')
+                    center_offset = control_config.get('center_offset', 0)
+                    if target and center_offset != 0:
+                        # Calculate home position from offset: home = 1500 + offset
+                        home_pos = 1500 + center_offset
+                        home_positions[target] = home_pos
+                        logger.debug(f"  {target}: offset={center_offset}, home={home_pos}")
+                
+                # Handle joystick_pair behavior
+                elif behavior == 'joystick_pair':
+                    x_servo = control_config.get('x_servo')
+                    y_servo = control_config.get('y_servo')
+                    x_center_offset = control_config.get('x_center_offset', 0)
+                    y_center_offset = control_config.get('y_center_offset', 0)
+                    
+                    if x_servo and x_center_offset != 0:
+                        home_pos = 1500 + x_center_offset
+                        home_positions[x_servo] = home_pos
+                        logger.debug(f"  {x_servo}: offset={x_center_offset}, home={home_pos}")
+                    
+                    if y_servo and y_center_offset != 0:
+                        home_pos = 1500 + y_center_offset
+                        home_positions[y_servo] = home_pos
+                        logger.debug(f"  {y_servo}: offset={y_center_offset}, home={home_pos}")
+            
+            if home_positions:
+                logger.info(f"Loaded {len(home_positions)} servo home positions from controller config")
+            else:
+                logger.info("No home positions with offsets found in controller config")
+            
+            return home_positions
+            
+        except Exception as e:
+            logger.error(f"Failed to load servo home positions: {e}")
+            return {}
+    
+    def get_center_offset_for_servo(self, servo_channel: str) -> int:
+        """Get the center offset for a servo based on its home position"""
+        if servo_channel in self.servo_home_positions:
+            home = self.servo_home_positions[servo_channel]
+            offset = home - 1500
+            return offset
+        return 0  # Default: no offset
+    
+    def reload_servo_home_positions(self) -> bool:
+        """Reload servo home positions from config file (call when config changes)"""
+        try:
+            old_count = len(self.servo_home_positions)
+            self.servo_home_positions = self._load_servo_home_positions()
+            new_count = len(self.servo_home_positions)
+            
+            logger.info(f"🔄 Reloaded servo home positions: {old_count} → {new_count}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to reload servo home positions: {e}")
+            return False
+    
+    def reload_controller_config(self) -> bool:
+        """Reload controller configuration from configs/controller_config.json"""
+        try:
+            import json
+            from pathlib import Path
+            
+            config_path = "configs/controller_config.json"
+            
+            if not Path(config_path).exists():
+                logger.warning(f"Controller config not found at: {config_path}")
+                return False
+            
+            with open(config_path, 'r') as f:
+                config_dict = json.load(f)
+            
+            # Update the controller_mappings
+            self.controller_mappings = config_dict.copy()
+            
+            logger.info(f"🔄 Reloaded controller config: {len(self.controller_mappings)} mappings")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to reload controller config: {e}")
+            return False
     
     def load_controller_config_by_type(self, controller_type: str) -> bool:
         """Load controller configuration based on detected controller type"""
@@ -925,4 +1052,3 @@ class NemaStepperHandler(BehaviorHandler):
                 return False
         
         return True  # No error, just no trigger
-

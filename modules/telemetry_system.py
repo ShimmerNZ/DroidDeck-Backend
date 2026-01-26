@@ -25,18 +25,18 @@ try:
     import adafruit_ads1x15.ads1115 as ADS
     from adafruit_ads1x15.analog_in import AnalogIn
     ADC_AVAILABLE = True
-    logger.info("✅ ADC libraries imported successfully")
+    logger.info("âœ… ADC libraries imported successfully")
 except ImportError as e:
-    logger.warning(f"⚠️ ADC libraries not available - current sensing disabled: {e}")
+    logger.warning(f"âš ï¸ ADC libraries not available - current sensing disabled: {e}")
 
 # GPIO handling with fallbacks
 GPIO_AVAILABLE = False
 try:
     import RPi.GPIO as GPIO
     GPIO_AVAILABLE = True
-    logger.info("✅ GPIO library imported successfully")
+    logger.info("âœ… GPIO library imported successfully")
 except ImportError:
-    logger.warning("⚠️ RPi.GPIO not available - GPIO features disabled")
+    logger.warning("âš ï¸ RPi.GPIO not available - GPIO features disabled")
 
 @dataclass
 class TelemetryReading:
@@ -48,7 +48,7 @@ class TelemetryReading:
     battery_voltage: float
     current_left_track: float      # A0 - Left track current
     current_right_track: float     # A1 - Right track current  
-    current_electronics: float     # A2 - Electronics current
+    current_total: float           # A2 - Total current
     gpio_available: bool = GPIO_AVAILABLE
     adc_available: bool = ADC_AVAILABLE
     
@@ -92,15 +92,15 @@ class SafeTelemetrySystem:
         self.ads = None
         self.left_track_channel = None
         self.right_track_channel = None
-        self.electronics_channel = None
+        self.total_channel = None
         self.battery_channel = None
         self.setup_adc()
         
         # Hardware calibration constants
-        self.VOLTAGE_DIVIDER_RATIO = 4.9
-        self.ADC_REFERENCE_VOLTAGE = 3.3
-        self.ZERO_CURRENT_VOLTAGE = 0
-        self.CURRENT_SENSITIVITY = 0.02
+        self.VOLTAGE_DIVIDER_RATIO = 4.025
+        self.ADC_REFERENCE_VOLTAGE = 5.21
+        self.ZERO_CURRENT_VOLTAGE = 2.598
+        self.CURRENT_SENSITIVITY = 0.0297
         
         # Simulation parameters for fallback
         self.start_time = time.time()
@@ -128,12 +128,12 @@ class SafeTelemetrySystem:
         # Hardware status callbacks
         self.hardware_status_callbacks: List[Callable] = []
         
-        logger.info(f"📊 Telemetry system initialized - ADC: {'✅ Real' if self.adc_available else '🎲 Simulated'}")
+        logger.info(f"ðŸ“Š Telemetry system initialized - ADC: {'âœ… Real' if self.adc_available else 'ðŸŽ² Simulated'}")
     
     def setup_adc(self) -> bool:
         """Setup ADC with graceful error handling"""
         if not ADC_AVAILABLE:
-            logger.warning("⚠️ ADC libraries not available - using simulated readings")
+            logger.warning("âš ï¸ ADC libraries not available - using simulated readings")
             return False
         
         try:
@@ -145,20 +145,20 @@ class SafeTelemetrySystem:
                         
             self.left_track_channel = AnalogIn(self.ads, ADS.P0)      # A0 - Left track current
             self.right_track_channel = AnalogIn(self.ads, ADS.P1)     # A1 - Right track current
-            self.electronics_channel = AnalogIn(self.ads, ADS.P2)     # A2 - Electronics current
+            self.total_channel = AnalogIn(self.ads, ADS.P2)           # A2 - Total current
             self.battery_channel = AnalogIn(self.ads, ADS.P3)         # A3 - Battery voltage
             
             # Test ADC connectivity
             test_voltage = self.battery_channel.voltage
             if test_voltage is not None:
-                logger.info(f"✅ ADC initialized - Test reading: {test_voltage:.3f}V")
+                logger.info(f"âœ… ADC initialized - Test reading: {test_voltage:.3f}V")
                 self.adc_available = True
                 return True
             else:
                 raise Exception("ADC test reading failed")
                 
         except Exception as e:
-            logger.warning(f"⚠️ Failed to initialize ADC: {e}")
+            logger.warning(f"âš ï¸ Failed to initialize ADC: {e}")
             self.adc_available = False
             self.ads = None
             return False
@@ -190,11 +190,11 @@ class SafeTelemetrySystem:
                 level="WARNING",
                 message="Right track current draw is higher than normal"
             ),
-            "high_current_electronics": TelemetryAlert(
-                name="High Electronics Current",
-                condition="current_electronics > 25.0",
+            "high_current_total": TelemetryAlert(
+                name="High Total Current",
+                condition="current_total > 25.0",
                 level="WARNING", 
-                message="Electronics current draw is higher than normal"
+                message="Total current draw is higher than normal"
             ),
             "high_temperature": TelemetryAlert(
                 name="High Temperature",
@@ -228,7 +228,7 @@ class SafeTelemetrySystem:
             )
         }
         
-        logger.info(f"⚠️ Setup {len(self.alerts)} default alerts")
+        logger.info(f"âš ï¸ Setup {len(self.alerts)} default alerts")
     def voltage_to_current(self, voltage: float) -> float:
         """Convert voltage reading to current using sensor calibration"""
         return (voltage - self.ZERO_CURRENT_VOLTAGE) / self.CURRENT_SENSITIVITY
@@ -278,16 +278,16 @@ class SafeTelemetrySystem:
             # Read all 4 channels
             left_track_voltage = self.left_track_channel.voltage      # A0
             right_track_voltage = self.right_track_channel.voltage    # A1
-            electronics_voltage = self.electronics_channel.voltage    # A2
+            total_voltage = self.total_channel.voltage                # A2
             battery_adc_voltage = self.battery_channel.voltage        # A3
 
             # Convert to actual values
             battery_voltage = self.adc_to_battery_voltage(battery_adc_voltage)
             current_left_track = self.voltage_to_current(left_track_voltage)
             current_right_track = self.voltage_to_current(right_track_voltage)
-            current_electronics = self.voltage_to_current(electronics_voltage)
+            current_total = self.voltage_to_current(total_voltage)
 
-            return battery_voltage, current_left_track, current_right_track, current_electronics
+            return battery_voltage, current_left_track, current_right_track, current_total
             
         except Exception as e:
             logger.debug(f"ADC reading failed: {e}")
@@ -315,11 +315,11 @@ class SafeTelemetrySystem:
         # Simulate different current readings for each channel
         current_left_track = max(0, base_current)
         current_right_track = max(0, base_current * 0.8 + 1.0 * (0.5 - random.random()))
-        current_electronics = max(0, 2.5 + 0.5 * (0.5 - random.random()))
+        current_total = max(0, 2.5 + 0.5 * (0.5 - random.random()))
 
-        logger.debug(f"SIMULATED - Battery: {battery_voltage:.2f}V, Left Track: {current_left_track:.2f}A, Right Track: {current_right_track:.2f}A, Electronics: {current_electronics:.2f}A")
+        logger.debug(f"SIMULATED - Battery: {battery_voltage:.2f}V, Left Track: {current_left_track:.2f}A, Right Track: {current_right_track:.2f}A, Total: {current_total:.2f}A")
 
-        return battery_voltage, current_left_track, current_right_track, current_electronics
+        return battery_voltage, current_left_track, current_right_track, current_total
     
     async def update(self, hardware_status: Optional[Dict[str, Any]] = None) -> TelemetryReading:
         """
@@ -341,9 +341,9 @@ class SafeTelemetrySystem:
             
             # Get sensor readings (real or simulated)
             try:
-                battery_voltage, current_left_track, current_right_track, current_electronics = self.get_real_adc_readings()
+                battery_voltage, current_left_track, current_right_track, current_total = self.get_real_adc_readings()
             except Exception:
-                battery_voltage, current_left_track, current_right_track, current_electronics = self.get_simulated_readings()
+                battery_voltage, current_left_track, current_right_track, current_total = self.get_simulated_readings()
             
             # Create telemetry reading
             reading = TelemetryReading(
@@ -354,7 +354,7 @@ class SafeTelemetrySystem:
                 battery_voltage=battery_voltage,
                 current_left_track=current_left_track,
                 current_right_track=current_right_track, 
-                current_electronics=current_electronics,
+                current_total=current_total,
                 gpio_available=GPIO_AVAILABLE,
                 adc_available=self.adc_available
             )
@@ -406,7 +406,7 @@ class SafeTelemetrySystem:
                 battery_voltage=12.0,
                 current_left_track=0.0,
                 current_right_track=0.0,
-                current_electronics=0.0,
+                current_total=0.0,
             )
     
     async def check_alerts(self, reading: TelemetryReading):
@@ -425,7 +425,7 @@ class SafeTelemetrySystem:
                     "temperature_errors": self.stats["temperature_errors"],
                     "current_left_track": reading.current_left_track,
                     "current_right_track": reading.current_right_track,
-                    "current_electronics": reading.current_electronics,
+                    "current_total": reading.current_total,
                 }
                 
                 # Evaluate alert condition
@@ -501,7 +501,7 @@ class SafeTelemetrySystem:
                 battery_voltage=sum(r.battery_voltage for r in recent_readings) / len(recent_readings),
                 current_left_track=sum(r.current_left_track for r in recent_readings) / len(recent_readings),
                 current_right_track=sum(r.current_right_track for r in recent_readings) / len(recent_readings),
-                current_electronics=sum(r.current_electronics for r in recent_readings) / len(recent_readings),
+                current_total=sum(r.current_total for r in recent_readings) / len(recent_readings),
                 gpio_available=GPIO_AVAILABLE,
                 adc_available=self.adc_available
             )
@@ -543,7 +543,7 @@ class SafeTelemetrySystem:
                     "battery_voltage": current_reading.battery_voltage if current_reading else 0,
                     "current_left_track": current_reading.current_left_track if current_reading else 0,
                     "current_right_track": current_reading.current_right_track if current_reading else 0,
-                    "current_electronics": current_reading.current_electronics if current_reading else 0
+                    "current_total": current_reading.current_total if current_reading else 0
                 } if current_reading else {},
                 "averages_5min": {
                     "cpu_percent": avg_5min.cpu_percent if avg_5min else 0,
@@ -552,7 +552,7 @@ class SafeTelemetrySystem:
                     "battery_voltage": avg_5min.battery_voltage if avg_5min else 0,
                     "current_left_track": avg_5min.current_left_track if avg_5min else 0,
                     "current_right_track": avg_5min.current_right_track if avg_5min else 0,
-                    "current_electronics": avg_5min.current_electronics if avg_5min else 0
+                    "current_total": avg_5min.current_total if avg_5min else 0
                 } if avg_5min else {},
                 "alerts": {
                     "active": [
@@ -599,7 +599,7 @@ class SafeTelemetrySystem:
                 "battery_voltage": 12.0,
                 "current_left_track": 5.0,
                 "current_right_track": 4.0,
-                "current_electronics": 2.0,
+                "current_total": 2.0,
                 "temperature": 45.0,
                 "cpu_percent": 50.0,
                 "memory_percent": 60.0,
@@ -669,7 +669,7 @@ class SafeTelemetrySystem:
             with open(filename, 'w', newline='') as csvfile:
                 fieldnames = [
                     'timestamp', 'datetime', 'cpu_percent', 'memory_percent', 
-                    'temperature', 'battery_voltage', 'current_left_track', 'current_right_track', 'current_electronics',
+                    'temperature', 'battery_voltage', 'current_left_track', 'current_right_track', 'current_total',
                     'gpio_available', 'adc_available', 'maestro1_connected', 
                     'maestro2_connected', 'audio_system_ready', 'stream_fps'
                 ]
@@ -687,7 +687,7 @@ class SafeTelemetrySystem:
                         'battery_voltage': reading.battery_voltage,
                         'current_left_track': reading.current_left_track,
                         'current_right_track': reading.current_right_track,
-                        'current_electronics': reading.current_electronics,
+                        'current_total': reading.current_total,
                         'gpio_available': reading.gpio_available,
                         'adc_available': reading.adc_available,
                         'maestro1_connected': reading.maestro1_connected,
@@ -725,7 +725,7 @@ class SafeTelemetrySystem:
             memory_score = max(0, 100 - reading.memory_percent)
             scores["memory"] = memory_score
             
-            # Temperature health (optimal around 40-60°C)
+            # Temperature health (optimal around 40-60Â°C)
             if reading.temperature <= 60:
                 temp_score = 100
             elif reading.temperature <= 75:
@@ -893,7 +893,7 @@ class SafeTelemetrySystem:
                 self.battery_channel = None
                 self.left_track_channel = None
                 self.right_track_channel = None
-                self.electronics_channel = None
+                self.total_channel = None
             
             logger.info("Telemetry system cleanup complete")
             
@@ -913,7 +913,7 @@ def get_legacy_current_mapping(reading: TelemetryReading) -> Dict[str, float]:
     return {
         "current": reading.current_left_track,      # Legacy: main current -> left track
         "current_a1": reading.current_right_track,  # Legacy: current_a1 -> right track
-        "current_a2": reading.current_electronics   # Legacy: current_a2 -> electronics
+        "current_a2": reading.current_total   # Legacy: current_a2 -> total
     }
 
 
@@ -925,7 +925,7 @@ def create_legacy_compatible_reading(reading: TelemetryReading) -> TelemetryRead
     # Add legacy attributes dynamically
     setattr(reading, 'current', reading.current_left_track)
     setattr(reading, 'current_a1', reading.current_right_track)
-    setattr(reading, 'current_a2', reading.current_electronics)
+    setattr(reading, 'current_a2', reading.current_total)
     return reading
 
 

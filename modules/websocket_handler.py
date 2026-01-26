@@ -19,12 +19,13 @@ class WebSocketMessageHandler:
     Routes messages to appropriate handlers based on message type.
     """
     
-    def __init__(self, hardware_service, scene_engine, audio_controller, telemetry_system, backend_ref):
+    def __init__(self, hardware_service, scene_engine, audio_controller, telemetry_system, backend_ref, controller_input_processor=None):
         self.hardware_service = hardware_service
         self.scene_engine = scene_engine
         self.audio_controller = audio_controller
         self.telemetry_system = telemetry_system
         self.backend = backend_ref  # Reference to main backend for broadcasting
+        self.controller_input_processor = controller_input_processor  # For reloading servo home positions
         self.last_navigation_time = 0
         self.navigation_cooldown = 2.3 #debounce navigation commands
         # Message type routing table
@@ -34,6 +35,7 @@ class WebSocketMessageHandler:
             "servo_speed": self._handle_servo_speed_command,
             "servo_acceleration": self._handle_servo_acceleration_command,
             "servo_config_update": self._handle_servo_config_update,
+            "servo_home_positions": self._handle_servo_home_positions,
             "get_servo_position": self._handle_get_servo_position,
             "get_all_servo_positions": self._handle_get_all_servo_positions,
             "get_maestro_info": self._handle_get_maestro_info,
@@ -88,12 +90,10 @@ class WebSocketMessageHandler:
             
             # Mode control
             "failsafe": self._handle_failsafe,
-            "toggle_failsafe": self._handle_toggle_failsafe,
-            "get_failsafe_status": self._handle_get_failsafe_status,
             "mode": self._handle_mode_control
         }
         
-        logger.info(f"🌐 WebSocket handler initialized with {len(self.handlers)} message types")
+        logger.info(f"Ã°Å¸Å’Â WebSocket handler initialized with {len(self.handlers)} message types")
 
         
     async def _handle_frontend_controller(self, websocket, data: Dict[str, Any]):
@@ -199,11 +199,11 @@ class WebSocketMessageHandler:
                 return False
                 
         except json.JSONDecodeError as e:
-            logger.error(f"💥 Invalid JSON received: {e}")
+            logger.error(f"Ã°Å¸â€™Â¥ Invalid JSON received: {e}")
             await self._send_error_response(websocket, "Invalid JSON format")
             return False
         except Exception as e:
-            logger.error(f"💥 Error handling message: {e}")
+            logger.error(f"Ã°Å¸â€™Â¥ Error handling message: {e}")
             await self._send_error_response(websocket, f"Message handling error: {str(e)}")
             return False
     
@@ -451,52 +451,6 @@ class WebSocketMessageHandler:
             logger.error(f"Manual controller calibration error: {e}")
             await self._send_error_response(websocket, f"Manual calibration error: {str(e)}")
 
-    async def _handle_toggle_failsafe(self, websocket, data: Dict[str, Any]):
-        """Handle failsafe toggle request"""
-        try:
-            enable = data.get("enable", True)
-            result = await self.backend.toggle_failsafe(enable)
-            
-            # Broadcast to all clients
-            await self.backend.broadcast_message({
-                "type": "failsafe_status",
-                **result,
-                "timestamp": time.time()
-            })
-            
-            await self._send_websocket_message(websocket, {
-                "type": "failsafe_toggle_response",
-                **result,
-                "timestamp": time.time()
-            })
-        except Exception as e:
-            logger.error(f"Failsafe toggle error: {e}")
-            await self._send_error_response(websocket, f"Failsafe toggle error: {str(e)}")
-
-    async def _handle_get_failsafe_status(self, websocket, data: Dict[str, Any]):
-        """Get current failsafe status"""
-        try:
-            nema_status = {}
-            if self.backend.hardware_service.stepper_controller:
-                stepper = self.backend.hardware_service.stepper_controller
-                nema_status = {
-                    "enabled": not stepper.intentionally_disabled,
-                    "homed": stepper.home_position_found,
-                    "state": stepper.state.value
-                }
-            
-            await self._send_websocket_message(websocket, {
-                "type": "failsafe_status",
-                "failsafe_active": self.backend.failsafe_active,
-                "state": self.backend.state.value,
-                "nema": nema_status,
-                "track_channels": list(self.backend.track_channels),
-                "timestamp": time.time()
-            })
-        except Exception as e:
-            logger.error(f"Get failsafe status error: {e}")
-            await self._send_error_response(websocket, f"Error getting failsafe status: {str(e)}")        
-
 
     # ==================== SERVO CONTROL HANDLERS ====================
     
@@ -606,6 +560,99 @@ class WebSocketMessageHandler:
         
         logger.info(f"Servo configuration updated")
 
+    async def _handle_servo_home_positions(self, websocket, data: Dict[str, Any]):
+        """Handle servo home positions notification from frontend and update backend config"""
+        maestro = data.get("maestro")
+        home_positions = data.get("home_positions", {})
+        
+        # Convert keys to integers (JSON converts dict keys to strings)
+        home_positions = {int(k): v for k, v in home_positions.items()}
+        
+        logger.info(f"Received home positions update for Maestro {maestro}: {len(home_positions)} channels")
+        logger.debug(f"Home positions data: {home_positions}")
+        
+        # Update backend controller_config.json with center_offset values
+        try:
+            controller_config_path = "configs/controller_config.json"
+            
+            # Load current controller config
+            try:
+                with open(controller_config_path, 'r') as f:
+                    controller_config = json.load(f)
+            except FileNotFoundError:
+                logger.warning(f"Controller config not found at {controller_config_path}")
+                await self._send_error_response(websocket, "Controller config file not found")
+                return
+            
+            # Update center_offset for any joystick mappings that target these servos
+            updated_count = 0
+            logger.debug(f"Checking {len(controller_config)} controller mappings")
+            
+            for control_name, control_config in controller_config.items():
+                behavior = control_config.get('behavior')
+                
+                # Handle direct_servo behavior
+                if behavior == 'direct_servo':
+                    target = control_config.get('target')
+                    logger.debug(f"Checking {control_name}: target={target}, maestro={maestro}")
+                    if target and target.startswith(f"m{maestro}_ch"):
+                        channel_num = int(target.split("_ch")[1])
+                        logger.debug(f"  Channel {channel_num}, checking if in home_positions: {channel_num in home_positions}")
+                        if channel_num in home_positions:
+                            home_pos = home_positions[channel_num]
+                            center_offset = home_pos - 1500
+                            control_config['center_offset'] = center_offset
+                            updated_count += 1
+                            logger.info(f"  Updated {control_name} -> {target}: center_offset={center_offset} (home={home_pos})")
+                
+                # Handle joystick_pair behavior
+                elif behavior == 'joystick_pair':
+                    x_servo = control_config.get('x_servo')
+                    y_servo = control_config.get('y_servo')
+                    
+                    if x_servo and x_servo.startswith(f"m{maestro}_ch"):
+                        channel_num = int(x_servo.split("_ch")[1])
+                        if channel_num in home_positions:
+                            home_pos = home_positions[channel_num]
+                            center_offset = home_pos - 1500
+                            control_config['x_center_offset'] = center_offset
+                            updated_count += 1
+                            logger.info(f"  Updated {control_name} X -> {x_servo}: x_center_offset={center_offset}")
+                    
+                    if y_servo and y_servo.startswith(f"m{maestro}_ch"):
+                        channel_num = int(y_servo.split("_ch")[1])
+                        if channel_num in home_positions:
+                            home_pos = home_positions[channel_num]
+                            center_offset = home_pos - 1500
+                            control_config['y_center_offset'] = center_offset
+                            updated_count += 1
+                            logger.info(f"  Updated {control_name} Y -> {y_servo}: y_center_offset={center_offset}")
+            
+            # Save updated config
+            if updated_count > 0:
+                with open(controller_config_path, 'w') as f:
+                    json.dump(controller_config, f, indent=2)
+                logger.info(f"✅ Updated backend controller_config.json: {updated_count} center offsets applied")
+                
+                # Reload both controller config and servo home positions
+                if self.controller_input_processor:
+                    self.controller_input_processor.reload_controller_config()
+                    self.controller_input_processor.reload_servo_home_positions()
+                    logger.info("🔄 Controller input processor reloaded")
+            else:
+                logger.info("No controller mappings found to update")
+            
+            await self._send_websocket_message(websocket, {
+                "type": "servo_home_positions_ack", 
+                "success": True,
+                "maestro": maestro,
+                "updated_count": updated_count,
+                "timestamp": time.time()
+            })
+            
+        except Exception as e:
+            logger.error(f"Failed to update backend controller config: {e}")
+            await self._send_error_response(websocket, f"Failed to update controller config: {str(e)}")
 
     async def _handle_nema_move_to_position(self, websocket, data: Dict[str, Any]):
         """Handle NEMA move to position command"""
@@ -662,9 +709,19 @@ class WebSocketMessageHandler:
                 await self._send_error_response(websocket, "Invalid sweep range: min_cm must be less than max_cm")
                 return
             
-            # For now, we'll simulate sweep by moving between positions
-            # In a real implementation, you'd start a continuous sweep
+            # Start the actual sweep via hardware service
             logger.info(f"NEMA sweep started: {min_cm} to {max_cm} cm")
+            
+            # Send command to hardware service to start sweeping
+            sweep_response = await self.hardware_service.handle_stepper_command({
+                "command": "start_sweep",
+                "min_cm": min_cm,
+                "max_cm": max_cm
+            })
+            
+            if not sweep_response.get("success", False):
+                await self._send_error_response(websocket, f"Failed to start sweep: {sweep_response.get('message', 'Unknown error')}")
+                return
             
             # Broadcast sweep status
             await self.backend.broadcast_message({
@@ -691,6 +748,11 @@ class WebSocketMessageHandler:
         """Handle NEMA stop sweep command"""
         try:
             logger.info("NEMA sweep stopped")
+            
+            # Send stop command to hardware service
+            stop_response = await self.hardware_service.handle_stepper_command({
+                "command": "stop_sweep"
+            })
             
             # Broadcast sweep stopped status
             await self.backend.broadcast_message({
@@ -938,7 +1000,7 @@ class WebSocketMessageHandler:
         emotion = data.get("emotion")
         if emotion:
             success = await self.scene_engine.play_scene(emotion)
-            logger.info(f"Scene '{emotion}': {'✅' if success else '❌'}")
+            logger.info(f"Scene '{emotion}': {'Ã¢Å“â€¦' if success else 'Ã¢ÂÅ’'}")
             
             if not success:
                 await self._send_error_response(websocket, f"Failed to play scene: {emotion}")
@@ -958,7 +1020,7 @@ class WebSocketMessageHandler:
             }
             
             await self._send_websocket_message(websocket, response)
-            logger.info(f"📋 Sent {len(scenes)} scenes to client")
+            logger.info(f"Ã°Å¸â€œâ€¹ Sent {len(scenes)} scenes to client")
             
         except Exception as e:
             logger.error(f"Failed to get scenes: {e}")
@@ -1037,7 +1099,7 @@ class WebSocketMessageHandler:
                 track = data.get("track")
                 if track:
                     success = self.audio_controller.play_track(track)
-                    logger.info(f"🎵 Audio play '{track}': {'✅' if success else '❌'}")
+                    logger.info(f"Ã°Å¸Å½Âµ Audio play '{track}': {'Ã¢Å“â€¦' if success else 'Ã¢ÂÅ’'}")
                     if not success:
                         await self._send_error_response(websocket, f"Failed to play track: {track}")
                 else:
@@ -1045,12 +1107,12 @@ class WebSocketMessageHandler:
                     
             elif command == "stop":
                 self.audio_controller.stop()
-                logger.info("🛑 Audio stopped")
+                logger.info("Ã°Å¸â€ºâ€˜ Audio stopped")
                 
             elif command == "volume":
                 volume = data.get("volume", 0.5)
                 self.audio_controller.set_volume(volume)
-                logger.info(f"🔊 Audio volume set to {volume}")
+                logger.info(f"Ã°Å¸â€Å  Audio volume set to {volume}")
                 
             else:
                 await self._send_error_response(websocket, f"Unknown audio command: {command}")
@@ -1072,7 +1134,7 @@ class WebSocketMessageHandler:
             }
             
             await self._send_websocket_message(websocket, response)
-            logger.info(f"🎵 Sent {len(audio_files)} audio files to client")
+            logger.info(f"Ã°Å¸Å½Âµ Sent {len(audio_files)} audio files to client")
             
         except Exception as e:
             logger.error(f"Failed to get audio files: {e}")
@@ -1082,7 +1144,7 @@ class WebSocketMessageHandler:
     
     async def _handle_emergency_stop(self, websocket, data: Dict[str, Any]):
         """Handle emergency stop command"""
-        logger.critical("🚨 EMERGENCY STOP ACTIVATED via WebSocket")
+        logger.critical("Ã°Å¸Å¡Â¨ EMERGENCY STOP ACTIVATED via WebSocket")
         
         # Emergency stop all systems
         await self.hardware_service.emergency_stop_all()
@@ -1123,7 +1185,7 @@ class WebSocketMessageHandler:
         gesture_name = data.get("name")
         confidence = data.get("confidence", 1.0)
         
-        logger.info(f"👋 Gesture detected: {gesture_name} (confidence: {confidence})")
+        logger.info(f"Ã°Å¸â€˜â€¹ Gesture detected: {gesture_name} (confidence: {confidence})")
         
         # Map gesture names to scene names
         gesture_scene_mapping = {
@@ -1153,7 +1215,7 @@ class WebSocketMessageHandler:
                 self.scene_engine.scene_completed_callback = original_completed
                 self.scene_engine.scene_error_callback = original_error
                 
-                logger.info(f"🎭 Triggered scene '{scene_name}' for gesture '{gesture_name}' (no callbacks)")
+                logger.info(f"Ã°Å¸Å½Â­ Triggered scene '{scene_name}' for gesture '{gesture_name}' (no callbacks)")
                 
             except Exception as e:
                 # Always restore callbacks even on error
@@ -1199,7 +1261,7 @@ class WebSocketMessageHandler:
     async def _handle_tracking(self, websocket, data: Dict[str, Any]):
         """Handle tracking enable/disable"""
         state = data.get("state", False)
-        logger.info(f"👁️ Tracking {'enabled' if state else 'disabled'}")
+        logger.info(f"Ã°Å¸â€˜ÂÃ¯Â¸Â Tracking {'enabled' if state else 'disabled'}")
         
         # Broadcast tracking state to all clients
         await self.backend.broadcast_message({
@@ -1220,29 +1282,18 @@ class WebSocketMessageHandler:
     async def _handle_failsafe(self, websocket, data: Dict[str, Any]):
         """Handle failsafe mode toggle"""
         state = data.get("state", False)
-        logger.info(f"⚠️ Failsafe mode {'activated' if state else 'deactivated'}")
+        logger.info(f"Ã¢Å¡Â Ã¯Â¸Â Failsafe mode {'activated' if state else 'deactivated'}")
         
         # Update backend state
-        if hasattr(self.backend, 'toggle_failsafe'):
-            result = await self.backend.toggle_failsafe(state)
-            
-            # Send response back to client
-            await self._send_websocket_message(websocket, {
-                "type": "failsafe_response",
-                "success": result.get("success", False),
-                "failsafe_active": state,
-                "message": result.get("message", ""),
-                "nema": result.get("nema", {}),
-                "tracks_enabled": not state,
-                "timestamp": time.time()
-            })
+        if hasattr(self.backend, 'set_failsafe_mode'):
+            await self.backend.set_failsafe_mode(state)
     
     async def _handle_mode_control(self, websocket, data: Dict[str, Any]):
         """Handle system mode control"""
         mode_name = data.get("name")
         state = data.get("state", True)
         
-        logger.info(f"🎭 Mode '{mode_name}' {'activated' if state else 'deactivated'}")
+        logger.info(f"Ã°Å¸Å½Â­ Mode '{mode_name}' {'activated' if state else 'deactivated'}")
         
         # Handle different modes
         if mode_name == "idle":
@@ -1269,7 +1320,7 @@ class WebSocketMessageHandler:
             "timestamp": time.time()
         }
         await self._send_websocket_message(websocket, error_response)
-        logger.error(f"❌ Sent error to client: {error_message}")
+        logger.error(f"Ã¢ÂÅ’ Sent error to client: {error_message}")
         
     def get_handler_stats(self) -> Dict[str, Any]:
         """Get statistics about message handling"""
