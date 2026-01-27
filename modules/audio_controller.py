@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 Audio Controller for WALL-E Robot Control System
@@ -262,7 +261,15 @@ class NativeAudioController:
             # Notify callback if track was playing
             if self.is_playing and self.track_finished_callback:
                 try:
-                    self.track_finished_callback(self.current_track, "stopped")
+                    # Smart callback invocation - detect signature
+                    import inspect
+                    sig = inspect.signature(self.track_finished_callback)
+                    param_count = len(sig.parameters)
+                    
+                    if param_count == 1:
+                        self.track_finished_callback(self.current_track)
+                    else:
+                        self.track_finished_callback(self.current_track, "stopped")
                 except Exception as e:
                     logger.error(f"Track finished callback error: {e}")
             # Reset state

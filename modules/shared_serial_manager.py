@@ -190,7 +190,7 @@ class EnhancedSharedSerialPortManager:
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to start shared serial manager: {e}")
+            logger.error(f"âŒ Failed to start shared serial manager: {e}")
             self.stats["last_error"] = str(e)
             return False
     
@@ -470,7 +470,7 @@ class EnhancedMaestroControllerShared:
         if self.shared_manager.register_device(device_id, device_number, self):
             logger.info(f"🎛️ Created enhanced Maestro controller: {device_id} (device #{device_number})")
         else:
-            logger.error(f"❌ Failed to register {device_id} with shared manager")
+            logger.error(f"âŒ Failed to register {device_id} with shared manager")
     
     def start(self) -> bool:
         """Start the controller"""
@@ -518,17 +518,43 @@ class EnhancedMaestroControllerShared:
             
             with self.shared_manager.connection_lock:
                 if self.shared_manager.connected and self.shared_manager.serial_conn:
+                    # Flush any stale data from input buffer
+                    self.shared_manager.serial_conn.reset_input_buffer()
+                    time.sleep(0.010)
+                    
                     # Get device info command (0x21)
                     cmd_bytes = bytes([0xAA, self.device_number, 0x21])
+                    print(f"  Sending command: {cmd_bytes.hex()}")
                     self.shared_manager.serial_conn.write(cmd_bytes)
-                    time.sleep(0.050)
+                    
+                    # Wait longer for device to respond
+                    time.sleep(0.100)
+                    
+                    # Check how many bytes are waiting
+                    waiting = self.shared_manager.serial_conn.in_waiting
+                    print(f"  Bytes waiting: {waiting}")
                     
                     response = self.shared_manager.serial_conn.read(16)
+                    print(f"  Response length: {len(response)} bytes")
+                    print(f"  Raw response bytes: {[hex(b) for b in response]}")
+                    
                     if len(response) >= 2:
                         device_info = response.hex()
                         print(f"  Device info: {device_info}")
                         
-                        # Based on your results:
+                        # Parse the response bytes
+                        # The Maestro returns firmware version in first two bytes
+                        # Byte 0: Minor firmware version
+                        # Byte 1: Major firmware version
+                        if len(response) >= 2:
+                            minor_fw = response[0]
+                            major_fw = response[1]
+                            print(f"  Firmware version: {major_fw}.{minor_fw}")
+                        
+                        detected_channels = None
+                        
+                        # Original pattern matching (try first)
+                        # Based on documented patterns:
                         # 1100 = 24-channel Maestro
                         # 0100 = 18-channel Maestro
                         if device_info.startswith('1100'):
@@ -537,9 +563,38 @@ class EnhancedMaestroControllerShared:
                         elif device_info.startswith('0100'):
                             detected_channels = 18
                             print(f"  Device info indicates 18-channel Maestro")
-                        else:
-                            # Unknown device info, fall back to guess
-                            print(f"  Unknown device info, using fallback...")
+                        
+                        # If device info didn't give us an answer, try alternative detection
+                        if detected_channels is None:
+                            print(f"  Unknown device info, trying alternative detection method...")
+                            
+                            # Try reading position from a high channel to determine max channels
+                            for test_channel in [23, 17, 11]:
+                                try:
+                                    self.shared_manager.serial_conn.reset_input_buffer()
+                                    time.sleep(0.010)
+                                    
+                                    # Get position command (0x10)
+                                    test_cmd = bytes([0xAA, self.device_number, 0x10, test_channel])
+                                    self.shared_manager.serial_conn.write(test_cmd)
+                                    time.sleep(0.020)
+                                    
+                                    test_response = self.shared_manager.serial_conn.read(2)
+                                    if len(test_response) == 2:
+                                        print(f"  ✅ Channel {test_channel} responded - detected {test_channel + 1} channels")
+                                        if test_channel >= 23:
+                                            detected_channels = 24
+                                        elif test_channel >= 17:
+                                            detected_channels = 18
+                                        else:
+                                            detected_channels = 12
+                                        break
+                                except:
+                                    continue
+                        
+                        # If still no detection, use fallback
+                        if detected_channels is None:
+                            print(f"  All detection methods failed, using fallback...")
                             detected_channels = self._guess_channel_count()
                     else:
                         print(f"  No device info response, using fallback...")
@@ -747,7 +802,7 @@ def get_shared_manager(port: str, baud_rate: int = 9600) -> EnhancedSharedSerial
             manager.start()
             _global_managers[manager_key] = manager
         else:
-            logger.debug(f"♻️ Reusing existing shared manager for {port}")
+            logger.debug(f"â™»ï¸ Reusing existing shared manager for {port}")
         
         return _global_managers[manager_key]
 

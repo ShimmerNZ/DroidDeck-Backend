@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 class BehaviorType(Enum):
     """Supported controller behavior types"""
     DIRECT_SERVO = "direct_servo"
+    MULTI_SERVO = "multi_servo"
+    TOGGLE_SERVO = "toggle_servo"
     JOYSTICK_PAIR = "joystick_pair"
     DIFFERENTIAL_TRACKS = "differential_tracks"
     SCENE_TRIGGER = "scene_trigger"
@@ -100,6 +102,142 @@ class DirectServoHandler(BehaviorHandler):
             
         except Exception as e:
             self.logger.error(f"Error in direct servo handler: {e}")
+            return False
+
+class MultiServoHandler(BehaviorHandler):
+    """Handle multiple servo control - single axis to multiple servos with individual invert settings"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.last_sent_values = {}
+        self.change_threshold = 0.02
+        # Load servo config to get min/max ranges
+        self.servo_config = {}
+        try:
+            import json
+            with open('configs/servo_config.json', 'r') as f:
+                self.servo_config = json.load(f)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Could not load servo_config.json: {e}")
+    
+    async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
+        try:
+            servos = config.get('servos', [])
+            
+            if not servos or not self.hardware_service:
+                return False
+            
+            success_count = 0
+            
+            # Process each servo in the list
+            for servo_info in servos:
+                channel = servo_info.get('channel')
+                invert = servo_info.get('invert', False)
+                
+                if not channel:
+                    continue
+                
+                # Get servo-specific min/max from servo config
+                servo_cfg = self.servo_config.get(channel, {})
+                min_pulse = servo_cfg.get('min', 992)
+                max_pulse = servo_cfg.get('max', 2000)
+                
+                # Calculate center and range
+                center = (min_pulse + max_pulse) // 2
+                pulse_range = (max_pulse - min_pulse) // 2
+                
+                # Apply invert and calculate pulse
+                value = -controller_input.raw_value if invert else controller_input.raw_value
+                
+                # Check threshold
+                last_value = self.last_sent_values.get(channel, None)
+                if last_value is not None and abs(value - last_value) < self.change_threshold:
+                    continue
+                
+                pulse = center + int(value * pulse_range)
+                pulse = max(min_pulse, min(max_pulse, pulse))
+                
+                # Send servo command
+                success = await self.hardware_service.set_servo_position(
+                    channel, pulse, "realtime"
+                )
+                
+                if success:
+                    self.logger.debug(f"Multi servo {channel}: {pulse} (raw: {controller_input.raw_value:.2f}, inverted: {invert})")
+                    self.last_sent_values[channel] = value
+                    success_count += 1
+            
+            return success_count > 0
+            
+        except Exception as e:
+            self.logger.error(f"Error in multi servo handler: {e}")
+            return False
+
+class ToggleServoHandler(BehaviorHandler):
+    """Handle toggle servo control - button press alternates between two positions"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.toggle_states = {}  # Track current state for each control
+    
+    async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
+        try:
+            servo_channel = config.get('target')
+            position_1 = config.get('position_1', 1000)
+            position_2 = config.get('position_2', 2000)
+            trigger_timing = config.get('trigger_timing', 'on_press')
+            threshold = 0.5
+            
+            if not servo_channel or not self.hardware_service:
+                return False
+            
+            # Initialize state for this control if not exists
+            if controller_input.control_name not in self.toggle_states:
+                self.toggle_states[controller_input.control_name] = {
+                    'current_position': 1,  # Start at position 1
+                    'was_pressed': False
+                }
+            
+            state = self.toggle_states[controller_input.control_name]
+            is_pressed = abs(controller_input.raw_value) > threshold
+            
+            # Handle trigger timing
+            should_trigger = False
+            if trigger_timing == 'on_press':
+                # Trigger on button press (rising edge)
+                if is_pressed and not state['was_pressed']:
+                    should_trigger = True
+            elif trigger_timing == 'on_release':
+                # Trigger on button release (falling edge)
+                if not is_pressed and state['was_pressed']:
+                    should_trigger = True
+            
+            state['was_pressed'] = is_pressed
+            
+            if should_trigger:
+                # Toggle between positions
+                if state['current_position'] == 1:
+                    pulse = position_1
+                    state['current_position'] = 2
+                else:
+                    pulse = position_2
+                    state['current_position'] = 1
+                
+                # Send servo command
+                success = await self.hardware_service.set_servo_position(
+                    servo_channel, pulse, "realtime"
+                )
+                
+                if success:
+                    self.logger.debug(f"Toggle servo {servo_channel}: {pulse} (position {3 - state['current_position']})")
+                
+                return success
+            
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Error in toggle servo handler: {e}")
             return False
 
 class JoystickPairHandler(BehaviorHandler):
@@ -438,6 +576,8 @@ class ControllerInputProcessor:
         # Initialize behavior handlers (pass self so they can access get_center_offset_for_servo)
         self.handlers = {
             BehaviorType.DIRECT_SERVO: DirectServoHandler(hardware_service, scene_engine, logger, self),
+            BehaviorType.MULTI_SERVO: MultiServoHandler(hardware_service, scene_engine, logger, self),
+            BehaviorType.TOGGLE_SERVO: ToggleServoHandler(hardware_service, scene_engine, logger, self),
             BehaviorType.JOYSTICK_PAIR: JoystickPairHandler(hardware_service, scene_engine, logger, self),
             BehaviorType.DIFFERENTIAL_TRACKS: DifferentialTracksHandler(hardware_service, scene_engine, logger),
             BehaviorType.SCENE_TRIGGER: SceneTriggerHandler(hardware_service, scene_engine, logger),
@@ -710,7 +850,7 @@ class ControllerInputProcessor:
             self.servo_home_positions = self._load_servo_home_positions()
             new_count = len(self.servo_home_positions)
             
-            logger.info(f"🔄 Reloaded servo home positions: {old_count} → {new_count}")
+            logger.info(f"ðŸ”„ Reloaded servo home positions: {old_count} â†’ {new_count}")
             return True
         except Exception as e:
             logger.error(f"Failed to reload servo home positions: {e}")
@@ -734,7 +874,7 @@ class ControllerInputProcessor:
             # Update the controller_mappings
             self.controller_mappings = config_dict.copy()
             
-            logger.info(f"🔄 Reloaded controller config: {len(self.controller_mappings)} mappings")
+            logger.info(f"ðŸ”„ Reloaded controller config: {len(self.controller_mappings)} mappings")
             return True
             
         except Exception as e:

@@ -25,18 +25,18 @@ try:
     import adafruit_ads1x15.ads1115 as ADS
     from adafruit_ads1x15.analog_in import AnalogIn
     ADC_AVAILABLE = True
-    logger.info("âœ… ADC libraries imported successfully")
+    logger.info("✅ ADC libraries imported successfully")
 except ImportError as e:
-    logger.warning(f"âš ï¸ ADC libraries not available - current sensing disabled: {e}")
+    logger.warning(f"⚠️ ADC libraries not available - current sensing disabled: {e}")
 
 # GPIO handling with fallbacks
 GPIO_AVAILABLE = False
 try:
     import RPi.GPIO as GPIO
     GPIO_AVAILABLE = True
-    logger.info("âœ… GPIO library imported successfully")
+    logger.info("✅ GPIO library imported successfully")
 except ImportError:
-    logger.warning("âš ï¸ RPi.GPIO not available - GPIO features disabled")
+    logger.warning("⚠️ RPi.GPIO not available - GPIO features disabled")
 
 @dataclass
 class TelemetryReading:
@@ -128,12 +128,12 @@ class SafeTelemetrySystem:
         # Hardware status callbacks
         self.hardware_status_callbacks: List[Callable] = []
         
-        logger.info(f"ðŸ“Š Telemetry system initialized - ADC: {'âœ… Real' if self.adc_available else 'ðŸŽ² Simulated'}")
+        logger.info(f"📊 Telemetry system initialized - ADC: {'✅ Real' if self.adc_available else '🎲 Simulated'}")
     
     def setup_adc(self) -> bool:
         """Setup ADC with graceful error handling"""
         if not ADC_AVAILABLE:
-            logger.warning("âš ï¸ ADC libraries not available - using simulated readings")
+            logger.warning("⚠️ ADC libraries not available - using simulated readings")
             return False
         
         try:
@@ -151,14 +151,14 @@ class SafeTelemetrySystem:
             # Test ADC connectivity
             test_voltage = self.battery_channel.voltage
             if test_voltage is not None:
-                logger.info(f"âœ… ADC initialized - Test reading: {test_voltage:.3f}V")
+                logger.info(f"✅ ADC initialized - Test reading: {test_voltage:.3f}V")
                 self.adc_available = True
                 return True
             else:
                 raise Exception("ADC test reading failed")
                 
         except Exception as e:
-            logger.warning(f"âš ï¸ Failed to initialize ADC: {e}")
+            logger.warning(f"⚠️ Failed to initialize ADC: {e}")
             self.adc_available = False
             self.ads = None
             return False
@@ -228,7 +228,7 @@ class SafeTelemetrySystem:
             )
         }
         
-        logger.info(f"âš ï¸ Setup {len(self.alerts)} default alerts")
+        logger.info(f"⚠️ Setup {len(self.alerts)} default alerts")
     def voltage_to_current(self, voltage: float) -> float:
         """Convert voltage reading to current using sensor calibration"""
         return (voltage - self.ZERO_CURRENT_VOLTAGE) / self.CURRENT_SENSITIVITY
@@ -725,7 +725,7 @@ class SafeTelemetrySystem:
             memory_score = max(0, 100 - reading.memory_percent)
             scores["memory"] = memory_score
             
-            # Temperature health (optimal around 40-60Â°C)
+            # Temperature health (optimal around 40-60°C)
             if reading.temperature <= 60:
                 temp_score = 100
             elif reading.temperature <= 75:
