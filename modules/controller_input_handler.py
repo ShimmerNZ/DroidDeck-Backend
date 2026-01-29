@@ -121,6 +121,20 @@ class MultiServoHandler(BehaviorHandler):
             if self.logger:
                 self.logger.warning(f"Could not load servo_config.json: {e}")
     
+    def reload_servo_config(self) -> bool:
+        """Reload servo config from file - call when min/max values change"""
+        try:
+            import json
+            with open('configs/servo_config.json', 'r') as f:
+                self.servo_config = json.load(f)
+            if self.logger:
+                self.logger.info(f"MultiServoHandler reloaded servo_config.json: {len(self.servo_config)} servos")
+            return True
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Failed to reload servo_config.json: {e}")
+            return False
+    
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
             servos = config.get('servos', [])
@@ -850,7 +864,7 @@ class ControllerInputProcessor:
             self.servo_home_positions = self._load_servo_home_positions()
             new_count = len(self.servo_home_positions)
             
-            logger.info(f"ðŸ”„ Reloaded servo home positions: {old_count} â†’ {new_count}")
+            logger.info(f"Reloaded servo home positions: {old_count} -> {new_count}")
             return True
         except Exception as e:
             logger.error(f"Failed to reload servo home positions: {e}")
@@ -874,11 +888,27 @@ class ControllerInputProcessor:
             # Update the controller_mappings
             self.controller_mappings = config_dict.copy()
             
-            logger.info(f"ðŸ”„ Reloaded controller config: {len(self.controller_mappings)} mappings")
+            logger.info(f"Reloaded controller config: {len(self.controller_mappings)} mappings")
             return True
             
         except Exception as e:
             logger.error(f"Failed to reload controller config: {e}")
+            return False
+    
+    def reload_multi_servo_config(self) -> bool:
+        """Reload servo min/max config for MultiServoHandler (call when servo settings change)"""
+        try:
+            multi_servo_handler = self.handlers.get(BehaviorType.MULTI_SERVO)
+            if multi_servo_handler and hasattr(multi_servo_handler, 'reload_servo_config'):
+                success = multi_servo_handler.reload_servo_config()
+                if success:
+                    logger.info("✅ MultiServoHandler servo config reloaded")
+                return success
+            else:
+                logger.warning("MultiServoHandler not found or doesn't support reload")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to reload multi servo config: {e}")
             return False
     
     def load_controller_config_by_type(self, controller_type: str) -> bool:

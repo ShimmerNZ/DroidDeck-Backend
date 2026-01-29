@@ -95,7 +95,7 @@ class WebSocketMessageHandler:
             "mode": self._handle_mode_control
         }
         
-        logger.info(f"🔧 WebSocket handler initialized with {len(self.handlers)} message types")
+        logger.info(f"ðŸ”§ WebSocket handler initialized with {len(self.handlers)} message types")
 
         
     async def _handle_frontend_controller(self, websocket, data: Dict[str, Any]):
@@ -201,11 +201,11 @@ class WebSocketMessageHandler:
                 return False
                 
         except json.JSONDecodeError as e:
-            logger.error(f"❌ Invalid JSON received: {e}")
+            logger.error(f"âŒ Invalid JSON received: {e}")
             await self._send_error_response(websocket, "Invalid JSON format")
             return False
         except Exception as e:
-            logger.error(f"❌ Error handling message: {e}")
+            logger.error(f"âŒ Error handling message: {e}")
             await self._send_error_response(websocket, f"Message handling error: {str(e)}")
             return False
     
@@ -634,13 +634,13 @@ class WebSocketMessageHandler:
             if updated_count > 0:
                 with open(controller_config_path, 'w') as f:
                     json.dump(controller_config, f, indent=2)
-                logger.info(f"✅ Updated backend controller_config.json: {updated_count} center offsets applied")
+                logger.info(f"âœ… Updated backend controller_config.json: {updated_count} center offsets applied")
                 
                 # Reload both controller config and servo home positions
                 if self.controller_input_processor:
                     self.controller_input_processor.reload_controller_config()
                     self.controller_input_processor.reload_servo_home_positions()
-                    logger.info("🔄 Controller input processor reloaded")
+                    logger.info("ðŸ”„ Controller input processor reloaded")
             else:
                 logger.info("No controller mappings found to update")
             
@@ -664,7 +664,7 @@ class WebSocketMessageHandler:
         # Convert keys to integers (JSON converts dict keys to strings)
         channels = {int(k): v for k, v in channels.items()}
         
-        logger.info(f"📝 Received settings save for Maestro {maestro}: {len(channels)} channels")
+        logger.info(f"ðŸ“ Received settings save for Maestro {maestro}: {len(channels)} channels")
         logger.debug(f"Settings data: {channels}")
         
         try:
@@ -698,12 +698,12 @@ class WebSocketMessageHandler:
                 home_positions[channel_num] = settings.get("home", 1500)
                 
                 updated_count += 1
-                logger.info(f"  ✓ Updated {channel_key}: min={settings.get('min')}, max={settings.get('max')}, home={settings.get('home')}, name='{settings.get('name')}'")
+                logger.info(f"  âœ“ Updated {channel_key}: min={settings.get('min')}, max={settings.get('max')}, home={settings.get('home')}, name='{settings.get('name')}'")
             
             # Save updated servo config
             with open(servo_config_path, 'w') as f:
                 json.dump(servo_config, f, indent=2)
-            logger.info(f"✅ Saved servo_config.json: {updated_count} channels updated")
+            logger.info(f"âœ… Saved servo_config.json: {updated_count} channels updated")
             
             # Also update controller_config.json center offsets (reuse existing logic)
             controller_config_path = "configs/controller_config.json"
@@ -749,13 +749,14 @@ class WebSocketMessageHandler:
                 if offset_count > 0:
                     with open(controller_config_path, 'w') as f:
                         json.dump(controller_config, f, indent=2)
-                    logger.info(f"✅ Updated controller_config.json: {offset_count} center offsets")
+                    logger.info(f"âœ… Updated controller_config.json: {offset_count} center offsets")
                     
                     # Reload controller config
                     if self.controller_input_processor:
                         self.controller_input_processor.reload_controller_config()
                         self.controller_input_processor.reload_servo_home_positions()
-                        logger.info("🔄 Controller config reloaded")
+                        self.controller_input_processor.reload_multi_servo_config()
+                        logger.info("ðŸ”„ Controller config reloaded")
             
             except Exception as e:
                 logger.warning(f"Could not update controller config: {e}")
@@ -1119,7 +1120,7 @@ class WebSocketMessageHandler:
         emotion = data.get("emotion")
         if emotion:
             success = await self.scene_engine.play_scene(emotion)
-            logger.info(f"Scene '{emotion}': {'✅' if success else '❌'}")
+            logger.info(f"Scene '{emotion}': {'âœ…' if success else 'âŒ'}")
             
             if not success:
                 await self._send_error_response(websocket, f"Failed to play scene: {emotion}")
@@ -1139,7 +1140,7 @@ class WebSocketMessageHandler:
             }
             
             await self._send_websocket_message(websocket, response)
-            logger.info(f"📋 Sent {len(scenes)} scenes to client")
+            logger.info(f"ðŸ“‹ Sent {len(scenes)} scenes to client")
             
         except Exception as e:
             logger.error(f"Failed to get scenes: {e}")
@@ -1218,7 +1219,7 @@ class WebSocketMessageHandler:
                 track = data.get("track")
                 if track:
                     success = self.audio_controller.play_track(track)
-                    logger.info(f"🎵 Audio play '{track}': {'✅' if success else '❌'}")
+                    logger.info(f"ðŸŽµ Audio play '{track}': {'âœ…' if success else 'âŒ'}")
                     if not success:
                         await self._send_error_response(websocket, f"Failed to play track: {track}")
                 else:
@@ -1226,12 +1227,12 @@ class WebSocketMessageHandler:
                     
             elif command == "stop":
                 self.audio_controller.stop()
-                logger.info("🛑 Audio stopped")
+                logger.info("ðŸ›‘ Audio stopped")
                 
             elif command == "volume":
                 volume = data.get("volume", 0.5)
                 self.audio_controller.set_volume(volume)
-                logger.info(f"🔊 Audio volume set to {volume}")
+                logger.info(f"ðŸ”Š Audio volume set to {volume}")
                 
             else:
                 await self._send_error_response(websocket, f"Unknown audio command: {command}")
@@ -1253,7 +1254,7 @@ class WebSocketMessageHandler:
             }
             
             await self._send_websocket_message(websocket, response)
-            logger.info(f"🎵 Sent {len(audio_files)} audio files to client")
+            logger.info(f"ðŸŽµ Sent {len(audio_files)} audio files to client")
             
         except Exception as e:
             logger.error(f"Failed to get audio files: {e}")
@@ -1263,7 +1264,7 @@ class WebSocketMessageHandler:
     
     async def _handle_emergency_stop(self, websocket, data: Dict[str, Any]):
         """Handle emergency stop command"""
-        logger.critical("🚨 EMERGENCY STOP ACTIVATED via WebSocket")
+        logger.critical("ðŸš¨ EMERGENCY STOP ACTIVATED via WebSocket")
         
         # Emergency stop all systems
         await self.hardware_service.emergency_stop_all()
@@ -1304,7 +1305,7 @@ class WebSocketMessageHandler:
         gesture_name = data.get("name")
         confidence = data.get("confidence", 1.0)
         
-        logger.info(f"👋 Gesture detected: {gesture_name} (confidence: {confidence})")
+        logger.info(f"ðŸ‘‹ Gesture detected: {gesture_name} (confidence: {confidence})")
         
         # Map gesture names to scene names
         gesture_scene_mapping = {
@@ -1334,7 +1335,7 @@ class WebSocketMessageHandler:
                 self.scene_engine.scene_completed_callback = original_completed
                 self.scene_engine.scene_error_callback = original_error
                 
-                logger.info(f"🎭 Triggered scene '{scene_name}' for gesture '{gesture_name}' (no callbacks)")
+                logger.info(f"ðŸŽ­ Triggered scene '{scene_name}' for gesture '{gesture_name}' (no callbacks)")
                 
             except Exception as e:
                 # Always restore callbacks even on error
@@ -1380,7 +1381,7 @@ class WebSocketMessageHandler:
     async def _handle_tracking(self, websocket, data: Dict[str, Any]):
         """Handle tracking enable/disable"""
         state = data.get("state", False)
-        logger.info(f"📍 Tracking {'enabled' if state else 'disabled'}")
+        logger.info(f"ðŸ“ Tracking {'enabled' if state else 'disabled'}")
         
         # Broadcast tracking state to all clients
         await self.backend.broadcast_message({
@@ -1401,7 +1402,7 @@ class WebSocketMessageHandler:
     async def _handle_failsafe(self, websocket, data: Dict[str, Any]):
         """Handle failsafe mode toggle"""
         state = data.get("state", False)
-        logger.info(f"⚡ Failsafe mode {'activated' if state else 'deactivated'}")
+        logger.info(f"âš¡ Failsafe mode {'activated' if state else 'deactivated'}")
         
         # Update backend state
         if hasattr(self.backend, 'set_failsafe_mode'):
@@ -1412,7 +1413,7 @@ class WebSocketMessageHandler:
         mode_name = data.get("name")
         state = data.get("state", True)
         
-        logger.info(f"🎭 Mode '{mode_name}' {'activated' if state else 'deactivated'}")
+        logger.info(f"ðŸŽ­ Mode '{mode_name}' {'activated' if state else 'deactivated'}")
         
         # Handle different modes
         if mode_name == "idle":
@@ -1435,7 +1436,7 @@ class WebSocketMessageHandler:
         """Handle system volume change request"""
         volume = data.get('volume', 70)
         
-        logger.info(f"🔊 Setting system volume to {volume}%")
+        logger.info(f"ðŸ”Š Setting system volume to {volume}%")
         
         try:
             import subprocess
@@ -1449,7 +1450,7 @@ class WebSocketMessageHandler:
                     timeout=5,
                     check=True
                 )
-                logger.info(f"✅ System volume set to {volume}% via amixer")
+                logger.info(f"âœ… System volume set to {volume}% via amixer")
                 success = True
                 method = "amixer"
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
@@ -1463,7 +1464,7 @@ class WebSocketMessageHandler:
                         timeout=5,
                         check=True
                     )
-                    logger.info(f"✅ System volume set to {volume}% via pactl")
+                    logger.info(f"âœ… System volume set to {volume}% via pactl")
                     success = True
                     method = "pactl"
                 except (subprocess.CalledProcessError, FileNotFoundError) as e2:
@@ -1514,7 +1515,7 @@ class WebSocketMessageHandler:
             "timestamp": time.time()
         }
         await self._send_websocket_message(websocket, error_response)
-        logger.error(f"❌ Sent error to client: {error_message}")
+        logger.error(f"âŒ Sent error to client: {error_message}")
         
     def get_handler_stats(self) -> Dict[str, Any]:
         """Get statistics about message handling"""

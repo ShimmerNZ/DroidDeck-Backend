@@ -309,7 +309,7 @@ class DroidDeckWebServer:
     def _handle_get_nema_config(self, client_sid):
             """Get NEMA configuration from servo config file"""
             try:
-                config_path = Path("webconfig/servo_config.json")
+                config_path = Path("configs/servo_config.json")
                 
                 if config_path.exists():
                     with open(config_path, 'r') as f:
