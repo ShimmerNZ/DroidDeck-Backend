@@ -5,7 +5,7 @@
 let currentEditingScene = null;
 let allAudioFiles = [];
 const availableCategories = ['Happy', 'Sad', 'Excited', 'Angry', 'Surprised', 'Confused', 'Positive', 'Negative', 'Emotion', 'Energetic', 'Calm'];
-const commonEmojis = ['😊', '😢', '🤩', '😡', '😮', '😕', '🤔', '❤️', '👋', '👍', '🎭', '🎵', '⚡', '🌟', '🎉', '🤖', '💚', '💙', '🔥', '⭐'];
+const commonEmojis = ['😊', '😢', '🤩', '😡', '😮', '😕', '🤔', '❤️', '💋', '👍', '🎭', '🎵', '⚡', '🌟', '🎉', '🤖', '💚', '💙', '🔥', '⭐'];
 
 // Initialize Scene Editor
 function initializeSceneEditor() {
@@ -78,7 +78,9 @@ function updateSceneEditorList() {
             <div class="scene-item-meta">
                 <span class="scene-badge">${scene.duration}s</span>
                 ${scene.audio_enabled ? '<span class="scene-badge audio">Audio</span>' : ''}
-                ${scene.script_enabled ? '<span class="scene-badge script">Script</span>' : ''}
+                ${(scene.script_maestro1 !== null && scene.script_maestro1 !== undefined) || 
+                  (scene.script_maestro2 !== null && scene.script_maestro2 !== undefined) ? 
+                  '<span class="scene-badge script">Script</span>' : ''}
                 ${scene.servo_count > 0 ? `<span class="scene-badge">${scene.servo_count} servos</span>` : ''}
             </div>
         </div>
@@ -96,8 +98,8 @@ function selectSceneForEdit(sceneLabel) {
             categories: [],
             audio_enabled: false,
             audio_file: '',
-            script_enabled: false,
-            script_name: 0,
+            script_maestro1: null,
+            script_maestro2: null,
             duration: 2.0,
             delay: 0,
             servos: {}
@@ -120,7 +122,7 @@ function renderSceneEditorForm() {
             <h2>Edit Scene: ${currentEditingScene.label}</h2>
             <div class="editor-actions">
                 <button class="btn btn-success btn-small" onclick="testCurrentScene()">
-                    <span>▶</span> Test
+                    <span>â–¶</span> Test
                 </button>
                 <button class="btn btn-small" onclick="saveCurrentScene()">
                     💾 Save
@@ -215,22 +217,28 @@ function renderSceneEditorForm() {
         <!-- Script Configuration -->
         <div class="form-section">
             <div class="form-section-title">Script Configuration</div>
-            <div class="checkbox-wrapper">
-                <div class="toggle-switch ${currentEditingScene.script_enabled ? 'active' : ''}" 
-                     onclick="toggleEditScript()" id="edit_script_toggle"></div>
-                <span>Enable Script</span>
+            <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+                Specify script numbers for each Maestro controller. Leave blank to not run a script.
+            </p>
+            <div class="form-group" style="margin-bottom: 1rem;">
+                <label class="form-label">Maestro 1 Script Number</label>
+                <input type="number" class="form-input" id="edit_script_maestro1" 
+                       value="${currentEditingScene.script_maestro1 !== null && currentEditingScene.script_maestro1 !== undefined ? currentEditingScene.script_maestro1 : ''}" 
+                       min="0" step="1" placeholder="None"
+                       onchange="updateEditingSceneProperty('script_maestro1', this.value === '' ? null : parseInt(this.value))">
+                <small style="color: var(--text-tertiary); display: block; margin-top: 0.5rem;">
+                    Script to run on Maestro 1 controller
+                </small>
             </div>
-            <div id="scriptConfigSection" style="display: ${currentEditingScene.script_enabled ? 'block' : 'none'}">
-                <div class="form-group" style="margin-top: 1rem;">
-                    <label class="form-label">Script Number</label>
-                    <input type="number" class="form-input" id="edit_script_name" 
-                           value="${currentEditingScene.script_name || 0}" 
-                           min="0" step="1"
-                           onchange="updateEditingSceneProperty('script_name', parseInt(this.value))">
-                    <small style="color: var(--text-tertiary); display: block; margin-top: 0.5rem;">
-                        Enter the script number corresponding to the backend script file
-                    </small>
-                </div>
+            <div class="form-group">
+                <label class="form-label">Maestro 2 Script Number</label>
+                <input type="number" class="form-input" id="edit_script_maestro2" 
+                       value="${currentEditingScene.script_maestro2 !== null && currentEditingScene.script_maestro2 !== undefined ? currentEditingScene.script_maestro2 : ''}" 
+                       min="0" step="1" placeholder="None"
+                       onchange="updateEditingSceneProperty('script_maestro2', this.value === '' ? null : parseInt(this.value))">
+                <small style="color: var(--text-tertiary); display: block; margin-top: 0.5rem;">
+                    Script to run on Maestro 2 controller
+                </small>
             </div>
         </div>
 
@@ -324,7 +332,7 @@ function renderEditServoConfig() {
                            onchange="updateEditServoProperty('${servoId}', 'acceleration', parseInt(this.value))">
                 </div>
             </div>
-            <button class="btn btn-danger btn-small" onclick="removeEditServo('${servoId}')">×</button>
+            <button class="btn btn-danger btn-small" onclick="removeEditServo('${servoId}')">Ã—</button>
         </div>
     `).join('');
 }
@@ -371,12 +379,22 @@ function renderEditTimeline() {
                     </div>
                 </div>
             ` : ''}
-            ${currentEditingScene.script_enabled ? `
+            ${currentEditingScene.script_maestro1 !== null && currentEditingScene.script_maestro1 !== undefined ? `
                 <div class="timeline-track">
-                    <div class="timeline-label">Script</div>
+                    <div class="timeline-label">M1 Script</div>
                     <div class="timeline-bar">
                         <div class="timeline-segment script" style="left: 0; width: 100%;">
-                            Script #${currentEditingScene.script_name}
+                            Script #${currentEditingScene.script_maestro1}
+                        </div>
+                    </div>
+                </div>
+            ` : ''}
+            ${currentEditingScene.script_maestro2 !== null && currentEditingScene.script_maestro2 !== undefined ? `
+                <div class="timeline-track">
+                    <div class="timeline-label">M2 Script</div>
+                    <div class="timeline-bar">
+                        <div class="timeline-segment script" style="left: 0; width: 100%;">
+                            Script #${currentEditingScene.script_maestro2}
                         </div>
                     </div>
                 </div>
@@ -484,35 +502,6 @@ function toggleEditAudio() {
     }
 }
 
-// Toggle script
-function toggleEditScript() {
-    if (!currentEditingScene) return;
-    
-    currentEditingScene.script_enabled = !currentEditingScene.script_enabled;
-    
-    // Update in scenes array
-    const sceneIndex = scenes.findIndex(s => s.label === currentEditingScene.label);
-    if (sceneIndex !== -1) {
-        scenes[sceneIndex].script_enabled = currentEditingScene.script_enabled;
-    }
-    
-    const toggle = document.getElementById('edit_script_toggle');
-    const section = document.getElementById('scriptConfigSection');
-    
-    if (toggle) {
-        toggle.classList.toggle('active');
-    }
-    if (section) {
-        section.style.display = currentEditingScene.script_enabled ? 'block' : 'none';
-    }
-    
-    // Re-render timeline
-    const timelineContainer = document.querySelector('.timeline');
-    if (timelineContainer) {
-        timelineContainer.outerHTML = renderEditTimeline();
-    }
-}
-
 // Show add servo dialog
 function showAddServoDialog() {
     const servoId = prompt('Enter servo ID (e.g., m1_ch0 for Maestro 1, Channel 0):');
@@ -605,8 +594,8 @@ function addNewSceneEditor() {
         categories: [],
         audio_enabled: false,
         audio_file: '',
-        script_enabled: false,
-        script_name: 0,
+        script_maestro1: null,
+        script_maestro2: null,
         duration: 2.0,
         delay: 0,
         servos: {},

@@ -15,15 +15,6 @@ from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
 
-# Import scene state manager for preventing command collisions
-try:
-    from modules.scene_state_manager import SceneStateManager
-    SCENE_STATE_AVAILABLE = True
-except ImportError:
-    logger.warning("Scene state manager not available - servo conflict protection disabled")
-    SCENE_STATE_AVAILABLE = False
-    SceneStateManager = None
-
 logger = logging.getLogger(__name__)
 
 class SceneCategory(Enum):
@@ -103,22 +94,14 @@ class EnhancedSceneEngine:
         self.last_activity_time = time.time()
         self.idle_scenes = ["Casual Look Around", "Standby Mode", "Waiting Animation"]
         
-        # Scene state manager for preventing servo conflicts
-        if SCENE_STATE_AVAILABLE and SceneStateManager:
-            self.scene_state = SceneStateManager()
-            logger.info("Scene state manager enabled - servo conflict protection active")
-        else:
-            self.scene_state = None
-            logger.warning("Scene state manager disabled - manual channel separation required")
-        
         # Load scenes from configuration
         self.load_scenes()
         
         # Start background tasks
         self._start_background_tasks()
         
-        logger.info(f"???? Enhanced Scene Engine initialized with {len(self.scenes)} scenes")
-        logger.info(f"???? Available categories: {', '.join(self.get_available_categories())}")
+        logger.info(f"🎭 Enhanced Scene Engine initialized with {len(self.scenes)} scenes")
+        logger.info(f"📊 Available categories: {', '.join(self.get_available_categories())}")
     
     def _start_background_tasks(self):
         """Start background tasks for auto-idle and cleanup"""
@@ -126,9 +109,9 @@ class EnhancedSceneEngine:
             # Auto-idle task
             if self.auto_idle_enabled:
                 asyncio.create_task(self._auto_idle_loop())
-                logger.debug("???? Auto-idle system started")
+                logger.debug("🔄 Auto-idle system started")
         except Exception as e:
-            logger.warning(f"?????? Failed to start background tasks: {e}")
+            logger.warning(f"⚠️ Failed to start background tasks: {e}")
     
     async def _auto_idle_loop(self):
         """Background task to play idle scenes when inactive"""
@@ -142,7 +125,7 @@ class EnhancedSceneEngine:
                     # Play random idle scene
                     idle_scene = await self.get_random_scene_by_category("Idle")
                     if idle_scene:
-                        logger.info(f"???? Auto-playing idle scene: {idle_scene}")
+                        logger.info(f"😴 Auto-playing idle scene: {idle_scene}")
                         await self.play_scene(idle_scene, auto_triggered=True)
                         
                     # Reset timer
@@ -151,14 +134,14 @@ class EnhancedSceneEngine:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"??? Auto-idle loop error: {e}")
+                logger.error(f"❌ Auto-idle loop error: {e}")
                 await asyncio.sleep(10.0)
     
     def load_scenes(self) -> bool:
         """Load scene configurations from JSON file with validation"""
         try:
             if not Path(self.config_path).exists():
-                logger.warning(f"?????? Scene config not found: {self.config_path}, creating defaults")
+                logger.warning(f"⚠️ Scene config not found: {self.config_path}, creating defaults")
                 self.scenes = self._get_default_scenes()
                 self._save_default_config()
                 return False
@@ -178,12 +161,12 @@ class EnhancedSceneEngine:
                 result = self.validate_scene(scene_data, scene_name)
                 if not result.valid:
                     validation_errors.extend(result.errors)
-                    logger.warning(f"?????? Scene '{scene_name}' has validation issues: {result.errors}")
+                    logger.warning(f"⚠️ Scene '{scene_name}' has validation issues: {result.errors}")
             
             if validation_errors:
-                logger.warning(f"?????? Found {len(validation_errors)} scene validation issues")
+                logger.warning(f"⚠️ Found {len(validation_errors)} scene validation issues")
             
-            logger.info(f"???? Loaded {len(self.scenes)} scenes from {self.config_path}")
+            logger.info(f"📋 Loaded {len(self.scenes)} scenes from {self.config_path}")
             
             # Update category metrics
             self._update_category_metrics()
@@ -191,7 +174,7 @@ class EnhancedSceneEngine:
             return True
             
         except Exception as e:
-            logger.error(f"??? Failed to load scenes: {e}")
+            logger.error(f"❌ Failed to load scenes: {e}")
             self.scenes = self._get_default_scenes()
             return False
     
@@ -295,19 +278,12 @@ class EnhancedSceneEngine:
     
     async def play_scene(self, scene_name: str, auto_triggered: bool = False) -> bool:
         if scene_name not in self.scenes:
-            logger.warning(f"?????? Scene '{scene_name}' not found")
+            logger.warning(f"⚠️ Scene '{scene_name}' not found")
             return False
         
         if self.scene_playing:
-            logger.warning(f"?????? Scene already playing ({self.current_scene}), ignoring '{scene_name}'")
+            logger.warning(f"⚠️ Scene already playing ({self.current_scene}), ignoring '{scene_name}'")
             return False
-        
-        
-        # Lock channels if scene state manager is available
-        if self.scene_state:
-            if not self.scene_state.start_scene(scene_name):
-                logger.error(f"Cannot start scene '{scene_name}' - channel conflict with active scene")
-                return False
         
         scene = self.scenes[scene_name]
         self.current_scene = scene_name
@@ -317,7 +293,7 @@ class EnhancedSceneEngine:
         self.scene_start_time = time.time()
         
         try:
-            logger.info(f"???? Playing scene: '{scene_name}' ({scene.get('emoji', '????')})")
+            logger.info(f"🎬 Playing scene: '{scene_name}' ({scene.get('emoji', '🎭')})")
             
             # Update activity time (for auto-idle)
             if not auto_triggered:
@@ -359,7 +335,7 @@ class EnhancedSceneEngine:
             execution_time = time.time() - self.scene_start_time
             self._update_scene_metrics(scene_name, scene, execution_time, success)
             
-            logger.info(f"??? Scene '{scene_name}' completed in {execution_time:.2f}s")
+            logger.info(f"✅ Scene '{scene_name}' completed in {execution_time:.2f}s")
             
             # DEBUG: Check callback before calling
             logger.debug(f"DEBUG: About to call scene_completed_callback, callback exists: {self.scene_completed_callback is not None}")
@@ -381,10 +357,10 @@ class EnhancedSceneEngine:
             return success
             
         except asyncio.CancelledError:
-            logger.info(f"???? Scene '{scene_name}' was cancelled")
+            logger.info(f"🛑 Scene '{scene_name}' was cancelled")
             return False
         except Exception as e:
-            logger.error(f"??? Failed to play scene '{scene_name}': {e}")
+            logger.error(f"❌ Failed to play scene '{scene_name}': {e}")
             
             # DEBUG: Check callback before calling
             logger.debug(f"DEBUG: scene_error_callback exists: {self.scene_error_callback is not None}")
@@ -405,9 +381,6 @@ class EnhancedSceneEngine:
             return False
         finally:
             self.scene_playing = False
-            # Unlock channels
-            if self.scene_state and self.current_scene:
-                self.scene_state.end_scene(self.current_scene)
             self.current_scene = None
             self.interrupt_requested = False
             self.pause_requested = False
@@ -419,14 +392,14 @@ class EnhancedSceneEngine:
         
         while time.time() - start_time < duration:
             if self.interrupt_requested:
-                logger.info("???? Scene interrupted by user")
+                logger.info("🛑 Scene interrupted by user")
                 break
             
             if self.pause_requested:
-                logger.info("?????? Scene paused")
+                logger.info("⏸️ Scene paused")
                 while self.pause_requested and not self.interrupt_requested:
                     await asyncio.sleep(0.1)
-                logger.info("?????? Scene resumed")
+                logger.info("▶️ Scene resumed")
             
             # Progress callback
             if self.scene_progress_callback:
@@ -466,7 +439,7 @@ class EnhancedSceneEngine:
                 logger.debug(f"DEBUG: get_audio_info returned: {audio_info}")
                 # Quick validation before attempting playback
                 if not self.audio_controller.get_audio_info(audio_file):
-                    logger.warning(f"?????? Audio file not found: {audio_file}")
+                    logger.warning(f"⚠️ Audio file not found: {audio_file}")
                     audio_started = False
                     success = False
                 else:
@@ -475,9 +448,9 @@ class EnhancedSceneEngine:
                     logger.debug(f"DEBUG: play_track returned: {audio_started}")
 
                     if audio_started:
-                        logger.info(f"???? Started audio: {audio_file}")
+                        logger.info(f"🎵 Started audio: {audio_file}")
                     else:
-                        logger.warning(f"?????? Failed to start audio: {audio_file}")
+                        logger.warning(f"⚠️ Failed to start audio: {audio_file}")
                         success = False
         logger.debug("DEBUG: Audio section complete")
         
@@ -489,14 +462,45 @@ class EnhancedSceneEngine:
             success = success and servo_success
         
         # Execute scripts if enabled
-        if scene.get("script_enabled", False) and not self.interrupt_requested:
-            logger.debug("DEBUG: Starting script execution")
-            script_name = scene.get("script_name", 0)
-            logger.debug(f"DEBUG: Would execute script #{script_name} (not implemented)")
-            logger.debug("DEBUG: Script section complete")
+        if not self.interrupt_requested:
+            script_tasks = []
+            
+            # Check for Maestro 1 script
+            script_maestro1 = scene.get("script_maestro1")
+            if script_maestro1 is not None:
+                logger.debug(f"🎬 Queuing script #{script_maestro1} for Maestro 1")
+                script_tasks.append(self._execute_maestro_script("maestro1", script_maestro1))
+            
+            # Check for Maestro 2 script
+            script_maestro2 = scene.get("script_maestro2")
+            if script_maestro2 is not None:
+                logger.debug(f"🎬 Queuing script #{script_maestro2} for Maestro 2")
+                script_tasks.append(self._execute_maestro_script("maestro2", script_maestro2))
+            
+            # Execute both scripts concurrently if any exist
+            if script_tasks:
+                script_results = await asyncio.gather(*script_tasks, return_exceptions=True)
+                for i, result in enumerate(script_results):
+                    if isinstance(result, Exception):
+                        logger.error(f"❌ Script execution failed: {result}")
+                        success = False
         
         logger.debug("DEBUG: _execute_scene_components complete")
         return success
+    
+    async def _execute_maestro_script(self, maestro_name: str, script_number: int) -> bool:
+        """Execute a script on a specific Maestro controller"""
+        try:
+            logger.debug(f"🎬 Executing script #{script_number} on {maestro_name}")
+            result = await self.hardware_service.restart_maestro_script(maestro_name, script_number)
+            if result:
+                logger.debug(f"✅ Script #{script_number} started on {maestro_name}")
+            else:
+                logger.warning(f"⚠️ Failed to start script #{script_number} on {maestro_name}")
+            return result
+        except Exception as e:
+            logger.error(f"❌ Error executing script on {maestro_name}: {e}")
+            return False
     
     async def _execute_servo_movements_batch(self, scene: Dict[str, Any]) -> bool:
         """Execute servo movements using efficient batch commands"""
@@ -534,7 +538,7 @@ class EnhancedSceneEngine:
                     maestro2_servos.append(servo_config)
                     
             except Exception as e:
-                logger.error(f"??? Failed to parse servo {servo_id}: {e}")
+                logger.error(f"❌ Failed to parse servo {servo_id}: {e}")
                 return False
         
         if self.interrupt_requested:
@@ -551,10 +555,10 @@ class EnhancedSceneEngine:
                 if batch_success:
                     batch_commands_sent += 1
                     self.metrics.batch_commands_used += 1
-                    logger.debug(f"???? Sent batch to Maestro 1: {len(maestro1_servos)} servos")
+                    logger.debug(f"🎯 Sent batch to Maestro 1: {len(maestro1_servos)} servos")
                 
             except Exception as e:
-                logger.error(f"??? Maestro 1 batch error: {e}")
+                logger.error(f"❌ Maestro 1 batch error: {e}")
                 success = False
         
         if maestro2_servos and not self.interrupt_requested:
@@ -564,10 +568,10 @@ class EnhancedSceneEngine:
                 if batch_success:
                     batch_commands_sent += 1
                     self.metrics.batch_commands_used += 1
-                    logger.debug(f"???? Sent batch to Maestro 2: {len(maestro2_servos)} servos")
+                    logger.debug(f"🎯 Sent batch to Maestro 2: {len(maestro2_servos)} servos")
                 
             except Exception as e:
-                logger.error(f"??? Maestro 2 batch error: {e}")
+                logger.error(f"❌ Maestro 2 batch error: {e}")
                 success = False
         
         # Update performance statistics
@@ -585,7 +589,7 @@ class EnhancedSceneEngine:
                     self.metrics.average_setup_time_ms * 0.9 + (setup_time * 1000) * 0.1
                 )
         
-        logger.debug(f"??? Scene servo setup: {servo_count} servos in {setup_time*1000:.1f}ms")
+        logger.debug(f"⚡ Scene servo setup: {servo_count} servos in {setup_time*1000:.1f}ms")
         
         return success
     
@@ -601,7 +605,7 @@ class EnhancedSceneEngine:
                 if batch_success:
                     return True
                 else:
-                    logger.warning(f"?????? Batch command failed for {maestro_id}, falling back to individual")
+                    logger.warning(f"⚠️ Batch command failed for {maestro_id}, falling back to individual")
             
             # Fallback: Send individual commands
             success = True
@@ -634,7 +638,7 @@ class EnhancedSceneEngine:
             return success
             
         except Exception as e:
-            logger.error(f"??? Maestro batch send error for {maestro_id}: {e}")
+            logger.error(f"❌ Maestro batch send error for {maestro_id}: {e}")
             return False
     
     def _parse_servo_id(self, servo_id: str) -> Tuple[int, int]:
@@ -645,7 +649,7 @@ class EnhancedSceneEngine:
             channel = int(parts[1][2:])     # Extract number from 'ch5', etc.
             return maestro_num, channel
         except Exception as e:
-            logger.error(f"??? Invalid servo ID format: {servo_id}")
+            logger.error(f"❌ Invalid servo ID format: {servo_id}")
             return 1, 0
     
     def _update_scene_metrics(self, scene_name: str, scene_data: Dict[str, Any], 
@@ -670,7 +674,7 @@ class EnhancedSceneEngine:
         """Process any queued scenes"""
         if self.scene_queue and not self.scene_playing:
             next_scene = self.scene_queue.pop(0)
-            logger.info(f"???? Playing queued scene: {next_scene}")
+            logger.info(f"🔄 Playing queued scene: {next_scene}")
             await self.play_scene(next_scene)
     
     # ==================== SCENE CONTROL METHODS ====================
@@ -678,10 +682,10 @@ class EnhancedSceneEngine:
     async def stop_current_scene(self) -> bool:
         """Stop the currently playing scene"""
         if not self.scene_playing:
-            logger.info("?????? No scene currently playing")
+            logger.info("ℹ️ No scene currently playing")
             return True
         
-        logger.info(f"???? Stopping current scene: {self.current_scene}")
+        logger.info(f"🛑 Stopping current scene: {self.current_scene}")
         
         self.interrupt_requested = True
         
@@ -692,43 +696,43 @@ class EnhancedSceneEngine:
         # Return servos to neutral positions
         await self._return_servos_to_neutral()
         
-        logger.info("??? Scene stopped successfully")
+        logger.info("✅ Scene stopped successfully")
         return True
     
     async def pause_current_scene(self) -> bool:
         """Pause the currently playing scene"""
         if not self.scene_playing:
-            logger.info("?????? No scene currently playing")
+            logger.info("ℹ️ No scene currently playing")
             return False
         
         self.pause_requested = True
         if self.audio_controller:
             self.audio_controller.pause()
         
-        logger.info(f"?????? Paused scene: {self.current_scene}")
+        logger.info(f"⏸️ Paused scene: {self.current_scene}")
         return True
     
     async def resume_current_scene(self) -> bool:
         """Resume the currently paused scene"""
         if not self.scene_playing or not self.pause_requested:
-            logger.info("?????? No scene currently paused")
+            logger.info("ℹ️ No scene currently paused")
             return False
         
         self.pause_requested = False
         if self.audio_controller:
             self.audio_controller.resume()
         
-        logger.info(f"?????? Resumed scene: {self.current_scene}")
+        logger.info(f"▶️ Resumed scene: {self.current_scene}")
         return True
     
     async def queue_scene(self, scene_name: str) -> bool:
         """Add a scene to the queue to play after current scene finishes"""
         if scene_name not in self.scenes:
-            logger.warning(f"?????? Cannot queue unknown scene: {scene_name}")
+            logger.warning(f"⚠️ Cannot queue unknown scene: {scene_name}")
             return False
         
         self.scene_queue.append(scene_name)
-        logger.info(f"???? Queued scene: {scene_name} (queue length: {len(self.scene_queue)})")
+        logger.info(f"📝 Queued scene: {scene_name} (queue length: {len(self.scene_queue)})")
         return True
     
     async def play_scene_sequence(self, scene_names: List[str], delay_between: float = 1.0) -> bool:
@@ -736,7 +740,7 @@ class EnhancedSceneEngine:
         if not scene_names:
             return False
         
-        logger.info(f"???? Playing scene sequence: {', '.join(scene_names)}")
+        logger.info(f"🎬 Playing scene sequence: {', '.join(scene_names)}")
         
         success = True
         for i, scene_name in enumerate(scene_names):
@@ -785,10 +789,10 @@ class EnhancedSceneEngine:
             if maestro2_neutrals:
                 await self._send_maestro_batch("maestro2", maestro2_neutrals)
             
-            logger.debug("???? Returned servos to neutral positions")
+            logger.debug("🎯 Returned servos to neutral positions")
             
         except Exception as e:
-            logger.error(f"??? Failed to return servos to neutral: {e}")
+            logger.error(f"❌ Failed to return servos to neutral: {e}")
     
     # ==================== SCENE QUERY AND MANAGEMENT ====================
     
@@ -800,13 +804,13 @@ class EnhancedSceneEngine:
             for name, scene in self.scenes.items():
                 scene_info = {
                     "label": scene.get("label", name),
-                    "emoji": scene.get("emoji", ""),
+                    "emoji": scene.get("emoji", "🎭"),
                     "categories": scene.get("categories", ["Misc"]),
                     "duration": scene.get("duration", 2.0),
                     "audio_enabled": scene.get("audio_enabled", False),
                     "audio_file": scene.get("audio_file", ""),
-                    "script_enabled": scene.get("script_enabled", False),
-                    "script_name": scene.get("script_name", 0),
+                    "script_maestro1": scene.get("script_maestro1"),
+                    "script_maestro2": scene.get("script_maestro2"),
                     "delay": scene.get("delay", 0),
                     "servo_count": len(scene.get("servos", {})),
                     "estimated_setup_time_ms": len(scene.get("servos", {})) * 5  # Batch estimate
@@ -819,7 +823,7 @@ class EnhancedSceneEngine:
             return scenes_list
             
         except Exception as e:
-            logger.error(f"??? Failed to get scenes list: {e}")
+            logger.error(f"❌ Failed to get scenes list: {e}")
             return []
     
     def get_scenes_by_category(self, category: str) -> List[Dict[str, Any]]:
@@ -833,14 +837,14 @@ class EnhancedSceneEngine:
                     filtered_scenes.append({
                         "name": name,
                         "label": scene.get("label", name),
-                        "emoji": scene.get("emoji", ""),
+                        "emoji": scene.get("emoji", "🎭"),
                         "duration": scene.get("duration", 2.0)
                     })
             
             return filtered_scenes
             
         except Exception as e:
-            logger.error(f"??? Failed to get scenes by category '{category}': {e}")
+            logger.error(f"❌ Failed to get scenes by category '{category}': {e}")
             return []
     
     async def get_random_scene_by_category(self, category: str) -> Optional[str]:
@@ -853,7 +857,7 @@ class EnhancedSceneEngine:
             return None
             
         except Exception as e:
-            logger.error(f"??? Failed to get random scene for category '{category}': {e}")
+            logger.error(f"❌ Failed to get random scene for category '{category}': {e}")
             return None
     
     def get_available_categories(self) -> List[str]:
@@ -868,7 +872,7 @@ class EnhancedSceneEngine:
             return sorted(list(categories))
             
         except Exception as e:
-            logger.error(f"??? Failed to get categories: {e}")
+            logger.error(f"❌ Failed to get categories: {e}")
             return ["Misc"]
     
     async def play_random_scene(self, category: Optional[str] = None) -> bool:
@@ -881,16 +885,16 @@ class EnhancedSceneEngine:
                 available_scenes = list(self.scenes.keys())
             
             if not available_scenes:
-                logger.warning(f"?????? No scenes available for category: {category}")
+                logger.warning(f"⚠️ No scenes available for category: {category}")
                 return False
             
             scene_name = random.choice(available_scenes)
-            logger.info(f"???? Playing random scene: {scene_name}")
+            logger.info(f"🎲 Playing random scene: {scene_name}")
             
             return await self.play_scene(scene_name)
             
         except Exception as e:
-            logger.error(f"??? Failed to play random scene: {e}")
+            logger.error(f"❌ Failed to play random scene: {e}")
             return False
     
     def get_scene_info(self, scene_name: str) -> Optional[Dict[str, Any]]:
@@ -919,7 +923,7 @@ class EnhancedSceneEngine:
             return scene
             
         except Exception as e:
-            logger.error(f"??? Failed to get scene info for '{scene_name}': {e}")
+            logger.error(f"❌ Failed to get scene info for '{scene_name}': {e}")
             return None
     
     def _estimate_scene_execution_time(self, scene: Dict[str, Any]) -> float:
@@ -945,7 +949,7 @@ class EnhancedSceneEngine:
             return base_duration + initial_delay + servo_setup_time + audio_setup_time
             
         except Exception as e:
-            logger.error(f"??? Failed to estimate execution time: {e}")
+            logger.error(f"❌ Failed to estimate execution time: {e}")
             return scene.get("duration", 2.0)
     
     async def preview_scene_servos(self, scene_name: str) -> Dict[str, Any]:
@@ -996,7 +1000,7 @@ class EnhancedSceneEngine:
             return preview_info
             
         except Exception as e:
-            logger.error(f"??? Failed to preview scene '{scene_name}': {e}")
+            logger.error(f"❌ Failed to preview scene '{scene_name}': {e}")
             return {"error": str(e)}
     
     # ==================== SCENE EDITING AND MANAGEMENT ====================
@@ -1023,7 +1027,7 @@ class EnhancedSceneEngine:
                     validation_errors.extend([f"Scene '{label}': {error}" for error in result.errors])
             
             if validation_errors:
-                logger.error(f"??? Cannot save scenes due to validation errors: {validation_errors}")
+                logger.error(f"❌ Cannot save scenes due to validation errors: {validation_errors}")
                 return False
             
             # Create backup of current config
@@ -1031,7 +1035,7 @@ class EnhancedSceneEngine:
                 backup_path = f"{self.config_path}.backup.{int(time.time())}"
                 import shutil
                 shutil.copy2(self.config_path, backup_path)
-                logger.info(f"???? Created backup: {backup_path}")
+                logger.info(f"💾 Created backup: {backup_path}")
             
             # Save to file
             with open(self.config_path, "w", encoding='utf-8') as f:
@@ -1043,33 +1047,33 @@ class EnhancedSceneEngine:
             # Update metrics
             self._update_category_metrics()
             
-            logger.info(f"???? Saved {len(scenes_data)} scenes to {self.config_path}")
+            logger.info(f"💾 Saved {len(scenes_data)} scenes to {self.config_path}")
             return True
             
         except Exception as e:
-            logger.error(f"??? Failed to save scenes: {e}")
+            logger.error(f"❌ Failed to save scenes: {e}")
             return False
     
     async def test_scene(self, scene: Dict[str, Any]) -> bool:
         """Test a scene without saving it permanently"""
         try:
             scene_name = scene.get("label", "Test Scene")
-            logger.info(f"???? Testing scene: {scene_name}")
+            logger.info(f"🧪 Testing scene: {scene_name}")
             
             # Validate scene first
             validation = self.validate_scene(scene, scene_name)
             if not validation.valid:
-                logger.error(f"??? Scene validation failed: {validation.errors}")
+                logger.error(f"❌ Scene validation failed: {validation.errors}")
                 return False
             
             # Execute scene components
             success = await self._execute_scene_components(scene)
             
-            logger.info(f"???? Scene test {'??? passed' if success else '??? failed'}: {scene_name}")
+            logger.info(f"🧪 Scene test {'✅ passed' if success else '❌ failed'}: {scene_name}")
             return success
             
         except Exception as e:
-            logger.error(f"??? Scene test error: {e}")
+            logger.error(f"❌ Scene test error: {e}")
             return False
     
     def _save_default_config(self):
@@ -1088,10 +1092,10 @@ class EnhancedSceneEngine:
             with open(self.config_path, "w", encoding='utf-8') as f:
                 json.dump(scenes_list, f, indent=2, ensure_ascii=False)
             
-            logger.info(f"???? Created default scene configuration: {self.config_path}")
+            logger.info(f"💾 Created default scene configuration: {self.config_path}")
             
         except Exception as e:
-            logger.error(f"??? Failed to save default config: {e}")
+            logger.error(f"❌ Failed to save default config: {e}")
     
     # ==================== STATISTICS AND MONITORING ====================
     
@@ -1159,7 +1163,7 @@ class EnhancedSceneEngine:
             return stats
             
         except Exception as e:
-            logger.error(f"??? Failed to get engine stats: {e}")
+            logger.error(f"❌ Failed to get engine stats: {e}")
             return {"error": str(e)}
     
     def get_scene_performance_report(self) -> Dict[str, Any]:
@@ -1218,14 +1222,14 @@ class EnhancedSceneEngine:
             }
             
         except Exception as e:
-            logger.error(f"??? Failed to generate performance report: {e}")
+            logger.error(f"❌ Failed to generate performance report: {e}")
             return {"error": str(e)}
     
     def reset_statistics(self):
         """Reset all performance statistics"""
         self.metrics = SceneMetrics()
         self.scene_history = []
-        logger.info("???? Scene engine statistics reset")
+        logger.info("📊 Scene engine statistics reset")
     
     # ==================== DEFAULT SCENES ====================
     
@@ -1234,7 +1238,7 @@ class EnhancedSceneEngine:
         return {
             "excited_greeting": {
                 "label": "Excited Greeting",
-                "emoji": "",
+                "emoji": "🤩",
                 "categories": ["Happy", "Greeting"],
                 "duration": 3.0,
                 "audio_enabled": True,
@@ -1251,7 +1255,7 @@ class EnhancedSceneEngine:
             },
             "happy_dance": {
                 "label": "Happy Dance",
-                "emoji": "",
+                "emoji": "💃",
                 "categories": ["Happy", "Energetic"],
                 "duration": 4.0,
                 "audio_enabled": True,
@@ -1269,7 +1273,7 @@ class EnhancedSceneEngine:
             },
             "curious_tilt": {
                 "label": "Curious Head Tilt",
-                "emoji": "",
+                "emoji": "🤔",
                 "categories": ["Curious"],
                 "duration": 2.5,
                 "audio_enabled": False,
@@ -1285,7 +1289,7 @@ class EnhancedSceneEngine:
             },
             "sad_droop": {
                 "label": "Sad Expression",
-                "emoji": "",
+                "emoji": "😢",
                 "categories": ["Sad"],
                 "duration": 3.5,
                 "audio_enabled": True,
@@ -1302,7 +1306,7 @@ class EnhancedSceneEngine:
             },
             "idle_scan": {
                 "label": "Idle Scanning",
-                "emoji": "",
+                "emoji": "💀",
                 "categories": ["Idle"],
                 "duration": 4.0,
                 "audio_enabled": False,
@@ -1322,28 +1326,28 @@ class EnhancedSceneEngine:
     def set_scene_started_callback(self, callback: Callable):
         """Set callback for when scene starts"""
         self.scene_started_callback = callback
-        logger.debug("???? Scene started callback registered")
+        logger.debug("📞 Scene started callback registered")
     
     def set_scene_completed_callback(self, callback: Callable):
         """Set callback for when scene completes"""
         self.scene_completed_callback = callback
-        logger.debug("???? Scene completed callback registered")
+        logger.debug("📞 Scene completed callback registered")
     
     def set_scene_error_callback(self, callback: Callable):
         """Set callback for when scene encounters error"""
         self.scene_error_callback = callback
-        logger.debug("???? Scene error callback registered")
+        logger.debug("📞 Scene error callback registered")
     
     def set_scene_progress_callback(self, callback: Callable):
         """Set callback for scene progress updates"""
         self.scene_progress_callback = callback
-        logger.debug("???? Scene progress callback registered")
+        logger.debug("📞 Scene progress callback registered")
     
     # ==================== CLEANUP ====================
     
     def cleanup(self):
         """Clean up scene engine resources"""
-        logger.info("???? Cleaning up scene engine...")
+        logger.info("🧹 Cleaning up scene engine...")
         
         try:
             # Stop current scene
@@ -1358,10 +1362,10 @@ class EnhancedSceneEngine:
             self.scene_playing = False
             self.current_scene = None
             
-            logger.info("??? Scene engine cleanup complete")
+            logger.info("✅ Scene engine cleanup complete")
             
         except Exception as e:
-            logger.error(f"??? Scene engine cleanup error: {e}")
+            logger.error(f"❌ Scene engine cleanup error: {e}")
 
 # Example usage and integration functions
 async def demo_enhanced_scene_engine():
@@ -1375,35 +1379,35 @@ async def demo_enhanced_scene_engine():
     # Create enhanced scene engine
     engine = EnhancedSceneEngine(mock_hardware, mock_audio)
     
-    print(" Enhanced Scene Engine Demo")
+    print("🎭 Enhanced Scene Engine Demo")
     print("=" * 50)
     
     # Show available scenes
     scenes = await engine.get_scenes_list()
-    print(f" Available scenes: {len(scenes)}")
+    print(f"📋 Available scenes: {len(scenes)}")
     for scene in scenes[:3]:
-        print(f"   {scene['emoji']} {scene['label']} ({scene['duration']}s)")
+        print(f"  • {scene['emoji']} {scene['label']} ({scene['duration']}s)")
     
     # Show categories
     categories = engine.get_available_categories()
-    print(f"\n Categories: {', '.join(categories)}")
+    print(f"\n📂 Categories: {', '.join(categories)}")
     
     # Performance preview
     if scenes:
         preview = await engine.preview_scene_servos(scenes[0]['label'])
-        print(f"\n Scene Preview: {preview['scene_name']}")
-        print(f"   Total servos: {preview['total_servos']}")
-        print(f"   Batch commands: {preview['batch_commands']}")
-        print(f"   Performance gain: {preview['performance_gain']}")
+        print(f"\n🎯 Scene Preview: {preview['scene_name']}")
+        print(f"  • Total servos: {preview['total_servos']}")
+        print(f"  • Batch commands: {preview['batch_commands']}")
+        print(f"  • Performance gain: {preview['performance_gain']}")
     
     # Show engine stats
     stats = engine.get_engine_stats()
-    print(f"\n Engine Statistics:")
-    print(f"   Total scenes: {stats['scene_library']['total_scenes']}")
-    print(f"   Categories: {len(stats['scene_library']['categories'])}")
-    print(f"   Batch optimization: {stats['features']['batch_command_optimization']}")
+    print(f"\n📊 Engine Statistics:")
+    print(f"  • Total scenes: {stats['scene_library']['total_scenes']}")
+    print(f"  • Categories: {len(stats['scene_library']['categories'])}")
+    print(f"  • Batch optimization: {stats['features']['batch_command_optimization']}")
     
-    print("\n Demo complete!")
+    print("\n✅ Demo complete!")
 
 if __name__ == "__main__":
     asyncio.run(demo_enhanced_scene_engine())

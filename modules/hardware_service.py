@@ -752,6 +752,47 @@ class HardwareService:
             logger.error(f"Get Maestro info error: {e}")
             return None
     
+    async def restart_maestro_script(self, maestro_id: str, script_number: int) -> bool:
+        """Restart a script at the specified subroutine number on a Maestro controller"""
+        try:
+            # Determine which Maestro to use
+            if maestro_id.lower() in ["maestro1", "m1", "1"]:
+                maestro = self.maestro1
+                maestro_name = "Maestro 1"
+            elif maestro_id.lower() in ["maestro2", "m2", "2"]:
+                maestro = self.maestro2
+                maestro_name = "Maestro 2"
+            else:
+                logger.error(f"Invalid maestro_id: {maestro_id}")
+                return False
+            
+            if not maestro or not maestro.connected:
+                logger.warning(f"{maestro_name} not connected, cannot execute script")
+                return False
+            
+            # Send restart script command via shared serial manager
+            command = SharedSerialCommand(
+                device_id=maestro_id,
+                device_number=maestro.device_number,
+                command_type="restart_script",
+                data={"subroutine": script_number},
+                priority=CommandPriority.NORMAL
+            )
+            
+            # Queue the command
+            success = maestro.shared_manager.queue_command(command)
+            
+            if success:
+                logger.info(f"🎬 Started script #{script_number} on {maestro_name}")
+            else:
+                logger.warning(f"⚠️ Failed to queue script #{script_number} for {maestro_name}")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Error restarting script on {maestro_id}: {e}")
+            return False
+    
     # ==================== STEPPER MOTOR METHODS ====================
         
     async def handle_stepper_command(self, data: Dict[str, Any]) -> Dict[str, Any]:

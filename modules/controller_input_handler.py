@@ -105,11 +105,18 @@ class DirectServoHandler(BehaviorHandler):
             return False
 
 class MultiServoHandler(BehaviorHandler):
-    """Handle multiple servo control - single axis to multiple servos with individual invert settings"""
+    """
+    Handle multiple servo control
+    
+    Supports two modes:
+    - 'axis': Single axis controls multiple servos (original behavior for joysticks)
+    - 'button': Button hold controls multiple servos to fixed positions (new for button control)
+    """
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.last_sent_values = {}
+        self.button_states = {}  # Track button press state for button mode
         self.change_threshold = 0.02
         # Load servo config to get min/max ranges
         self.servo_config = {}
@@ -121,86 +128,137 @@ class MultiServoHandler(BehaviorHandler):
             if self.logger:
                 self.logger.warning(f"Could not load servo_config.json: {e}")
     
-    def reload_servo_config(self) -> bool:
-        """Reload servo config from file - call when min/max values change"""
-        try:
-            import json
-            with open('configs/servo_config.json', 'r') as f:
-                self.servo_config = json.load(f)
-            if self.logger:
-                self.logger.info(f"MultiServoHandler reloaded servo_config.json: {len(self.servo_config)} servos")
-            return True
-        except Exception as e:
-            if self.logger:
-                self.logger.error(f"Failed to reload servo_config.json: {e}")
-            return False
-    
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
             servos = config.get('servos', [])
+            trigger_mode = config.get('trigger_mode', 'axis')  # 'axis' or 'button'
             
             if not servos or not self.hardware_service:
                 return False
             
-            success_count = 0
+            # BUTTON MODE: Held = configured positions, Released = home positions
+            if trigger_mode == 'button':
+                return await self._process_button_mode(controller_input, servos)
             
-            # Process each servo in the list
-            for servo_info in servos:
-                channel = servo_info.get('channel')
-                invert = servo_info.get('invert', False)
-                
-                # Support custom min/max travel per servo (for triggers with limited range)
-                custom_min = servo_info.get('min_travel')
-                custom_max = servo_info.get('max_travel')
-                
-                if not channel:
-                    continue
-                
-                # Get servo-specific min/max from servo config OR use custom values
-                if custom_min is not None and custom_max is not None:
-                    # Use custom travel limits (for triggers that need full range)
-                    min_pulse = custom_min
-                    max_pulse = custom_max
-                    self.logger.debug(f"Using custom travel for {channel}: {min_pulse}-{max_pulse}")
-                else:
-                    # Use servo config limits (default behavior)
-                    servo_cfg = self.servo_config.get(channel, {})
-                    min_pulse = servo_cfg.get('min', 992)
-                    max_pulse = servo_cfg.get('max', 2000)
-                
-                # Calculate center and range
-                center = (min_pulse + max_pulse) // 2
-                pulse_range = (max_pulse - min_pulse) // 2
-                
-                # Apply invert and calculate pulse
-                value = -controller_input.raw_value if invert else controller_input.raw_value
-                
-                # Check threshold
-                last_value = self.last_sent_values.get(channel, None)
-                if last_value is not None and abs(value - last_value) < self.change_threshold:
-                    continue
-                
-                pulse = center + int(value * pulse_range)
-                pulse = max(min_pulse, min(max_pulse, pulse))
-                
-                # Send servo command
-                success = await self.hardware_service.set_servo_position(
-                    channel, pulse, "realtime"
-                )
-                
-                if success:
-                    self.logger.debug(f"Multi servo {channel}: {pulse} (raw: {controller_input.raw_value:.2f}, inverted: {invert})")
-                    self.last_sent_values[channel] = value
-                    success_count += 1
-            
-            return success_count > 0
+            # AXIS MODE: Original behavior for joystick/axis control
+            else:
+                return await self._process_axis_mode(controller_input, servos)
             
         except Exception as e:
             self.logger.error(f"Error in multi servo handler: {e}")
             return False
+    
+    async def _process_button_mode(self, controller_input: ControllerInput, servos: List[Dict]) -> bool:
+        """Handle button mode - fixed positions when held"""
+        threshold = 0.5
+        control_name = controller_input.control_name
+        is_pressed = abs(controller_input.raw_value) > threshold
+        
+        # Initialize button state
+        if control_name not in self.button_states:
+            self.button_states[control_name] = {
+                'was_pressed': False,
+                'last_pulses': {}
+            }
+        
+        state = self.button_states[control_name]
+        
+        # Check if state changed
+        if is_pressed == state['was_pressed']:
+            return False  # No change
+        
+        state['was_pressed'] = is_pressed
+        success_count = 0
+        
+        # Send commands to all servos
+        for servo_info in servos:
+            channel = servo_info.get('channel')
+            if not channel:
+                continue
+            
+            # Get servo-specific settings
+            servo_cfg = self.servo_config.get(channel, {})
+            home_position = servo_cfg.get('home', 1500)
+            
+            # Button pressed: use configured position (or min_pulse if not specified)
+            # Button released: use home position
+            if is_pressed:
+                # Use min_pulse as the "active" position (can be same as max_pulse for fixed position)
+                target_pulse = servo_info.get('min_pulse', servo_info.get('max_pulse', 1500))
+            else:
+                target_pulse = home_position
+            
+            # Only send if changed
+            if state['last_pulses'].get(channel) != target_pulse:
+                success = await self.hardware_service.set_servo_position(
+                    channel, target_pulse, "realtime"
+                )
+                
+                if success:
+                    state['last_pulses'][channel] = target_pulse
+                    self.logger.debug(f"Multi servo button {channel}: {target_pulse} ({'pressed' if is_pressed else 'released'})")
+                    success_count += 1
+        
+        return success_count > 0
+    
+    async def _process_axis_mode(self, controller_input: ControllerInput, servos: List[Dict]) -> bool:
+        """Handle axis mode - original continuous control"""
+        success_count = 0
+        
+        # Process each servo in the list
+        for servo_info in servos:
+            channel = servo_info.get('channel')
+            invert = servo_info.get('invert', False)
+            
+            if not channel:
+                continue
+            
+            # Get servo-specific min/max from servo config or override
+            if 'min_pulse' in servo_info and 'max_pulse' in servo_info:
+                # Use explicit min/max from config
+                min_pulse = servo_info['min_pulse']
+                max_pulse = servo_info['max_pulse']
+            else:
+                # Use servo config file
+                servo_cfg = self.servo_config.get(channel, {})
+                min_pulse = servo_cfg.get('min', 992)
+                max_pulse = servo_cfg.get('max', 2000)
+            
+            # Calculate center and range
+            center = (min_pulse + max_pulse) // 2
+            pulse_range = (max_pulse - min_pulse) // 2
+            
+            # Apply invert and calculate pulse
+            value = -controller_input.raw_value if invert else controller_input.raw_value
+            
+            # Check threshold
+            last_value = self.last_sent_values.get(channel, None)
+            if last_value is not None and abs(value - last_value) < self.change_threshold:
+                continue
+            
+            pulse = center + int(value * pulse_range)
+            pulse = max(min_pulse, min(max_pulse, pulse))
+            
+            # Send servo command
+            success = await self.hardware_service.set_servo_position(
+                channel, pulse, "realtime"
+            )
+            
+            if success:
+                self.logger.debug(f"Multi servo {channel}: {pulse} (raw: {controller_input.raw_value:.2f}, inverted: {invert})")
+                self.last_sent_values[channel] = value
+                success_count += 1
+        
+        return success_count > 0
 
 class ToggleServoHandler(BehaviorHandler):
-    """Handle toggle servo control - button press alternates between two positions"""
+    """
+    Handle toggle servo control - button press alternates between two positions
+    
+    Supports two modes:
+    - 'toggle': Press toggles between position_1 and position_2 (original behavior)
+    - 'hold': Held = position_2, Released = position_1 (new behavior for continuous control)
+    """
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -209,9 +267,10 @@ class ToggleServoHandler(BehaviorHandler):
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
             servo_channel = config.get('target')
-            position_1 = config.get('position_1', 1000)
-            position_2 = config.get('position_2', 2000)
+            position_1 = config.get('position_1', 1000)  # Home/default position
+            position_2 = config.get('position_2', 2000)  # Active/alternate position
             trigger_timing = config.get('trigger_timing', 'on_press')
+            trigger_mode = config.get('trigger_mode', 'toggle')  # 'toggle' or 'hold'
             threshold = 0.5
             
             if not servo_channel or not self.hardware_service:
@@ -221,45 +280,66 @@ class ToggleServoHandler(BehaviorHandler):
             if controller_input.control_name not in self.toggle_states:
                 self.toggle_states[controller_input.control_name] = {
                     'current_position': 1,  # Start at position 1
-                    'was_pressed': False
+                    'was_pressed': False,
+                    'last_pulse_sent': None  # Track last pulse to avoid redundant commands
                 }
             
             state = self.toggle_states[controller_input.control_name]
             is_pressed = abs(controller_input.raw_value) > threshold
             
-            # Handle trigger timing
-            should_trigger = False
-            if trigger_timing == 'on_press':
-                # Trigger on button press (rising edge)
-                if is_pressed and not state['was_pressed']:
-                    should_trigger = True
-            elif trigger_timing == 'on_release':
-                # Trigger on button release (falling edge)
-                if not is_pressed and state['was_pressed']:
-                    should_trigger = True
-            
-            state['was_pressed'] = is_pressed
-            
-            if should_trigger:
-                # Toggle between positions
-                if state['current_position'] == 1:
-                    pulse = position_1
-                    state['current_position'] = 2
-                else:
-                    pulse = position_2
-                    state['current_position'] = 1
+            # HOLD MODE: Button held = position_2, Released = position_1
+            if trigger_mode == 'hold':
+                target_pulse = position_2 if is_pressed else position_1
                 
-                # Send servo command
-                success = await self.hardware_service.set_servo_position(
-                    servo_channel, pulse, "realtime"
-                )
+                # Only send command if position changed
+                if target_pulse != state['last_pulse_sent']:
+                    success = await self.hardware_service.set_servo_position(
+                        servo_channel, target_pulse, "realtime"
+                    )
+                    
+                    if success:
+                        state['last_pulse_sent'] = target_pulse
+                        self.logger.debug(f"Hold servo {servo_channel}: {target_pulse} ({'held' if is_pressed else 'released'})")
+                        return True
                 
-                if success:
-                    self.logger.debug(f"Toggle servo {servo_channel}: {pulse} (position {3 - state['current_position']})")
-                
-                return success
+                return False
             
-            return False
+            # TOGGLE MODE: Original behavior - press toggles between positions
+            else:
+                # Handle trigger timing
+                should_trigger = False
+                if trigger_timing == 'on_press':
+                    # Trigger on button press (rising edge)
+                    if is_pressed and not state['was_pressed']:
+                        should_trigger = True
+                elif trigger_timing == 'on_release':
+                    # Trigger on button release (falling edge)
+                    if not is_pressed and state['was_pressed']:
+                        should_trigger = True
+                
+                state['was_pressed'] = is_pressed
+                
+                if should_trigger:
+                    # Toggle between positions
+                    if state['current_position'] == 1:
+                        pulse = position_1
+                        state['current_position'] = 2
+                    else:
+                        pulse = position_2
+                        state['current_position'] = 1
+                    
+                    # Send servo command
+                    success = await self.hardware_service.set_servo_position(
+                        servo_channel, pulse, "realtime"
+                    )
+                    
+                    if success:
+                        state['last_pulse_sent'] = pulse
+                        self.logger.debug(f"Toggle servo {servo_channel}: {pulse} (position {3 - state['current_position']})")
+                    
+                    return success
+                
+                return False
             
         except Exception as e:
             self.logger.error(f"Error in toggle servo handler: {e}")
@@ -904,22 +984,6 @@ class ControllerInputProcessor:
             
         except Exception as e:
             logger.error(f"Failed to reload controller config: {e}")
-            return False
-    
-    def reload_multi_servo_config(self) -> bool:
-        """Reload servo min/max config for MultiServoHandler (call when servo settings change)"""
-        try:
-            multi_servo_handler = self.handlers.get(BehaviorType.MULTI_SERVO)
-            if multi_servo_handler and hasattr(multi_servo_handler, 'reload_servo_config'):
-                success = multi_servo_handler.reload_servo_config()
-                if success:
-                    logger.info("✅ MultiServoHandler servo config reloaded")
-                return success
-            else:
-                logger.warning("MultiServoHandler not found or doesn't support reload")
-                return False
-        except Exception as e:
-            logger.error(f"Failed to reload multi servo config: {e}")
             return False
     
     def load_controller_config_by_type(self, controller_type: str) -> bool:
