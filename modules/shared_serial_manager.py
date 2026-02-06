@@ -190,13 +190,13 @@ class EnhancedSharedSerialPortManager:
             return True
             
         except Exception as e:
-            logger.error(f"âŒ Failed to start shared serial manager: {e}")
+            logger.error(f"Ã¢ÂÅ’ Failed to start shared serial manager: {e}")
             self.stats["last_error"] = str(e)
             return False
     
     def stop(self):
         """Stop the shared serial manager"""
-        logger.info("🛑 Stopping enhanced shared serial manager")
+        logger.info("ðŸ›‘ Stopping enhanced shared serial manager")
         
         self.running = False
         if self.worker_thread and self.worker_thread.is_alive():
@@ -222,7 +222,7 @@ class EnhancedSharedSerialPortManager:
         self.registered_devices[device_id] = weakref.ref(device_ref)
         self.device_numbers[device_number] = device_id
         
-        logger.info(f"📝 Registered device: {device_id} (#{device_number})")
+        logger.info(f"🔍 Registered device: {device_id} (#{device_number})")
         return True
     
     def send_command(self, command: SharedSerialCommand) -> bool:
@@ -240,7 +240,7 @@ class EnhancedSharedSerialPortManager:
     
     def _worker_loop(self):
         """Main worker loop for processing commands"""
-        logger.info("🔄 Enhanced shared serial worker loop started")
+        logger.info("ðŸ”„ Enhanced shared serial worker loop started")
         
         while self.running:
             try:
@@ -259,7 +259,7 @@ class EnhancedSharedSerialPortManager:
                 logger.error(f"Worker loop error: {e}")
                 self.stats["commands_failed"] += 1
         
-        logger.info("🛑 Enhanced shared serial worker loop stopped")
+        logger.info("ðŸ›‘ Enhanced shared serial worker loop stopped")
     
     def _execute_command(self, command: SharedSerialCommand):
         """Execute a single command"""
@@ -324,7 +324,7 @@ class EnhancedSharedSerialPortManager:
                 
                 # Send the batch command
                 self.serial_conn.write(bytes(cmd_bytes))
-                logger.debug(f"📦 Sent batch command: {len(targets)} servos to device #{device_num}")
+                logger.debug(f"🔍¦ Sent batch command: {len(targets)} servos to device #{device_num}")
                 return True
                 
             elif cmd_type == "set_target":
@@ -401,6 +401,15 @@ class EnhancedSharedSerialPortManager:
                 else:
                     logger.debug(f"Invalid position response from device {device_num}: {len(response)} bytes")
                     return None
+            
+            elif cmd_type == "restart_script_at_subroutine":
+                # Restart script at specific subroutine (0x27)
+                # Used for watchdog heartbeat - pets the watchdog by restarting at subroutine 0
+                subroutine = data.get("subroutine", 0)
+                cmd_bytes = bytes([0xAA, device_num, 0x27, subroutine])
+                self.serial_conn.write(cmd_bytes)
+                logger.debug(f"Restarted script at subroutine {subroutine} on device #{device_num}")
+                return True
                     
             else:
                 logger.warning(f"Unknown Maestro command: {cmd_type}")
@@ -470,7 +479,7 @@ class EnhancedMaestroControllerShared:
         if self.shared_manager.register_device(device_id, device_number, self):
             logger.info(f"🎛️ Created enhanced Maestro controller: {device_id} (device #{device_number})")
         else:
-            logger.error(f"âŒ Failed to register {device_id} with shared manager")
+            logger.error(f"❌ Failed to register {device_id} with shared manager")
     
     def start(self) -> bool:
         """Start the controller"""
@@ -581,7 +590,7 @@ class EnhancedMaestroControllerShared:
                                     
                                     test_response = self.shared_manager.serial_conn.read(2)
                                     if len(test_response) == 2:
-                                        print(f"  ✅ Channel {test_channel} responded - detected {test_channel + 1} channels")
+                                        print(f"✅ Channel {test_channel} responded - detected {test_channel + 1} channels")
                                         if test_channel >= 23:
                                             detected_channels = 24
                                         elif test_channel >= 17:
@@ -760,6 +769,31 @@ class EnhancedMaestroControllerShared:
         )
         return self.shared_manager.send_command(command)
     
+    def restart_script_at_subroutine(self, subroutine: int = 0,
+                                     priority: CommandPriority = CommandPriority.REALTIME) -> bool:
+        """
+        Restart Maestro script at specific subroutine
+        
+        Used for watchdog heartbeat - calling with subroutine=0 pets the watchdog
+        by restarting the pet_watchdog subroutine which resets the timeout counter.
+        
+        Args:
+            subroutine: Subroutine number (0 = first subroutine)
+            priority: Command priority (default REALTIME for watchdog)
+            
+        Returns:
+            True if command queued successfully
+        """
+        command = SharedSerialCommand(
+            device_id=self.device_id,
+            device_number=self.device_number,
+            command_type="restart_script_at_subroutine",
+            data={"subroutine": subroutine},
+            priority=priority,
+            expects_response=False
+        )
+        return self.shared_manager.send_command(command)
+    
     def get_status_dict(self) -> Dict[str, Any]:
         """Get controller status as dictionary"""
         return {
@@ -797,12 +831,12 @@ def get_shared_manager(port: str, baud_rate: int = 9600) -> EnhancedSharedSerial
     
     with _manager_lock:
         if manager_key not in _global_managers:
-            logger.info(f"🏭 Creating new shared manager for {port} @ {baud_rate}")
+            logger.info(f"ðŸ­ Creating new shared manager for {port} @ {baud_rate}")
             manager = EnhancedSharedSerialPortManager(port, baud_rate)
             manager.start()
             _global_managers[manager_key] = manager
         else:
-            logger.debug(f"â™»ï¸ Reusing existing shared manager for {port}")
+            logger.debug(f"🔄 Reusing existing shared manager for {port}")
         
         return _global_managers[manager_key]
 
@@ -813,7 +847,7 @@ def cleanup_shared_managers():
     global _global_managers
     
     with _manager_lock:
-        logger.info(f"🧹 Cleaning up {len(_global_managers)} shared managers")
+        logger.info(f"🔧 Cleaning up {len(_global_managers)} shared managers")
         
         for manager_key, manager in _global_managers.items():
             try:
@@ -847,7 +881,7 @@ def demo_batch_commands():
     ], priority=CommandPriority.NORMAL)
     
     # Example 2: Complex batch with individual settings
-    print("🎯 Example 2: Complex batch with settings")
+    print("🎯Example 2: Complex batch with settings")
     maestro1.set_multiple_targets_with_settings([
         {"channel": 0, "target": 1600, "speed": 50, "acceleration": 30},
         {"channel": 1, "target": 1300, "speed": 20},
@@ -856,7 +890,7 @@ def demo_batch_commands():
     ])
     
     # Example 3: Using the builder pattern directly
-    print("🎯 Example 3: Builder pattern")
+    print("🎯Example 3: Builder pattern")
     builder = manager.create_batch_builder("maestro1", 12)
     builder.add_target(0, 1500, speed=60) \
            .add_target(1, 1400, acceleration=25) \
@@ -866,7 +900,7 @@ def demo_batch_commands():
     
     manager.send_batch_command(builder)
     
-    print("📊 Performance comparison:")
+    print("🔧 Performance comparison:")
     print("  Individual commands: 4 serial transactions + queue delays")
     print("  Batch command: 1 serial transaction, synchronized movement")
     print("  Typical improvement: 3-5x faster, much better synchronization")

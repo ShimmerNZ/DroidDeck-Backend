@@ -149,13 +149,24 @@ class MultiServoHandler(BehaviorHandler):
                 channel = servo_info.get('channel')
                 invert = servo_info.get('invert', False)
                 
+                # Support custom min/max travel per servo (for triggers with limited range)
+                custom_min = servo_info.get('min_travel')
+                custom_max = servo_info.get('max_travel')
+                
                 if not channel:
                     continue
                 
-                # Get servo-specific min/max from servo config
-                servo_cfg = self.servo_config.get(channel, {})
-                min_pulse = servo_cfg.get('min', 992)
-                max_pulse = servo_cfg.get('max', 2000)
+                # Get servo-specific min/max from servo config OR use custom values
+                if custom_min is not None and custom_max is not None:
+                    # Use custom travel limits (for triggers that need full range)
+                    min_pulse = custom_min
+                    max_pulse = custom_max
+                    self.logger.debug(f"Using custom travel for {channel}: {min_pulse}-{max_pulse}")
+                else:
+                    # Use servo config limits (default behavior)
+                    servo_cfg = self.servo_config.get(channel, {})
+                    min_pulse = servo_cfg.get('min', 992)
+                    max_pulse = servo_cfg.get('max', 2000)
                 
                 # Calculate center and range
                 center = (min_pulse + max_pulse) // 2

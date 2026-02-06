@@ -67,6 +67,12 @@ class WALLEBackend:
         self.track_heartbeat_timeout = 2.0
         self.track_heartbeat_task = None
         
+        # Maestro watchdog configuration
+        self.watchdog_enabled = False
+        self.watchdog_task = None
+        self.watchdog_interval = 0.05  # 50ms - pet the watchdog frequently
+        self.maestro_for_tracks = 2  # Maestro 2 controls tracks (m2_ch12, m2_ch13)
+        
         # Camera proxy tracking
         self.camera_proxy_pid = None
         self.load_camera_proxy_pid()
@@ -175,6 +181,12 @@ class WALLEBackend:
                 # ENABLE FAILSAFE - Disable all motors
                 logger.warning("🛡️ ENABLING FAILSAFE MODE")
                 
+                # Stop watchdog heartbeat (Maestro script will auto-center tracks)
+                self.watchdog_enabled = False
+                if self.watchdog_task and not self.watchdog_task.done():
+                    self.watchdog_task.cancel()
+                    logger.info("Watchdog heartbeat stopped - Maestro script will timeout and center tracks")
+                
                 # Set tracks to home position
                 for channel in self.track_channels:
                     await self.hardware_service.set_servo_position(
@@ -234,12 +246,21 @@ class WALLEBackend:
                         self.start_track_heartbeat_monitor()
                     )
                 
+                # Start Maestro watchdog heartbeat
+                self.watchdog_enabled = True
+                if not self.watchdog_task or self.watchdog_task.done():
+                    self.watchdog_task = asyncio.create_task(
+                        self.start_maestro_watchdog()
+                    )
+                    logger.info("✅ Maestro watchdog enabled for track safety")
+                
                 return {
                     "success": True,
                     "failsafe_active": False,
-                    "message": "Failsafe disabled - system operational",
+                    "message": "Failsafe disabled - system operational with watchdog protection",
                     "nema": nema_status,
-                    "tracks_enabled": True
+                    "tracks_enabled": True,
+                    "watchdog_enabled": True
                 }
         except Exception as e:
             logger.error(f"Error toggling failsafe: {e}")
@@ -247,7 +268,7 @@ class WALLEBackend:
 
     async def start_track_heartbeat_monitor(self):
         """Monitor track commands and return to home if no activity"""
-        logger.info("🔄 Track heartbeat monitor started")
+        logger.info("ðŸ”„ Track heartbeat monitor started")
         while True:
             try:
                 await asyncio.sleep(0.5)
@@ -267,6 +288,55 @@ class WALLEBackend:
             except Exception as e:
                 logger.error(f"Track heartbeat monitor error: {e}")
                 await asyncio.sleep(1.0)
+
+    async def start_maestro_watchdog(self):
+        """
+        Pet the Maestro watchdog script to keep tracks enabled
+        
+        This sends a heartbeat command every 50ms to the Maestro running
+        the watchdog script. If heartbeats stop, the Maestro script will
+        automatically center the track channels to 1500 (neutral/stop).
+        """
+        logger.info("🐕 Starting Maestro watchdog heartbeat (50ms interval)")
+        
+        # Get the maestro controlling the tracks
+        maestro = None
+        if self.maestro_for_tracks == 1 and self.hardware_service.maestro1:
+            maestro = self.hardware_service.maestro1
+        elif self.maestro_for_tracks == 2 and self.hardware_service.maestro2:
+            maestro = self.hardware_service.maestro2
+        
+        if not maestro:
+            logger.error("Cannot start watchdog - Maestro for tracks not available")
+            return
+        
+        logger.info(f"Watchdog monitoring Maestro {self.maestro_for_tracks} (device #{maestro.device_number})")
+        
+        heartbeat_count = 0
+        last_log_time = time.time()
+        
+        while self.watchdog_enabled:
+            try:
+                # Pet the watchdog by restarting script at subroutine 0 (pet_watchdog)
+                maestro.restart_script_at_subroutine(subroutine=0)
+                
+                heartbeat_count += 1
+                
+                # Log status every 30 seconds
+                current_time = time.time()
+                if current_time - last_log_time >= 30.0:
+                    logger.debug(f"Watchdog heartbeat: {heartbeat_count} beats in last 30s")
+                    heartbeat_count = 0
+                    last_log_time = current_time
+                
+                # Sleep for watchdog interval (50ms)
+                await asyncio.sleep(self.watchdog_interval)
+                
+            except Exception as e:
+                logger.error(f"Maestro watchdog error: {e}")
+                await asyncio.sleep(0.5)  # Back off on errors
+        
+        logger.warning("🛑 Maestro watchdog heartbeat stopped")
 
     async def broadcast_websocket_message(self, message: dict):
         """Broadcast message to all connected WebSocket clients"""
@@ -759,17 +829,18 @@ class WALLEBackend:
             return {"error": str(e)}
     
     async def set_failsafe_mode(self, enabled: bool):
-        """Set system failsafe mode"""
+        """
+        Set system failsafe mode (wrapper for toggle_failsafe)
+        
+        This method is called by websocket handlers and web interface.
+        It delegates to toggle_failsafe which handles watchdog control.
+        """
+        # Call the comprehensive toggle_failsafe method
+        result = await self.toggle_failsafe(enable=enabled)
+        
+        # Stop current scene if enabling failsafe
         if enabled:
-            self.state = SystemState.FAILSAFE
-            logger.warning("Failsafe mode ACTIVATED")
-            
-            # Stop current scene if playing
             await self.scene_engine.stop_current_scene()
-            
-        else:
-            self.state = SystemState.NORMAL
-            logger.info("Failsafe mode DEACTIVATED")
         
         # Broadcast state change
         await self.broadcast_message({
@@ -778,7 +849,7 @@ class WALLEBackend:
             "failsafe_enabled": enabled,
             "timestamp": time.time()
         })
-    
+
     # ==================== SYSTEM LIFECYCLE ====================
     async def start(self):
         """Start the WALL-E backend system"""

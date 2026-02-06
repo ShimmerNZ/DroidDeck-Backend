@@ -95,7 +95,7 @@ class WebSocketMessageHandler:
             "mode": self._handle_mode_control
         }
         
-        logger.info(f"ðŸ”§ WebSocket handler initialized with {len(self.handlers)} message types")
+        logger.info(f"🔧 WebSocket handler initialized with {len(self.handlers)} message types")
 
         
     async def _handle_frontend_controller(self, websocket, data: Dict[str, Any]):
@@ -634,13 +634,21 @@ class WebSocketMessageHandler:
             if updated_count > 0:
                 with open(controller_config_path, 'w') as f:
                     json.dump(controller_config, f, indent=2)
-                logger.info(f"âœ… Updated backend controller_config.json: {updated_count} center offsets applied")
+                logger.info(f"✅ Updated backend controller_config.json: {updated_count} center offsets applied")
                 
                 # Reload both controller config and servo home positions
                 if self.controller_input_processor:
                     self.controller_input_processor.reload_controller_config()
                     self.controller_input_processor.reload_servo_home_positions()
-                    logger.info("ðŸ”„ Controller input processor reloaded")
+                    logger.info("🔄 Controller input processor reloaded")
+                    
+                    # Force servos to new home positions immediately
+                    for channel_num, home_pos in home_positions.items():
+                        channel_key = f"m{maestro}_ch{channel_num}"
+                        await self.hardware_service.set_servo_position(
+                            channel_key, home_pos, "high"
+                        )
+                        logger.info(f"  📍 Moved {channel_key} to new home: {home_pos}")
             else:
                 logger.info("No controller mappings found to update")
             
@@ -664,7 +672,7 @@ class WebSocketMessageHandler:
         # Convert keys to integers (JSON converts dict keys to strings)
         channels = {int(k): v for k, v in channels.items()}
         
-        logger.info(f"ðŸ“ Received settings save for Maestro {maestro}: {len(channels)} channels")
+        logger.info(f"📍 Received settings save for Maestro {maestro}: {len(channels)} channels")
         logger.debug(f"Settings data: {channels}")
         
         try:
@@ -703,7 +711,7 @@ class WebSocketMessageHandler:
             # Save updated servo config
             with open(servo_config_path, 'w') as f:
                 json.dump(servo_config, f, indent=2)
-            logger.info(f"âœ… Saved servo_config.json: {updated_count} channels updated")
+            logger.info(f"✅ Saved servo_config.json: {updated_count} channels updated")
             
             # Also update controller_config.json center offsets (reuse existing logic)
             controller_config_path = "configs/controller_config.json"
@@ -749,14 +757,21 @@ class WebSocketMessageHandler:
                 if offset_count > 0:
                     with open(controller_config_path, 'w') as f:
                         json.dump(controller_config, f, indent=2)
-                    logger.info(f"âœ… Updated controller_config.json: {offset_count} center offsets")
+                    logger.info(f"✅ Updated controller_config.json: {offset_count} center offsets")
                     
                     # Reload controller config
                     if self.controller_input_processor:
                         self.controller_input_processor.reload_controller_config()
                         self.controller_input_processor.reload_servo_home_positions()
-                        self.controller_input_processor.reload_multi_servo_config()
-                        logger.info("ðŸ”„ Controller config reloaded")
+                        logger.info("🔄 Controller config reloaded")
+                        
+                        # Force servos to new home positions immediately
+                        for channel_num, home_pos in home_positions.items():
+                            channel_key = f"m{maestro}_ch{channel_num}"
+                            await self.hardware_service.set_servo_position(
+                                channel_key, home_pos, "high"
+                            )
+                            logger.info(f"  📍 Moved {channel_key} to new home: {home_pos}")
             
             except Exception as e:
                 logger.warning(f"Could not update controller config: {e}")
@@ -1120,7 +1135,7 @@ class WebSocketMessageHandler:
         emotion = data.get("emotion")
         if emotion:
             success = await self.scene_engine.play_scene(emotion)
-            logger.info(f"Scene '{emotion}': {'âœ…' if success else 'âŒ'}")
+            logger.info(f"Scene '{emotion}': {'✅' if success else 'âŒ'}")
             
             if not success:
                 await self._send_error_response(websocket, f"Failed to play scene: {emotion}")
@@ -1140,7 +1155,7 @@ class WebSocketMessageHandler:
             }
             
             await self._send_websocket_message(websocket, response)
-            logger.info(f"ðŸ“‹ Sent {len(scenes)} scenes to client")
+            logger.info(f"📍‹ Sent {len(scenes)} scenes to client")
             
         except Exception as e:
             logger.error(f"Failed to get scenes: {e}")
@@ -1219,7 +1234,7 @@ class WebSocketMessageHandler:
                 track = data.get("track")
                 if track:
                     success = self.audio_controller.play_track(track)
-                    logger.info(f"ðŸŽµ Audio play '{track}': {'âœ…' if success else 'âŒ'}")
+                    logger.info(f"ðŸŽµ Audio play '{track}': {'✅' if success else 'âŒ'}")
                     if not success:
                         await self._send_error_response(websocket, f"Failed to play track: {track}")
                 else:
@@ -1381,7 +1396,7 @@ class WebSocketMessageHandler:
     async def _handle_tracking(self, websocket, data: Dict[str, Any]):
         """Handle tracking enable/disable"""
         state = data.get("state", False)
-        logger.info(f"ðŸ“ Tracking {'enabled' if state else 'disabled'}")
+        logger.info(f"📍 Tracking {'enabled' if state else 'disabled'}")
         
         # Broadcast tracking state to all clients
         await self.backend.broadcast_message({
@@ -1450,7 +1465,7 @@ class WebSocketMessageHandler:
                     timeout=5,
                     check=True
                 )
-                logger.info(f"âœ… System volume set to {volume}% via amixer")
+                logger.info(f"✅ System volume set to {volume}% via amixer")
                 success = True
                 method = "amixer"
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
@@ -1464,7 +1479,7 @@ class WebSocketMessageHandler:
                         timeout=5,
                         check=True
                     )
-                    logger.info(f"âœ… System volume set to {volume}% via pactl")
+                    logger.info(f"✅ System volume set to {volume}% via pactl")
                     success = True
                     method = "pactl"
                 except (subprocess.CalledProcessError, FileNotFoundError) as e2:
