@@ -721,39 +721,43 @@ class WebSocketMessageHandler:
                     controller_config = json.load(f)
                 
                 offset_count = 0
-                for control_name, control_config in controller_config.items():
-                    behavior = control_config.get('behavior')
+                for control_name, control_config_data in controller_config.items():
+                    # Handle both list (multiple mappings) and dict (single mapping) formats
+                    configs_to_update = control_config_data if isinstance(control_config_data, list) else [control_config_data]
                     
-                    # Handle direct_servo behavior
-                    if behavior == 'direct_servo':
-                        target = control_config.get('target')
-                        if target and target.startswith(f"m{maestro}_ch"):
-                            channel_num = int(target.split("_ch")[1])
-                            if channel_num in home_positions:
-                                home_pos = home_positions[channel_num]
-                                center_offset = home_pos - 1500
-                                control_config['center_offset'] = center_offset
-                                offset_count += 1
-                                logger.info(f" Updated {control_name} center_offset={center_offset}")
-                    
-                    # Handle joystick_pair behavior
-                    elif behavior == 'joystick_pair':
-                        x_servo = control_config.get('x_servo')
-                        y_servo = control_config.get('y_servo')
+                    for control_config in configs_to_update:
+                        behavior = control_config.get('behavior')
                         
-                        if x_servo and x_servo.startswith(f"m{maestro}_ch"):
-                            channel_num = int(x_servo.split("_ch")[1])
-                            if channel_num in home_positions:
-                                home_pos = home_positions[channel_num]
-                                control_config['x_center_offset'] = home_pos - 1500
-                                offset_count += 1
+                        # Handle direct_servo behavior
+                        if behavior == 'direct_servo':
+                            target = control_config.get('target')
+                            if target and target.startswith(f"m{maestro}_ch"):
+                                channel_num = int(target.split("_ch")[1])
+                                if channel_num in home_positions:
+                                    home_pos = home_positions[channel_num]
+                                    center_offset = home_pos - 1500
+                                    control_config['center_offset'] = center_offset
+                                    offset_count += 1
+                                    logger.info(f" Updated {control_name} center_offset={center_offset}")
                         
-                        if y_servo and y_servo.startswith(f"m{maestro}_ch"):
-                            channel_num = int(y_servo.split("_ch")[1])
-                            if channel_num in home_positions:
-                                home_pos = home_positions[channel_num]
-                                control_config['y_center_offset'] = home_pos - 1500
-                                offset_count += 1
+                        # Handle joystick_pair behavior
+                        elif behavior == 'joystick_pair':
+                            x_servo = control_config.get('x_servo')
+                            y_servo = control_config.get('y_servo')
+                            
+                            if x_servo and x_servo.startswith(f"m{maestro}_ch"):
+                                channel_num = int(x_servo.split("_ch")[1])
+                                if channel_num in home_positions:
+                                    home_pos = home_positions[channel_num]
+                                    control_config['x_center_offset'] = home_pos - 1500
+                                    offset_count += 1
+                            
+                            if y_servo and y_servo.startswith(f"m{maestro}_ch"):
+                                channel_num = int(y_servo.split("_ch")[1])
+                                if channel_num in home_positions:
+                                    home_pos = home_positions[channel_num]
+                                    control_config['y_center_offset'] = home_pos - 1500
+                                    offset_count += 1
                 
                 if offset_count > 0:
                     with open(controller_config_path, 'w') as f:
@@ -1323,7 +1327,7 @@ class WebSocketMessageHandler:
     
     async def _handle_emergency_stop(self, websocket, data: Dict[str, Any]):
         """Handle emergency stop command"""
-        logger.critical("ðŸš¨ EMERGENCY STOP ACTIVATED via WebSocket")
+        logger.critical("Ã°Å¸Å¡Â¨ EMERGENCY STOP ACTIVATED via WebSocket")
         
         # Emergency stop all systems
         await self.hardware_service.emergency_stop_all()

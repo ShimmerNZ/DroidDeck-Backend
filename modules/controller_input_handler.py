@@ -46,13 +46,23 @@ class BehaviorHandler:
         """Process controller input with behavior-specific logic"""
         raise NotImplementedError
     
-    def _clamp_pulse(self, value: float, center_offset: int = 0) -> int:
+    def _clamp_pulse(self, value: float, center_offset: int = 0, servo_channel: str = None) -> int:
         """
         Clamp servo pulse value to safe range
         center_offset: offset from 1500 center (e.g., -250 means center at 1250)
+        servo_channel: optional channel to look up actual min/max from servo_config
         """
         center = 1500 + center_offset
         pulse = int(center + value * 500)
+        
+        # If we have a servo channel and processor, use actual servo min/max
+        if servo_channel and self.processor and hasattr(self.processor, 'servo_config'):
+            servo_cfg = self.processor.servo_config.get(servo_channel, {})
+            min_pulse = servo_cfg.get('min', 1000)
+            max_pulse = servo_cfg.get('max', 2000)
+            return max(min_pulse, min(max_pulse, pulse))
+        
+        # Fallback to safe defaults
         return max(1000, min(2000, pulse))
 
 class DirectServoHandler(BehaviorHandler):
@@ -86,8 +96,8 @@ class DirectServoHandler(BehaviorHandler):
             if last_value is not None and abs(value - last_value) < self.change_threshold:
                 return True  
 
-            # Use center_offset to adjust center position
-            pulse = self._clamp_pulse(value, center_offset)
+            # Use center_offset to adjust center position, and actual servo min/max for clamping
+            pulse = self._clamp_pulse(value, center_offset, servo_channel)
             
             # Send servo command
             success = await self.hardware_service.set_servo_position(
@@ -276,15 +286,18 @@ class ToggleServoHandler(BehaviorHandler):
             if not servo_channel or not self.hardware_service:
                 return False
             
-            # Initialize state for this control if not exists
-            if controller_input.control_name not in self.toggle_states:
-                self.toggle_states[controller_input.control_name] = {
+            # Initialize state for this control+servo combination
+            # Use unique key for each servo to avoid shared state issues when multiple servos on same button
+            state_key = f"{controller_input.control_name}:{servo_channel}"
+            
+            if state_key not in self.toggle_states:
+                self.toggle_states[state_key] = {
                     'current_position': 1,  # Start at position 1
                     'was_pressed': False,
                     'last_pulse_sent': None  # Track last pulse to avoid redundant commands
                 }
             
-            state = self.toggle_states[controller_input.control_name]
+            state = self.toggle_states[state_key]
             is_pressed = abs(controller_input.raw_value) > threshold
             
             # HOLD MODE: Button held = position_2, Released = position_1
@@ -379,7 +392,7 @@ class JoystickPairHandler(BehaviorHandler):
             if controller_input.control_name.endswith('_x'):
                 value = -controller_input.raw_value if invert_x else controller_input.raw_value
                 value *= sensitivity
-                pulse = self._clamp_pulse(value, x_center_offset)
+                pulse = self._clamp_pulse(value, x_center_offset, x_servo)
                 
                 success = await self.hardware_service.set_servo_position(
                     x_servo, pulse, "realtime"
@@ -393,7 +406,7 @@ class JoystickPairHandler(BehaviorHandler):
             elif controller_input.control_name.endswith('_y'):
                 value = -controller_input.raw_value if invert_y else controller_input.raw_value
                 value *= sensitivity
-                pulse = self._clamp_pulse(value, y_center_offset)
+                pulse = self._clamp_pulse(value, y_center_offset, y_servo)
                 
                 success = await self.hardware_service.set_servo_position(
                     y_servo, pulse, "realtime"
@@ -604,10 +617,10 @@ class SceneTriggerHandler(BehaviorHandler):
                 should_trigger = is_pressed
             
             if should_trigger:
-                success = await self.scene_engine.play_scene(scene_name)
-                if success:
-                    self.logger.info(f"Scene triggered: {scene_name}")
-                return success
+                # Run scene in background to avoid blocking controller input processing
+                asyncio.create_task(self.scene_engine.play_scene(scene_name))
+                self.logger.info(f"Scene triggered (non-blocking): {scene_name}")
+                return True
             
             return True  # No error, just no trigger
             
@@ -655,10 +668,10 @@ class ToggleScenesHandler(BehaviorHandler):
                 scene_to_trigger = scene_1 if current == 0 else scene_2
                 self.current_scene[control_key] = 1 - current
                 
-                success = await self.scene_engine.play_scene(scene_to_trigger)
-                if success:
-                    self.logger.info(f"Toggle scene triggered: {scene_to_trigger}")
-                return success
+                # Run scene in background to avoid blocking controller input processing
+                asyncio.create_task(self.scene_engine.play_scene(scene_to_trigger))
+                self.logger.info(f"Toggle scene triggered (non-blocking): {scene_to_trigger}")
+                return True
             
             return True  # No error, just no trigger
             
@@ -899,35 +912,39 @@ class ControllerInputProcessor:
             
             # Extract home positions from center_offset values
             home_positions = {}
-            for control_name, control_config in controller_config.items():
-                behavior = control_config.get('behavior')
+            for control_name, control_config_data in controller_config.items():
+                # Handle both list (multiple mappings) and dict (single mapping) formats
+                configs_to_check = control_config_data if isinstance(control_config_data, list) else [control_config_data]
                 
-                # Handle direct_servo behavior
-                if behavior == 'direct_servo':
-                    target = control_config.get('target')
-                    center_offset = control_config.get('center_offset', 0)
-                    if target and center_offset != 0:
-                        # Calculate home position from offset: home = 1500 + offset
-                        home_pos = 1500 + center_offset
-                        home_positions[target] = home_pos
-                        logger.debug(f"  {target}: offset={center_offset}, home={home_pos}")
-                
-                # Handle joystick_pair behavior
-                elif behavior == 'joystick_pair':
-                    x_servo = control_config.get('x_servo')
-                    y_servo = control_config.get('y_servo')
-                    x_center_offset = control_config.get('x_center_offset', 0)
-                    y_center_offset = control_config.get('y_center_offset', 0)
+                for control_config in configs_to_check:
+                    behavior = control_config.get('behavior')
                     
-                    if x_servo and x_center_offset != 0:
-                        home_pos = 1500 + x_center_offset
-                        home_positions[x_servo] = home_pos
-                        logger.debug(f"  {x_servo}: offset={x_center_offset}, home={home_pos}")
+                    # Handle direct_servo behavior
+                    if behavior == 'direct_servo':
+                        target = control_config.get('target')
+                        center_offset = control_config.get('center_offset', 0)
+                        if target and center_offset != 0:
+                            # Calculate home position from offset: home = 1500 + offset
+                            home_pos = 1500 + center_offset
+                            home_positions[target] = home_pos
+                            logger.debug(f"  {target}: offset={center_offset}, home={home_pos}")
                     
-                    if y_servo and y_center_offset != 0:
-                        home_pos = 1500 + y_center_offset
-                        home_positions[y_servo] = home_pos
-                        logger.debug(f"  {y_servo}: offset={y_center_offset}, home={home_pos}")
+                    # Handle joystick_pair behavior
+                    elif behavior == 'joystick_pair':
+                        x_servo = control_config.get('x_servo')
+                        y_servo = control_config.get('y_servo')
+                        x_center_offset = control_config.get('x_center_offset', 0)
+                        y_center_offset = control_config.get('y_center_offset', 0)
+                        
+                        if x_servo and x_center_offset != 0:
+                            home_pos = 1500 + x_center_offset
+                            home_positions[x_servo] = home_pos
+                            logger.debug(f"  {x_servo}: offset={x_center_offset}, home={home_pos}")
+                        
+                        if y_servo and y_center_offset != 0:
+                            home_pos = 1500 + y_center_offset
+                            home_positions[y_servo] = home_pos
+                            logger.debug(f"  {y_servo}: offset={y_center_offset}, home={home_pos}")
             
             if home_positions:
                 logger.info(f"Loaded {len(home_positions)} servo home positions from controller config")
@@ -1006,19 +1023,32 @@ class ControllerInputProcessor:
             return False
     
     def load_controller_config(self, config_dict: Dict[str, Any]) -> bool:
-        """Load controller configuration mappings from dict"""
+        """Load controller configuration mappings from dict - handles both single and multiple mappings"""
         try:
             self.controller_mappings = config_dict.copy()
             
-            # Validate configurations
+            # Validate configurations - handle both list and dict formats
             valid_configs = 0
+            total_mappings = 0
             for control_name, config in self.controller_mappings.items():
-                if self._validate_config(control_name, config):
-                    valid_configs += 1
+                # Handle both list (new multi-mapping) and dict (old single mapping) formats
+                if isinstance(config, list):
+                    # Multiple mappings for this button
+                    for single_config in config:
+                        total_mappings += 1
+                        if self._validate_config(control_name, single_config):
+                            valid_configs += 1
+                        else:
+                            logger.warning(f"Invalid controller config for {control_name}: {single_config}")
                 else:
-                    logger.warning(f"Invalid controller config for {control_name}: {config}")
+                    # Single mapping (old format)
+                    total_mappings += 1
+                    if self._validate_config(control_name, config):
+                        valid_configs += 1
+                    else:
+                        logger.warning(f"Invalid controller config for {control_name}: {config}")
             
-            logger.info(f"Loaded {valid_configs}/{len(self.controller_mappings)} valid controller mappings")
+            logger.info(f"Loaded {valid_configs}/{total_mappings} valid controller mappings from {len(self.controller_mappings)} buttons")
             return valid_configs > 0
             
         except Exception as e:
@@ -1083,40 +1113,53 @@ class ControllerInputProcessor:
             # Track active inputs
             self.active_inputs[control_name] = controller_input
             
-            # Find matching configuration
-            config = self.controller_mappings.get(control_name)
-            if not config:
+            # Find matching configuration(s) - now supports multiple mappings per button
+            configs = self.controller_mappings.get(control_name)
+            if not configs:
                 # Check for partial matches (e.g., left_stick_x matches left_stick config)
                 base_control = control_name.replace('_x', '').replace('_y', '')
-                config = self.controller_mappings.get(base_control)
+                configs = self.controller_mappings.get(base_control)
                 
-                if not config:
+                if not configs:
                     logger.debug(f"No controller mapping found for {control_name}")
                     return False
             
-            # Get behavior type
-            behavior = config.get('behavior')
-            behavior_type = None
-            
-            for bt in BehaviorType:
-                if bt.value == behavior:
-                    behavior_type = bt
-                    break
-            
-            if not behavior_type:
-                logger.warning(f"Unknown behavior type: {behavior}")
+            # Ensure configs is a list (supports both old single config and new multi-config)
+            if isinstance(configs, dict):
+                # Old format: single config as dict
+                configs = [configs]
+            elif not isinstance(configs, list):
+                logger.error(f"Invalid config format for {control_name}")
                 return False
             
-            # Process through appropriate handler
-            handler = self.handlers.get(behavior_type)
-            if not handler:
-                logger.error(f"No handler for behavior type: {behavior_type}")
-                return False
-            
-            success = await handler.process(controller_input, config)
+            # Process through all handlers for this button
+            any_success = False
+            for config in configs:
+                # Get behavior type
+                behavior = config.get('behavior')
+                behavior_type = None
+                
+                for bt in BehaviorType:
+                    if bt.value == behavior:
+                        behavior_type = bt
+                        break
+                
+                if not behavior_type:
+                    logger.warning(f"Unknown behavior type: {behavior}")
+                    continue
+                
+                # Process through appropriate handler
+                handler = self.handlers.get(behavior_type)
+                if not handler:
+                    logger.error(f"No handler for behavior type: {behavior_type}")
+                    continue
+                
+                success = await handler.process(controller_input, config)
+                if success:
+                    any_success = True
             
             # Update statistics
-            if success:
+            if any_success:
                 self.stats["successful_commands"] += 1
             else:
                 self.stats["failed_commands"] += 1
@@ -1162,11 +1205,26 @@ class ControllerInputProcessor:
         return self.controller_mappings.copy()
     
     def update_controller_mapping(self, control_name: str, config: Dict[str, Any]) -> bool:
-        """Update or add a controller mapping"""
+        """Update or add a controller mapping - supports multiple mappings per button"""
         try:
             if self._validate_config(control_name, config):
-                self.controller_mappings[control_name] = config
-                logger.info(f"Updated controller mapping for {control_name}")
+                # Check if we already have mapping(s) for this control
+                existing = self.controller_mappings.get(control_name)
+                
+                if existing is None:
+                    # No existing mapping - create new list with this config
+                    self.controller_mappings[control_name] = [config]
+                elif isinstance(existing, dict):
+                    # Old format: single dict - convert to list and add new
+                    self.controller_mappings[control_name] = [existing, config]
+                elif isinstance(existing, list):
+                    # Already a list - append new config
+                    self.controller_mappings[control_name].append(config)
+                else:
+                    logger.error(f"Unexpected mapping format for {control_name}")
+                    return False
+                
+                logger.info(f"Added controller mapping for {control_name} (total: {len(self.controller_mappings[control_name])})")
                 return True
             else:
                 logger.warning(f"Invalid configuration for {control_name}")
@@ -1176,16 +1234,47 @@ class ControllerInputProcessor:
             logger.error(f"Failed to update controller mapping: {e}")
             return False
     
-    def remove_controller_mapping(self, control_name: str) -> bool:
-        """Remove a controller mapping"""
+    def remove_controller_mapping(self, control_name: str, config_index: int = None) -> bool:
+        """
+        Remove a controller mapping
+        
+        Args:
+            control_name: The button/control name
+            config_index: Optional index of specific config to remove. If None, removes all.
+        """
         try:
-            if control_name in self.controller_mappings:
-                del self.controller_mappings[control_name]
-                logger.info(f"Removed controller mapping for {control_name}")
-                return True
-            else:
+            if control_name not in self.controller_mappings:
                 logger.warning(f"No mapping found for {control_name}")
                 return False
+            
+            mappings = self.controller_mappings[control_name]
+            
+            # If no index specified, remove all mappings for this control
+            if config_index is None:
+                del self.controller_mappings[control_name]
+                logger.info(f"Removed all mappings for {control_name}")
+                return True
+            
+            # Remove specific mapping by index
+            if isinstance(mappings, list):
+                if 0 <= config_index < len(mappings):
+                    mappings.pop(config_index)
+                    
+                    # If list is now empty, remove the key entirely
+                    if len(mappings) == 0:
+                        del self.controller_mappings[control_name]
+                        logger.info(f"Removed last mapping for {control_name}")
+                    else:
+                        logger.info(f"Removed mapping {config_index} for {control_name} ({len(mappings)} remaining)")
+                    return True
+                else:
+                    logger.warning(f"Invalid index {config_index} for {control_name}")
+                    return False
+            elif isinstance(mappings, dict):
+                # Old format - just remove it
+                del self.controller_mappings[control_name]
+                logger.info(f"Removed mapping for {control_name}")
+                return True
                 
         except Exception as e:
             logger.error(f"Failed to remove controller mapping: {e}")
