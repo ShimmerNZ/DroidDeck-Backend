@@ -1,6 +1,22 @@
 #!/usr/bin/env python3
 """
 WALL-E Backend - Complete Main Entry Point (Fixed for websockets 15.0.1)
+
+BOTTANGO INTEGRATION:
+This backend automatically processes Bottango animation exports on startup.
+
+Workflow:
+1. Export animations from Bottango as JSON files
+2. Place exports in ./bottango_imports/ directory
+3. On startup, backend auto-converts to DroidDeck scene format
+4. Converted scenes appear in ./scenes/ directory
+5. Source files are deleted after successful conversion
+6. scenes_registry.json is updated with all available scenes
+
+The converter implements proper cubic bezier interpolation to preserve
+animator's timing and character motion from Bottango.
+
+See BOTTANGO_INTEGRATION_GUIDE.md for complete documentation.
 """
 
 import asyncio
@@ -36,6 +52,14 @@ from modules.bluetooth_controller import BackendBluetoothController
 from modules.controller_input_handler import ControllerInputProcessor
 from web.webapp import DroidDeckWebServer
 
+# Import Bottango integration
+try:
+    from bottango_converter import BottangoImportWatchdog
+    BOTTANGO_AVAILABLE = True
+except ImportError:
+    logger.warning("Bottango converter not available - animations must be manually created")
+    BOTTANGO_AVAILABLE = False
+
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +91,15 @@ class WALLEBackend:
         self.track_heartbeat_timeout = 2.0
         self.track_heartbeat_task = None
         
-        # Maestro watchdog configuration
+        # Maestro watchdog configuration - Channel-based approach
         self.watchdog_enabled = False
         self.watchdog_task = None
-        self.watchdog_interval = 0.05  # 50ms - pet the watchdog frequently
+        self.watchdog_interval = 0.5  # 500ms heartbeat interval
         self.maestro_for_tracks = 2  # Maestro 2 controls tracks (m2_ch12, m2_ch13)
+        self.watchdog_channel = "m2_ch16"  # Spare channel for watchdog heartbeat
+        self.watchdog_position_base = 1500  # Base position in microseconds
+        self.watchdog_position_toggle = 10  # ±10us variation to ensure position change
+        self.watchdog_position_state = False  # Toggle between two positions
         
         # Camera proxy tracking
         self.camera_proxy_pid = None
@@ -246,13 +274,13 @@ class WALLEBackend:
                         self.start_track_heartbeat_monitor()
                     )
                 
-                # Start Maestro watchdog heartbeat
+                # Start channel-based watchdog
                 self.watchdog_enabled = True
                 if not self.watchdog_task or self.watchdog_task.done():
                     self.watchdog_task = asyncio.create_task(
                         self.start_maestro_watchdog()
                     )
-                    logger.info("✅ Maestro watchdog enabled for track safety")
+                    logger.info("✅ Maestro watchdog ENABLED (channel-based approach)")
                 
                 return {
                     "success": True,
@@ -291,36 +319,48 @@ class WALLEBackend:
 
     async def start_maestro_watchdog(self):
         """
-        Pet the Maestro watchdog script to keep tracks enabled
+        Channel-based watchdog - sends position commands to ch16
         
-        This sends a heartbeat command every 50ms to the Maestro running
-        the watchdog script. If heartbeats stop, the Maestro script will
-        automatically center the track channels to 1500 (neutral/stop).
+        Sends varying positions to ch16 every 500ms. The Maestro script
+        monitors ch16 and auto-centers tracks if position hasn't changed
+        for 4 consecutive checks (requires ~2.4 seconds of no updates).
+        This approach uses normal servo commands alongside existing traffic.
         """
-        logger.info("🐕 Starting Maestro watchdog heartbeat (50ms interval)")
-        
-        # Get the maestro controlling the tracks
-        maestro = None
-        if self.maestro_for_tracks == 1 and self.hardware_service.maestro1:
-            maestro = self.hardware_service.maestro1
-        elif self.maestro_for_tracks == 2 and self.hardware_service.maestro2:
-            maestro = self.hardware_service.maestro2
-        
-        if not maestro:
-            logger.error("Cannot start watchdog - Maestro for tracks not available")
-            return
-        
-        logger.info(f"Watchdog monitoring Maestro {self.maestro_for_tracks} (device #{maestro.device_number})")
+        logger.info(f"🐕 Starting channel-based Maestro watchdog ({int(self.watchdog_interval*1000)}ms interval)")
+        logger.info(f"   Watchdog channel: {self.watchdog_channel}")
+        logger.info(f"   Monitoring Maestro {self.maestro_for_tracks} for track safety")
+        logger.info(f"   Position range: {self.watchdog_position_base - self.watchdog_position_toggle}us <-> {self.watchdog_position_base + self.watchdog_position_toggle}us")
+        logger.info(f"   Failsafe requires 4 consecutive failures (~2.4s)")
         
         heartbeat_count = 0
         last_log_time = time.time()
+        position_counter = 0  # Counter to create varying positions
         
         while self.watchdog_enabled:
             try:
-                # Pet the watchdog by restarting script at subroutine 0 (pet_watchdog)
-                maestro.restart_script_at_subroutine(subroutine=0)
+                # Create varying positions instead of just two values
+                # This cycles through: base-10, base-5, base, base+5, base+10
+                # More variation = more robust detection
+                offsets = [-10, -5, 0, 5, 10]
+                offset = offsets[position_counter % len(offsets)]
+                position = self.watchdog_position_base + offset
+                position_counter += 1
                 
-                heartbeat_count += 1
+                # Send position command to watchdog channel using normal servo command
+                # This works alongside existing serial traffic without conflicts
+                success = await self.hardware_service.set_servo_position(
+                    self.watchdog_channel, 
+                    position, 
+                    priority="realtime"
+                )
+                
+                if success:
+                    heartbeat_count += 1
+                    # Log first few heartbeats for debugging
+                    if heartbeat_count <= 5:
+                        logger.info(f"   Watchdog beat #{heartbeat_count}: sent position {position}us to {self.watchdog_channel}")
+                else:
+                    logger.warning(f"   Watchdog heartbeat failed to send position {position}us")
                 
                 # Log status every 30 seconds
                 current_time = time.time()
@@ -329,12 +369,12 @@ class WALLEBackend:
                     heartbeat_count = 0
                     last_log_time = current_time
                 
-                # Sleep for watchdog interval (50ms)
+                # Sleep for watchdog interval (500ms by default)
                 await asyncio.sleep(self.watchdog_interval)
                 
             except Exception as e:
                 logger.error(f"Maestro watchdog error: {e}")
-                await asyncio.sleep(0.5)  # Back off on errors
+                await asyncio.sleep(0.5)
         
         logger.warning("🛑 Maestro watchdog heartbeat stopped")
 
@@ -1185,27 +1225,93 @@ def load_system_configuration() -> Dict[str, Any]:
 # ==================== LOGGING SETUP ====================
 
 def setup_logging():
-    """Setup comprehensive logging"""
+    """Setup comprehensive logging with improved formatting, module identification, and proper UTF-8 emoji support"""
+    import warnings
+    import sys
+    
+    # Ensure UTF-8 encoding for stdout/stderr
+    if sys.stdout.encoding != 'utf-8':
+        sys.stdout.reconfigure(encoding='utf-8')
+    if sys.stderr.encoding != 'utf-8':
+        sys.stderr.reconfigure(encoding='utf-8')
+    
+    # Suppress specific warnings
+    warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
+    warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
+    
     # Create logs directory
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
     
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(logs_dir / "walle_backend.log"),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
+    # Custom formatter with module identification and emojis
+    class ModuleFormatter(logging.Formatter):
+        """Custom formatter that includes module/component identification with pretty emojis"""
+        
+        # Module name mappings for cleaner display
+        MODULE_NAMES = {
+            'modules.shared_serial_manager': 'SerialMgr',
+            'modules.hardware_service': 'Hardware',
+            'modules.scene_engine': 'SceneEngine',
+            'modules.audio_controller': 'Audio',
+            'modules.telemetry_system': 'Telemetry',
+            'modules.websocket_handler': 'WebSocket',
+            'modules.bluetooth_controller': 'Bluetooth',
+            'modules.controller_input_handler': 'Controller',
+            'modules.nema23_controller': 'NEMA23',
+            'web.webapp': 'WebApp',
+            '__main__': 'Main',
+            'bottango_converter': 'Bottango',
+        }
+        
+        def format(self, record):
+            # Get clean module name
+            module = record.name
+            for full_name, short_name in self.MODULE_NAMES.items():
+                if module.startswith(full_name):
+                    module = short_name
+                    break
+            
+            # If module name is still long, just take last part
+            if '.' in module and len(module) > 15:
+                module = module.split('.')[-1]
+            
+            # Get the message
+            message = record.getMessage()
+            
+            # Build formatted string with emojis preserved
+            timestamp = self.formatTime(record, '%H:%M:%S')
+            module_padded = f"{module:12s}"  # Pad to 12 characters for alignment
+            level_padded = f"{record.levelname:8s}"  # Pad level to 8 characters
+            
+            return f"{timestamp} - [{module_padded}] {level_padded}: {message}"
+    
+    # Configure root logger
+    formatter = ModuleFormatter()
+    
+    # File handler with UTF-8 encoding
+    file_handler = logging.FileHandler(logs_dir / "walle_backend.log", encoding='utf-8')
+    file_handler.setFormatter(formatter)
+    
+    # Console handler with UTF-8 encoding
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers.clear()  # Remove any existing handlers
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
     
     # Set module-specific log levels
     logging.getLogger("websockets").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
-
     logging.getLogger("modules.websocket_handler").setLevel(logging.INFO)
+    logging.getLogger("modules.shared_serial_manager").setLevel(logging.INFO)
     logging.getLogger("__main__").setLevel(logging.INFO)
+    
+    # Suppress GPIO warning on RPi5
+    logging.getLogger("modules.gpio_compat").setLevel(logging.ERROR)
 
 
 
@@ -1216,6 +1322,96 @@ async def play_startup_track(backend):
         print("[audio] Could not play track_001.wav after startup")
     else:
         print("[audio] Played track_001.wav after startup")
+
+
+async def process_bottango_imports_on_startup():
+    """
+    Process any Bottango imports in the bottango_imports folder on startup
+    
+    This runs automatically when the backend starts up
+    """
+    if not BOTTANGO_AVAILABLE:
+        logger.info("Bottango converter not available - skipping import processing")
+        return
+    
+    try:
+        # Define directories
+        project_root = Path(__file__).parent
+        import_dir = project_root / 'bottango_imports'
+        scenes_dir = project_root / 'scenes'
+        
+        logger.info("🎬 Checking for Bottango imports...")
+        
+        # Create watchdog and process imports
+        watchdog = BottangoImportWatchdog(
+            import_dir=import_dir,
+            scenes_dir=scenes_dir,
+            delete_after_conversion=True  # Delete imports after processing
+        )
+        
+        converted_files = watchdog.process_imports()
+        
+        if converted_files:
+            logger.info(f"✅ Processed {len(converted_files)} Bottango import(s)")
+            
+            # Update scene registry
+            await update_scene_registry(scenes_dir)
+        else:
+            logger.info("ℹ️  No Bottango imports to process")
+            
+    except Exception as e:
+        logger.error(f"Error processing Bottango imports: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+async def update_scene_registry(scenes_dir: Path):
+    """
+    Scan scenes directory and update scene registry
+    
+    Creates/updates scenes_registry.json in configs/ folder with all available scenes
+    """
+    try:
+        scenes_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Find all scene files
+        scene_files = list(scenes_dir.glob("*.json"))
+        
+        registry = {}
+        
+        for scene_file in scene_files:
+            try:
+                # Load scene to extract metadata
+                with open(scene_file, 'r') as f:
+                    scene = json.load(f)
+                
+                scene_name = scene.get('name', scene_file.stem)
+                
+                registry[scene_name] = {
+                    'file': str(scene_file.relative_to(scenes_dir.parent)),
+                    'name': scene_name,
+                    'category': scene.get('category', 'Uncategorized'),
+                    'description': scene.get('description', ''),
+                    'duration': scene.get('duration', 0),
+                    'locked_channels': scene.get('locked_channels', []),
+                    'metadata': scene.get('metadata', {})
+                }
+                
+            except Exception as e:
+                logger.warning(f"Failed to process scene {scene_file.name}: {e}")
+        
+        # Save registry to configs folder
+        configs_dir = Path("configs")
+        configs_dir.mkdir(parents=True, exist_ok=True)
+        registry_path = configs_dir / 'scenes_registry.json'
+        
+        with open(registry_path, 'w') as f:
+            json.dump(registry, f, indent=2)
+        
+        logger.info(f"📋 Scene registry updated: {len(registry)} scene(s) -> {registry_path}")
+        
+    except Exception as e:
+        logger.error(f"Failed to update scene registry: {e}")
 
 
 # ==================== MAIN ENTRY POINT ====================
@@ -1230,6 +1426,12 @@ async def main():
         
         # Create and start backend
         backend = WALLEBackend(config)
+        
+        # Process Bottango imports BEFORE starting backend
+        logger.info("Processing Bottango animations...")
+        await process_bottango_imports_on_startup()
+        
+        # Start audio and backend
         asyncio.create_task(play_startup_track(backend))
         await backend.start()
         

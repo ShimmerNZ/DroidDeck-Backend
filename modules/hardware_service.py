@@ -16,6 +16,7 @@ import json
 # Import hardware modules
 from modules.shared_serial_manager import (
     CommandPriority,
+    SharedSerialCommand,
     get_shared_manager,
     cleanup_shared_managers,
     EnhancedMaestroControllerShared,
@@ -779,13 +780,13 @@ class HardwareService:
                 priority=CommandPriority.NORMAL
             )
             
-            # Queue the command
-            success = maestro.shared_manager.queue_command(command)
+            # Send the command through shared serial manager
+            success = maestro.shared_manager.send_command(command)
             
             if success:
-                logger.info(f"🎬 Started script #{script_number} on {maestro_name}")
+                logger.debug(f"🎬 Started script #{script_number} on {maestro_name}")
             else:
-                logger.warning(f"⚠️ Failed to queue script #{script_number} for {maestro_name}")
+                logger.warning(f"⚠️ Failed to send script #{script_number} for {maestro_name}")
             
             return success
             

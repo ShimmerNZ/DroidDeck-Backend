@@ -74,6 +74,10 @@ class EnhancedSceneEngine:
         self.scene_playing = False
         self.scene_queue = []  # For scene chaining
         
+        # NEW: Channel locking for Bottango scene animation priority
+        self.locked_channels = set()  # Set of channel IDs currently locked by scene
+        self.lock_lock = asyncio.Lock()  # Thread-safe lock management
+        
         # Performance metrics
         self.metrics = SceneMetrics()
         
@@ -102,6 +106,7 @@ class EnhancedSceneEngine:
         
         logger.info(f"🎭 Enhanced Scene Engine initialized with {len(self.scenes)} scenes")
         logger.info(f"📊 Available categories: {', '.join(self.get_available_categories())}")
+        logger.info(f"🔒 Channel locking enabled for Bottango scene priority")
     
     def _start_background_tasks(self):
         """Start background tasks for auto-idle and cleanup"""
@@ -136,6 +141,64 @@ class EnhancedSceneEngine:
             except Exception as e:
                 logger.error(f"❌ Auto-idle loop error: {e}")
                 await asyncio.sleep(10.0)
+    
+    # ==================== CHANNEL LOCKING FOR BOTTANGO SCENES ====================
+    
+    async def lock_channels(self, channels: List[str]):
+        """
+        Lock specific channels to prevent manual control during Bottango animation
+        
+        This ensures that when a Bottango-imported scene is playing, manual joystick
+        controls don't interfere with animated channels, but other channels remain responsive.
+        
+        Args:
+            channels: List of channel IDs (e.g., ["m1_ch0", "m1_ch1"])
+        """
+        async with self.lock_lock:
+            self.locked_channels.update(channels)
+            
+            # Notify hardware service about locked channels
+            if hasattr(self.hardware_service, 'set_locked_channels'):
+                await self.hardware_service.set_locked_channels(self.locked_channels)
+            
+            logger.debug(f"🔒 Locked channels: {channels}")
+    
+    async def unlock_channels(self, channels: Optional[List[str]] = None):
+        """
+        Unlock specific channels or all channels
+        
+        Args:
+            channels: List of channel IDs to unlock, or None to unlock all
+        """
+        async with self.lock_lock:
+            if channels is None:
+                # Unlock all
+                self.locked_channels.clear()
+                logger.debug("🔓 Unlocked all channels")
+            else:
+                # Unlock specific channels
+                self.locked_channels.difference_update(channels)
+                logger.debug(f"🔓 Unlocked channels: {channels}")
+            
+            # Notify hardware service
+            if hasattr(self.hardware_service, 'set_locked_channels'):
+                await self.hardware_service.set_locked_channels(self.locked_channels)
+    
+    def is_channel_locked(self, channel_id: str) -> bool:
+        """
+        Check if a channel is currently locked by a scene animation
+        
+        Args:
+            channel_id: Channel to check (e.g., "m1_ch0")
+            
+        Returns:
+            bool: True if channel is locked
+        """
+        return channel_id in self.locked_channels
+    
+    def get_locked_channels(self) -> List[str]:
+        """Get list of currently locked channels"""
+        return list(self.locked_channels)
     
     def load_scenes(self) -> bool:
         """Load scene configurations from JSON file with validation"""
@@ -285,12 +348,36 @@ class EnhancedSceneEngine:
             logger.warning(f"⚠️ Scene already playing ({self.current_scene}), ignoring '{scene_name}'")
             return False
         
-        scene = self.scenes[scene_name]
+        # Make a copy of the scene to avoid modifying the original
+        scene = self.scenes[scene_name].copy()
+        
+        # NEW: If scene references a Bottango scene, load full data
+        if scene.get("script_enabled") and scene.get("bottango_scene"):
+            bottango_name = scene["bottango_scene"]
+            full_scene_data = await self._load_bottango_scene(bottango_name)
+            if full_scene_data:
+                # Merge Bottango data into scene
+                scene.update({
+                    "steps": full_scene_data.get("steps", []),
+                    "locked_channels": full_scene_data.get("locked_channels", []),
+                    # Use Bottango duration if not manually overridden
+                    "duration": scene.get("duration") or (full_scene_data.get("duration_ms", 1000) / 1000.0)
+                })
+                logger.info(f"🎬 Loaded Bottango scene: {bottango_name} ({len(scene.get('steps', []))} steps)")
+            else:
+                logger.warning(f"⚠️ Failed to load Bottango scene: {bottango_name}")
+        
         self.current_scene = scene_name
         self.scene_playing = True
         self.interrupt_requested = False
         self.pause_requested = False
         self.scene_start_time = time.time()
+        
+        # NEW: Lock channels used by this scene (for Bottango scenes)
+        locked_channels = scene.get('locked_channels', [])
+        if locked_channels:
+            await self.lock_channels(locked_channels)
+            logger.info(f"🔒 Locked {len(locked_channels)} channel(s) for scene animation")
         
         try:
             logger.info(f"🎬 Playing scene: '{scene_name}' ({scene.get('emoji', '🎭')})")
@@ -380,6 +467,11 @@ class EnhancedSceneEngine:
             
             return False
         finally:
+            # NEW: Always unlock channels when scene ends
+            if locked_channels:
+                await self.unlock_channels(locked_channels)
+                logger.info(f"🔓 Unlocked {len(locked_channels)} channel(s)")
+            
             self.scene_playing = False
             self.current_scene = None
             self.interrupt_requested = False
@@ -1342,6 +1434,27 @@ class EnhancedSceneEngine:
         """Set callback for scene progress updates"""
         self.scene_progress_callback = callback
         logger.debug("📞 Scene progress callback registered")
+    
+    # ==================== BOTTANGO SCENE LOADING ====================
+    
+    async def _load_bottango_scene(self, scene_name: str) -> dict:
+        """Load full Bottango scene data from scenes/ folder"""
+        scene_path = Path(f"scenes/{scene_name}.json")
+        
+        if not scene_path.exists():
+            logger.error(f"❌ Bottango scene file not found: {scene_path}")
+            return {}
+        
+        try:
+            with open(scene_path, 'r', encoding='utf-8') as f:
+                scene_data = json.load(f)
+            
+            logger.debug(f"📥 Loaded Bottango scene from {scene_path}")
+            return scene_data
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to load Bottango scene {scene_name}: {e}")
+            return {}
     
     # ==================== CLEANUP ====================
     

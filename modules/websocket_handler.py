@@ -65,6 +65,9 @@ class WebSocketMessageHandler:
             "audio": self._handle_audio_command,
             "get_audio_files": self._handle_get_audio_files,
             
+            # Bottango integration
+            "refresh_backend": self._handle_refresh_backend,
+            
             # System control
             "emergency_stop": self._handle_emergency_stop,
             "system_status": self._handle_system_status_request,
@@ -1317,11 +1320,68 @@ class WebSocketMessageHandler:
             }
             
             await self._send_websocket_message(websocket, response)
-            logger.info(f" Sent {len(audio_files)} audio files to client")
+            logger.info(f"📋 Sent {len(audio_files)} audio files to client")
             
         except Exception as e:
             logger.error(f"Failed to get audio files: {e}")
             await self._send_error_response(websocket, f"Error loading audio files: {str(e)}")
+    
+    async def _handle_refresh_backend(self, websocket, data: Dict[str, Any]):
+        """Handle refresh request - return audio files and Bottango scenes"""
+        try:
+            # Get audio files
+            audio_files = self.audio_controller.get_playlist()
+            
+            # Get Bottango scenes from registry
+            bottango_scenes = await self._get_bottango_scenes()
+            
+            response = {
+                "type": "backend_refresh_response",
+                "audio_files": audio_files,
+                "bottango_scenes": bottango_scenes,
+                "timestamp": time.time()
+            }
+            
+            await self._send_websocket_message(websocket, response)
+            logger.info(f"🔄 Sent refresh response: {len(audio_files)} audio files, {len(bottango_scenes)} Bottango scenes")
+            
+        except Exception as e:
+            logger.error(f"❌ Error handling refresh_backend: {e}")
+            await self._send_websocket_message(websocket, {
+                "type": "backend_refresh_response",
+                "audio_files": [],
+                "bottango_scenes": [],
+                "timestamp": time.time()
+            })
+    
+    async def _get_bottango_scenes(self) -> list:
+        """Read scenes_registry.json and return available Bottango scenes"""
+        from pathlib import Path
+        
+        registry_path = Path("configs/scenes_registry.json")
+        
+        if not registry_path.exists():
+            logger.warning("⚠️ Bottango scenes registry not found")
+            return []
+        
+        try:
+            with open(registry_path, 'r', encoding='utf-8') as f:
+                registry = json.load(f)
+            
+            scenes = []
+            for scene_name, scene_data in registry.items():
+                scenes.append({
+                    "name": scene_name,
+                    "duration": scene_data.get("duration_ms", 0) / 1000.0,  # Convert ms to seconds
+                    "channels": len(scene_data.get("channels", []))
+                })
+            
+            logger.debug(f"📋 Loaded {len(scenes)} Bottango scenes from registry")
+            return scenes
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to read Bottango scenes registry: {e}")
+            return []
     
     # ==================== SYSTEM CONTROL HANDLERS ====================
     

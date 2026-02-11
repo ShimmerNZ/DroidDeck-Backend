@@ -1,790 +1,1472 @@
-# 🤖 WALL-E Robot Control System
+# DroidDeck Backend - WALL-E Robot Control System
 
-**Updated: September 2025**
+**Version:** 2.0  
+**Platform:** Raspberry Pi 5  
+**Python:** 3.9.13
 
-## 📋 Table of Contents
-
-1. [System Overview](#system-overview)
-2. [Recent Changes & Updates](#recent-changes--updates)
-3. [Hardware Configuration](#hardware-configuration)
-4. [TB6600 Stepper Driver Configuration](#tb6600-stepper-driver-configuration)
-5. [Motor & Movement Configuration](#motor--movement-configuration)
-6. [Software Architecture](#software-architecture)
-7. [Configuration Files](#configuration-files)
-8. [Installation & Setup](#installation--setup)
-9. [Bluetooth Controller Setup](#bluetooth-controller-setup)
-10. [API Documentation](#api-documentation)
-11. [Troubleshooting](#troubleshooting)
+Complete backend system for controlling WALL-E robots with dual servo controllers, stepper motors, cameras, and multi-client support.
 
 ---
 
-## System Overview
+## 📑 Table of Contents
 
-WALL-E is a comprehensive robotics platform featuring advanced motion control, scene management, and multi-client streaming capabilities:
-
-- **Backend**: Python 3.9.13-based WebSocket server with shared serial management
-- **Frontend**: PyQt6 application with real-time telemetry and scene editing
-- **Camera System**: ESP32-CAM with HTTP proxy for multi-client streaming
-- **Hardware Control**: Dual Pololu Maestro servo controllers, NEMA 23 stepper motor with TB6600 driver
-- **Scene Management**: Audio-synchronized servo movements with 33+ predefined scenes
-- **Safety Systems**: Emergency stop, limit switches, hardware monitoring, and graceful fallbacks
-
----
-
-## Recent Changes & Updates
-
-### ✅ **Major System Enhancements**
-
-#### **1. Advanced Configuration Management System**
-- **New File**: `config_manager.py`
-- **Features**:
-  - Hot-reload configuration changes without restart
-  - Configuration validation and backup system
-  - Automatic config file watching with debounced updates
-  - Schema validation for hardware and scene configurations
-  - Statistics tracking for configuration operations
-
-#### **2. Enhanced TB6600 Stepper Motor Control**
-- **File**: `modules/nema23_controller.py`
-- **Key Improvements**:
-  - **1/4 Microstepping Configuration**: Set for quieter operation at slow speeds
-  - Configurable steps per revolution (default: 800 steps for 1.8° motors)
-  - Adjustable lead screw pitch (default: 8mm per revolution)
-  - Smooth acceleration/deceleration curves
-  - Automatic homing with limit switch detection
-  - Position tracking in both steps and centimeters
-
-#### **3. Shared Serial Port Management**
-- **File**: `modules/shared_serial_manager.py`
-- **Features**:
-  - Multiple Maestro controllers sharing single `/dev/ttyAMA0` port
-  - Priority-based command queuing (Emergency → Background)
-  - Thread-safe async communication with automatic retry logic
-  - Batch command optimization for improved performance
-  - Comprehensive statistics and error handling
-
-#### **4. GPIO Compatibility Layer**
-- **File**: `modules/gpio_compat.py`
-- **Purpose**: Unified GPIO interface supporting multiple libraries
-- **Libraries Supported**: RPi.GPIO, lgpio, gpiod with graceful fallbacks
-- **Benefits**: Ensures compatibility across different Raspberry Pi configurations
-
-#### **5. Enhanced Scene System**
-- **File**: `scene_engine.py`
-- **Improvements**:
-  - 33+ predefined scenes with categories (Happy, Sad, Curious, etc.)
-  - Audio-synchronized servo movements
-  - Real-time scene testing and validation
-  - Dynamic scene loading and saving
-  - Category-based organization with emoji support
-
-#### **6. Bluetooth Controller Support**
-- **File**: `modules/bluetooth_controller.py`
-- **Features**:
-  - PS4, Xbox, and generic gamepad support via pygame
-  - Automatic controller detection and connection
-  - Real-time input streaming to frontend
-  - Calibration system with persistent storage
-  - Button mapping and axis configuration
-  - Auto-reconnection on disconnect
+1. [System Architecture](#system-architecture)
+2. [Hardware Requirements](#hardware-requirements)
+3. [Installation](#installation)
+4. [Pinout & Wiring](#pinout--wiring)
+5. [Configuration Files](#configuration-files)
+6. [Bluetooth Controller Setup](#bluetooth-controller-setup)
+7. [API Documentation](#api-documentation)
+8. [Bottango Integration](#bottango-integration)
+9. [Troubleshooting](#troubleshooting)
 
 ---
 
-## Hardware Configuration
+## System Architecture
 
-### **Core Processing**
-- **Raspberry Pi 5**: Main controller with enhanced GPIO and processing power
-- **Python 3.9.13**: Managed via pyenv for consistency and compatibility
+### Overview
 
-### **Motion Control Hardware**
+The DroidDeck backend is a modular Python system that runs on Raspberry Pi 5, providing real-time hardware control, WebSocket communication, and multi-client camera streaming.
 
-#### **Servo Control**
-- **Pololu Maestro 18-channel (x2)**: 36 total servo channels
-  - **Device #12 & #13** on shared `/dev/ttyAMA0` port (9600 baud)
-  - Priority-based command queuing
-  - Real-time position feedback and error detection
+### Architecture Diagram
 
-#### **Stepper Motor System**
-- **NEMA 23 Stepper Motor**: Precision positioning system
-- **TB6600 Stepper Driver**: Professional-grade microstep driver
-- **Lead Screw**: 8mm pitch for precise linear movement
-- **Limit Switch**: Hardware homing and safety boundaries
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Frontend Clients                          │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │ PyQt6 App    │  │ Web Browser  │  │ Mobile App   │          │
+│  │ (Steam Deck) │  │ (Any Device) │  │ (Optional)   │          │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
+│         │                  │                  │                   │
+│         └──────────────────┴──────────────────┘                   │
+│                            │                                      │
+│                     WebSocket (ws://pi:8766)                      │
+│                     Socket.IO (http://pi:5000)                    │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │
+┌─────────────────────────────┴───────────────────────────────────┐
+│                    DroidDeck Backend (main.py)                   │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │               WALLEBackend Controller                     │   │
+│  │  • System state management (Normal/Failsafe/Emergency)   │   │
+│  │  • Client connection handling                            │   │
+│  │  • Message routing and broadcasting                      │   │
+│  └──────┬──────────────────────────────────────────┬────────┘   │
+│         │                                           │             │
+│  ┌──────▼──────────┐                     ┌─────────▼──────────┐ │
+│  │ WebSocket       │                     │ Web Server         │ │
+│  │ Handler         │                     │ (webapp.py)        │ │
+│  │ (Port 8766)     │                     │ Flask-SocketIO     │ │
+│  │                 │                     │ (Port 5000)        │ │
+│  │ • PyQt6 clients │                     │ • Web UI clients   │ │
+│  │ • Raw WebSocket │                     │ • HTTP/SocketIO    │ │
+│  └─────────────────┘                     └────────────────────┘ │
+│                                                                   │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │             Core Service Modules                          │   │
+│  │                                                           │   │
+│  │  ┌────────────────┐  ┌────────────────┐  ┌────────────┐ │   │
+│  │  │ Hardware       │  │ Scene Engine   │  │ Audio      │ │   │
+│  │  │ Service        │  │                │  │ Controller │ │   │
+│  │  │                │  │ • 33+ scenes   │  │            │ │   │
+│  │  │ • Servo ctrl   │  │ • Audio sync   │  │ • Pygame   │ │   │
+│  │  │ • Stepper ctrl │  │ • Bottango     │  │ • TTS      │ │   │
+│  │  │ • Safety sys   │  │   import       │  │ • FX       │ │   │
+│  │  └────────────────┘  └────────────────┘  └────────────┘ │   │
+│  │                                                           │   │
+│  │  ┌────────────────┐  ┌────────────────┐  ┌────────────┐ │   │
+│  │  │ Telemetry      │  │ Bluetooth      │  │ Camera     │ │   │
+│  │  │ System         │  │ Controller     │  │ Proxy      │ │   │
+│  │  │                │  │                │  │            │ │   │
+│  │  │ • ADC reading  │  │ • PS4/Xbox     │  │ • ESP32    │ │   │
+│  │  │ • Voltage mon  │  │ • Auto-detect  │  │ • MJPEG    │ │   │
+│  │  │ • Alert system │  │ • Calibration  │  │ • Multi-   │ │   │
+│  │  │                │  │                │  │   client   │ │   │
+│  │  └────────────────┘  └────────────────┘  └────────────┘ │   │
+│  │                                                           │   │
+│  │  ┌────────────────────────────────────────────────────┐ │   │
+│  │  │ Shared Serial Manager                              │ │   │
+│  │  │ • Priority queue (Emergency > High > Normal > Bg)  │ │   │
+│  │  │ • Batch optimization                               │ │   │
+│  │  │ • Thread-safe operations                           │ │   │
+│  │  │ • Auto-retry logic                                 │ │   │
+│  │  └────────────────────────────────────────────────────┘ │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└───────────────────────────┬──────────────────────────────────────┘
+                            │
+┌───────────────────────────┴──────────────────────────────────────┐
+│                      Hardware Layer                               │
+│                                                                   │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
+│  │ Maestro 1       │  │ Maestro 2       │  │ NEMA23 Motor    │  │
+│  │ (Device #12)    │  │ (Device #13)    │  │ + TB6600        │  │
+│  │                 │  │                 │  │                 │  │
+│  │ • Ch 0-17       │  │ • Ch 0-17       │  │ • GPIO ctrl     │  │
+│  │ • Head/Eyes/    │  │ • Arms/Tracks   │  │ • Limit switch  │  │
+│  │   Neck          │  │                 │  │ • 1/4 microstep │  │
+│  │                 │  │                 │  │                 │  │
+│  │ /dev/ttyAMA0    │  │ /dev/ttyAMA0    │  │ GPIO 16,12,13   │  │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘  │
+│                                                                   │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
+│  │ ADS1115 ADC     │  │ ESP32-CAM       │  │ Bluetooth       │  │
+│  │                 │  │                 │  │ Controller      │  │
+│  │ • Voltage sense │  │ • MJPEG stream  │  │                 │  │
+│  │ • Current sense │  │ • 800x600       │  │ • PS4/Xbox/Pro  │  │
+│  │ • I2C (0x48)    │  │ • WiFi          │  │ • USB/BT        │  │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘  │
+└───────────────────────────────────────────────────────────────────┘
+```
 
-#### **Tank Drive (Configured)**
-- **Sabertooth 2x60**: Dual motor controller for tank drive
-- **Status**: Hardware configured but software integration pending
+### Module Responsibilities
 
-### **Sensors & Monitoring**
-- **ADS1115 ADC**: 16-bit precision analog-to-digital converter
-  - **Channel 0**: Battery voltage monitoring (with voltage divider)
-  - **Channel 1 & 2**: Dual current sensors (ACS758) for power monitoring
-- **GPIO Safety**: Limit switches, emergency stop, and status indicators
+#### Core Controller (`main.py`)
+- System initialization and lifecycle management
+- Client connection tracking and broadcasting
+- State machine (Normal, Failsafe, Emergency, Idle, Demo)
+- Bottango animation auto-import on startup
+- Graceful shutdown with cleanup
 
-### **Media & Communication**
-- **ESP32-CAM**: WiFi camera with configurable settings and streaming
-- **Native Audio**: Built-in Raspberry Pi audio with pygame
-- **SMB Network Sharing**: Easy file access and management
-- **Bluetooth**: Controller support for PS4/Xbox/generic gamepads
+#### Hardware Service (`hardware_service.py`)
+- Dual Maestro controller management via shared serial
+- NEMA23 stepper motor control with TB6600 driver
+- Emergency stop and failsafe systems
+- Servo position/speed control with limits
+- Hardware health monitoring
+
+#### WebSocket Handler (`websocket_handler.py`)
+- Message parsing and routing
+- Command execution (servo, scene, emergency, etc.)
+- Real-time telemetry broadcasting
+- Frontend controller input handling
+- Error responses and validation
+
+#### Scene Engine (`scene_engine.py`)
+- 33+ predefined animation scenes
+- Audio-synchronized servo movements
+- Bottango animation playback
+- Category organization (Happy, Sad, Curious, etc.)
+- Scene validation and testing
+
+#### Telemetry System (`telemetry_system.py`)
+- ADS1115 ADC reading (voltage/current)
+- Servo position tracking from both Maestros
+- Alert system for voltage/current thresholds
+- Health data broadcasting to all clients
+
+#### Shared Serial Manager (`shared_serial_manager.py`)
+- Single `/dev/ttyAMA0` port shared between two Maestros
+- Priority-based command queue
+- Batch command optimization (70%+ efficiency)
+- Thread-safe async operations
+- Automatic retry with exponential backoff
+
+#### Camera Proxy (`camera_proxy.py`)
+- ESP32-CAM HTTP proxy with MJPEG rebroadcast
+- Multi-client streaming support
+- Bandwidth testing
+- Manual stream control
+- Port 8080 HTTP server
+
+#### Web Server (`webapp.py`)
+- Flask-SocketIO server on port 5000
+- Web UI client support
+- HTTP REST endpoints
+- Socket.IO broadcasting
+- Independent from main WebSocket server
+
+#### Bluetooth Controller (`bluetooth_controller.py`)
+- PS4, Xbox, Nintendo Pro controller support
+- Auto-detection and connection
+- Calibration system with persistent storage
+- Real-time input processing
+- Button/axis mapping configuration
+
+#### Configuration Manager (`config_manager.py`)
+- Hot-reload configuration without restart
+- JSON schema validation
+- Automatic config file watching
+- Backup system with rollback
+- Statistics tracking
 
 ---
 
-## TB6600 Stepper Driver Configuration
+## Hardware Requirements
 
-### **Current Configuration Settings**
+### Core Components
 
-The TB6600 driver is configured for **1/4 microstepping** to achieve quieter operation at slow speeds while maintaining good torque and precision.
+| Component | Specification | Quantity | Notes |
+|-----------|--------------|----------|-------|
+| **Raspberry Pi 5** | 4GB+ RAM recommended | 1 | Main controller |
+| **Pololu Maestro 18** | USB servo controller | 2 | Device #12 and #13 |
+| **NEMA23 Stepper** | 1.8° bipolar motor | 1 | 800 steps with 1/4 microstepping |
+| **TB6600 Driver** | 4.0A stepper driver | 1 | DIP switch configurable |
+| **ADS1115** | 16-bit ADC I2C module | 1 | Address 0x48 |
+| **ESP32-CAM** | WiFi camera module | 1 | MJPEG streaming |
+| **Power Supply** | 5V 3A for Pi, 12-24V for servos | 2 | Separate supplies |
 
-#### **DIP Switch Settings for 1/4 Microstepping:**
+### Sensors
+
+- **Voltage Divider**: 100kΩ/10kΩ for battery monitoring
+- **ACS758 Current Sensor**: 2x for dual channel current monitoring
+- **Limit Switch**: Normally-open for stepper homing
+- **Emergency Stop**: Physical button (optional)
+
+### Optional
+
+- **Sabertooth 2x60**: Tank drive motor controller (configured but not active)
+- **Bluetooth Controller**: PS4, Xbox One, or Nintendo Pro Controller
+
+---
+
+## Installation
+
+### Prerequisites
+
+- Fresh Raspberry Pi OS (64-bit recommended)
+- Internet connection
+- SSH enabled (for remote access)
+- 16GB+ SD card
+
+### Quick Installation
+
+```bash
+# 1. Clone repository
+git clone https://github.com/yourusername/DroidDeck-Backend.git
+cd DroidDeck-Backend
+
+# 2. Run installer
+chmod +x install.sh
+./install.sh
+
+# 3. Reboot to activate hardware interfaces
+sudo reboot
+
+# 4. After reboot, start backend
+./DroidDeck.sh
 ```
-SW1: OFF
-SW2: OFF  
-SW3: ON
+
+### Installation Details
+
+The `install.sh` script performs:
+
+1. **System Update**: Updates all packages
+2. **Dependencies**: Installs build tools, Python 3.9.13 via pyenv, audio libraries
+3. **Python Environment**: Creates venv with all required packages
+4. **Hardware Interfaces**: Enables I2C, SPI, UART in `/boot/firmware/config.txt`
+5. **SMB Share**: Configures Samba for network file access
+6. **Directory Structure**: Creates `configs/`, `logs/`, `audio/` folders
+
+### Starting the Backend
+
+The `DroidDeck.sh` script handles virtual environment activation, camera proxy, and main backend startup:
+
+```bash
+# Start backend with camera proxy (default)
+./DroidDeck.sh
+
+# Start without camera proxy
+./DroidDeck.sh --no-camera
+
+# Start camera proxy only (for testing)
+./DroidDeck.sh --camera-only
+
+# Show help
+./DroidDeck.sh --help
 ```
 
-#### **Current Settings (Adjust based on your NEMA 23 motor):**
-```
-SW4: OFF  
-SW5: ON
-SW6: ON
-```
-*Note: Verify current rating matches your specific NEMA 23 motor specifications*
+**What the script does:**
+1. Activates Python virtual environment
+2. Verifies Python 3.9.13 is active
+3. Starts camera proxy (if enabled) on port 8080
+4. Loads joystick kernel modules for Bluetooth controllers
+5. Starts main backend (WebSocket on 8766, Web UI on 5000)
+6. Handles graceful shutdown with Ctrl+C
 
-### **Physical Connections**
-```
-TB6600 Driver → Raspberry Pi 5
-├── PUL+ → GPIO 16 (Step Pin)
-├── PUL- → GND
-├── DIR+ → GPIO 12 (Direction Pin)  
-├── DIR- → GND
-├── ENA+ → GPIO 13 (Enable Pin)
-└── ENA- → GND
+### Manual Configuration
 
-TB6600 Driver → NEMA 23 Motor
-├── A+ → Motor Phase A+
-├── A- → Motor Phase A-
-├── B+ → Motor Phase B+
-└── B- → Motor Phase B-
+If you prefer manual setup or need to customize the installation:
 
-Power Supply (24V recommended)
-├── VCC → TB6600 VCC
-└── GND → TB6600 GND
+#### Enable Hardware Interfaces
+
+```bash
+sudo raspi-config
+# Interface Options → I2C → Enable
+# Interface Options → SPI → Enable  
+# Interface Options → Serial Port → Enable
 ```
 
 ---
 
-## Motor & Movement Configuration
+## Pinout & Wiring
 
-### **Default Motor Specifications**
-```python
-# Current settings in nema23_controller.py
-steps_per_revolution: int = 800      # For 1.8° stepper with 1/4 microstepping
-lead_screw_pitch: float = 8.0        # 8mm per revolution
-max_travel_cm: float = 20.0          # Maximum safe travel distance
-default_position_cm: float = 5.0     # Default position from home
+### GPIO Pin Assignments
+
+```
+Raspberry Pi 5 GPIO Header
+┌─────────────────────────────┐
+│  3.3V  ●  ● 5V              │  Pin 1-2
+│  SDA   ●  ● 5V              │  Pin 3-4  (I2C Data)
+│  SCL   ●  ● GND             │  Pin 5-6  (I2C Clock)
+│  GPIO4 ●  ● GPIO14 (TXD)    │  Pin 7-8  (UART TX)
+│  GND   ●  ● GPIO15 (RXD)    │  Pin 9-10 (UART RX)
+│  GPIO17●  ● GPIO18          │  Pin 11-12
+│  GPIO27●  ● GND             │  Pin 13-14
+│  GPIO22●  ● GPIO23          │  Pin 15-16
+│  3.3V  ●  ● GPIO24          │  Pin 17-18
+│  GPIO10●  ● GND             │  Pin 19-20
+│  GPIO9 ●  ● GPIO25          │  Pin 21-22 (E-Stop)
+│  GPIO11●  ● GPIO8           │  Pin 23-24
+│  GND   ●  ● GPIO7           │  Pin 25-26
+│  GPIO0 ●  ● GPIO1           │  Pin 27-28 (I2C ID EEPROM)
+│  GPIO5 ●  ● GND             │  Pin 29-30
+│  GPIO6 ●  ● GPIO12 (DIR)    │  Pin 31-32 (Stepper Dir)
+│  GPIO13●  ● GND             │  Pin 33-34 (Stepper Enable)
+│  GPIO19●  ● GPIO16 (STEP)   │  Pin 35-36 (Stepper Pulse)
+│  GPIO26●  ● GPIO20          │  Pin 37-38 (Limit Switch)
+│  GND   ●  ● GPIO21          │  Pin 39-40
+└─────────────────────────────┘
 ```
 
-### **Speed & Acceleration Settings**
-```python
-homing_speed: int = 400              # Slow speed for accurate homing
-normal_speed: int = 1000             # Standard movement speed  
-max_speed: int = 1200                # Maximum movement speed
-acceleration: int = 800              # Acceleration in steps/sec²
+### TB6600 Stepper Driver Wiring
+
+```
+TB6600 Driver
+┌─────────────────────────┐
+│  VCC  GND  ENA+ ENA-    │ ← Enable control
+│   │    │    │    │      │
+│   ↓    ↓    ↓    ↓      │
+│  +24V GND  GPIO13 GND   │ (Pin 33, Pin 34)
+│                          │
+│  PUL+ PUL- DIR+ DIR-    │ ← Step/Direction control
+│   │    │    │    │      │
+│   ↓    ↓    ↓    ↓      │
+│  GPIO16 GND GPIO12 GND  │ (Pin 36, Pin 32)
+│                          │
+│  A+  A-  B+  B-         │ ← Motor coils
+│   │   │   │   │         │
+│   └───┴───┴───┘         │
+│       Motor             │
+└─────────────────────────┘
+
+DIP Switch Settings (1/4 Microstepping):
+SW1: OFF OFF ON   (Microstep: 1/4)
+SW2: ON  ON  ON   (Current: 4.0A)
 ```
 
-### **How to Modify Configuration**
+### Pololu Maestro Controllers
 
-#### **To Change Lead Screw Pitch:**
-1. Edit `modules/nema23_controller.py`
-2. Modify the `StepperConfig` class:
-```python
-lead_screw_pitch: float = 10.0    # Change from 8.0 to 10.0 for 10mm pitch
+Both controllers share `/dev/ttyAMA0` via Device Number addressing:
+
+```
+Maestro 1 (Device #12)          Maestro 2 (Device #13)
+┌──────────────────────┐        ┌──────────────────────┐
+│ USB (to Pi)          │        │ USB (to Pi)          │
+│ VIN/GND (Power)      │        │ VIN/GND (Power)      │
+│                      │        │                      │
+│ Ch 0-17: Servos      │        │ Ch 0-17: Servos      │
+│   • Head pan/tilt    │        │   • Arms (L/R)       │
+│   • Eye servos       │        │   • Hands            │
+│   • Neck servos      │        │   • Track motors     │
+└──────────────────────┘        └──────────────────────┘
 ```
 
-#### **To Change Steps Per Revolution:**
-1. For different microstepping or motor:
-```python
-# Full step (1.8° motor): 200 steps
-# Half step: 400 steps  
-# Quarter step (current): 800 steps
-# Eighth step: 1600 steps
-steps_per_revolution: int = 1600  # Example for 1/8 microstepping
+**Pololu Maestro Configuration:**
+- Baud rate: 9600
+- Serial mode: USB Dual Port
+- Device numbers set via Maestro Control Center
+
+[Pololu Maestro Documentation](https://www.pololu.com/docs/0J40)
+
+### ADS1115 ADC (I2C)
+
+```
+ADS1115 Module
+┌─────────────────┐
+│ VDD → 3.3V      │ (Pin 1)
+│ GND → GND       │ (Pin 6)
+│ SCL → GPIO3     │ (Pin 5 - I2C Clock)
+│ SDA → GPIO2     │ (Pin 3 - I2C Data)
+│                 │
+│ A0 → Voltage    │ (Battery via divider)
+│ A1 → Current 1  │ (ACS758 sensor)
+│ A2 → Current 2  │ (ACS758 sensor)
+│ A3 → NC         │
+└─────────────────┘
+
+I2C Address: 0x48 (default)
 ```
 
-#### **Runtime Configuration Updates:**
-You can also update settings via the configuration management system:
-```python
-# Update via config manager (requires restart)
-config_updates = {
-    "stepper_motor": {
-        "steps_per_revolution": 1600,
-        "lead_screw_pitch": 10.0,
-        "normal_speed": 1500
-    }
-}
+### Voltage Divider Circuit
+
+```
+Battery+ ──┬── 100kΩ ──┬── 10kΩ ──┬── GND
+           │           │          │
+           │           └─ ADS1115 A0
+           │
+           └─ Servo Power Supply
 ```
 
-### **Position Calculation Formula**
+**Calculation:**
+- Input voltage range: 0-24V
+- Output to ADC: 0-3.3V (safe for ADC)
+- Voltage = ADC_reading * 11.0 (divider ratio)
+
+### ESP32-CAM Wiring
+
 ```
-Steps per cm = steps_per_revolution / (lead_screw_pitch / 10.0)
-Current: 800 steps / (8mm / 10) = 1000 steps per cm
+ESP32-CAM Module
+┌──────────────────┐
+│ 5V   → 5V        │
+│ GND  → GND       │
+│ U0R  → (USB-TTL) │ (For programming)
+│ U0T  → (USB-TTL) │ (For programming)
+│ IO0  → GND       │ (Boot mode - program only)
+│                  │
+│ WiFi Antenna     │
+│ Camera Module    │
+└──────────────────┘
 
-Position in cm = current_position_steps / steps_per_cm
-Position in steps = position_cm * steps_per_cm
-```
-
----
-
-## Software Architecture
-
-### **Main Application Structure**
-```python
-WALLEBackend (main.py)
-├── ConfigurationManager (config_manager.py)
-├── SharedSerialPortManager (modules/shared_serial_manager.py)
-├── NEMA23Controller (modules/nema23_controller.py)
-├── BluetoothController (modules/bluetooth_controller.py)
-├── SceneEngine (scene_engine.py)
-├── SafeTelemetrySystem (telemetry monitoring)
-├── NativeAudioController (audio playback)
-├── CameraProxy (modules/camera_proxy.py)
-└── WebSocket Server (client communication)
+Programming: Use USB-TTL adapter (3.3V)
+Runtime: Remove IO0-GND jumper
 ```
 
-### **Key Design Patterns**
-1. **Shared Resource Management**: Single serial port shared between multiple Maestro controllers
-2. **Priority Queue System**: Commands processed by priority (Emergency → Background)
-3. **Observer Pattern**: Callbacks for hardware state changes and configuration updates
-4. **Factory Pattern**: Hardware abstraction with graceful fallbacks
-5. **Hot-Reload Pattern**: Configuration changes without system restart
+Upload `esp32cam.ino` via Arduino IDE:
+- Board: "AI Thinker ESP32-CAM"
+- Flash frequency: 80MHz
+- Partition: Huge APP (3MB)
+
+### Complete Wiring Summary
+
+| Component | Connection | GPIO/Pin | Notes |
+|-----------|-----------|----------|-------|
+| **Stepper STEP** | TB6600 PUL+ | GPIO 16 | Pulse signal |
+| **Stepper DIR** | TB6600 DIR+ | GPIO 12 | Direction control |
+| **Stepper EN** | TB6600 ENA+ | GPIO 13 | Enable (LOW = on) |
+| **Limit Switch** | NO switch | GPIO 26 | Pull-up, LOW = triggered |
+| **Emergency Stop** | NO button | GPIO 25 | Pull-up, LOW = pressed |
+| **Maestro 1 TX** | UART TX | GPIO 14 | Serial data out |
+| **Maestro 1 RX** | UART RX | GPIO 15 | Serial data in |
+| **ADS1115 SDA** | I2C Data | GPIO 2 | I2C communication |
+| **ADS1115 SCL** | I2C Clock | GPIO 3 | I2C communication |
 
 ---
 
 ## Configuration Files
 
-### **hardware_config.json**
-Complete hardware configuration with stepper motor settings:
+All configuration files are in JSON format and support hot-reload (changes detected automatically without restart).
+
+### `hardware_config.json`
+
+Complete hardware setup including stepper motor parameters:
+
 ```json
 {
-  "hardware": {
-    "maestro1": {
-      "port": "/dev/ttyAMA0",
-      "baud_rate": 9600,
-      "device_number": 12
-    },
-    "maestro2": {
-      "port": "/dev/ttyAMA0",
-      "baud_rate": 9600,
-      "device_number": 13
-    },
-    "gpio": {
-      "motor_step_pin": 16,
-      "motor_dir_pin": 12,
-      "motor_enable_pin": 13,
-      "limit_switch_pin": 26,
-      "emergency_stop_pin": 25
-    },
-    "stepper_motor": {
-      "steps_per_revolution": 800,
-      "lead_screw_pitch": 8.0,
-      "max_travel_cm": 20.0,
-      "homing_speed": 400,
-      "normal_speed": 1000,
-      "max_speed": 1200,
-      "acceleration": 800
-    },
-    "timing": {
-      "telemetry_interval": 0.2,
-      "servo_update_rate": 0.02
+    "hardware": {
+        "maestro1": {
+            "port": "/dev/ttyAMA0",
+            "baud_rate": 9600,
+            "device_number": 12
+        },
+        "maestro2": {
+            "port": "/dev/ttyAMA0",
+            "baud_rate": 9600,
+            "device_number": 13
+        },
+        "sabertooth": {
+            "port": "/dev/ttyAMA1",
+            "baud_rate": 9600
+        },
+        "gpio": {
+            "motor_step_pin": 16,
+            "motor_dir_pin": 12,
+            "motor_enable_pin": 13,
+            "limit_switch_pin": 26,
+            "emergency_stop_pin": 25
+        },
+        "timing": {
+            "telemetry_interval": 0.2,
+            "servo_update_rate": 0.02
+        },
+        "hardware": {
+            "stepper_motor": {
+                "steps_per_revolution": 800,
+                "homing_speed": 1600,
+                "normal_speed": 4000,
+                "max_speed": 4800,
+                "acceleration": 3200
+            }
+        }
     }
+}
+```
+
+**Key Parameters:**
+
+- **steps_per_revolution**: 800 for 1/4 microstepping (200 steps × 4)
+- **homing_speed**: Steps/sec during limit switch homing
+- **normal_speed**: Default movement speed (steps/sec)
+- **max_speed**: Maximum safe speed
+- **acceleration**: Ramp-up/down rate (steps/sec²)
+
+### `servo_config.json`
+
+Per-channel servo limits and home positions:
+
+```json
+{
+  "m1_ch0": {
+    "home": 1496,
+    "min": 992,
+    "max": 2000,
+    "name": "Head Pan",
+    "accel": 8
+  },
+  "m1_ch1": {
+    "home": 1504,
+    "min": 992,
+    "max": 2000,
+    "name": "Head Tilt"
   }
 }
 ```
 
-### **scenes_config.json**
-- **Status**: ✅ 33+ predefined scenes
-- **Categories**: Happy, Sad, Curious, Angry, Surprise, Love, Calm, Sound Effects, Misc, Idle, Sleepy
-- **Features**: Audio synchronization, emoji support, category organization
+- **home**: Neutral position (µs pulse width)
+- **min/max**: Software limits
+- **accel**: Acceleration limit (0-255, optional)
+- **name**: Human-readable label
 
-### **camera_config.json**
-- **ESP32-CAM Configuration**: URL, quality settings, resolution options
-- **Stream Control**: Manual start/stop, bandwidth testing
-- **Multi-client Support**: MJPEG rebroadcasting for multiple viewers
+### `camera_config.json`
 
-### **controller_config.json**
-- **Button Mappings**: Configurable button-to-action assignments
-- **Axis Calibration**: Per-axis calibration data (min, max, center, deadzone)
-- **Controller Settings**: Sensitivity, inversion, mapping profiles
-- **Auto-saved**: Calibration persists across restarts
+ESP32-CAM streaming configuration:
 
----
-
-## Installation & Setup
-
-sudo raspi-config
->Interfaces >Enable SSH
->Interfaces >Enable SPI
->Interfaces >Enable I2C
-
-Finish
-
-sudo apt update && sudo apt install -y git
-
-
-### **Quick Start Installation**
-```bash
-# 1. Clone repository
-git clone https://github.com/ShimmerNZ/DroidDeck-Backend.git
-cd DroidDeck
-
-# 2. Run automated installer
-chmod +x install.sh
-./install.sh
-
-# 3. Start the system
-./DroidDeck.sh
+```json
+{
+    "camera": {
+        "esp32_url": "http://192.168.1.100",
+        "resolution": "SVGA",
+        "quality": 12,
+        "brightness": 0,
+        "contrast": 0,
+        "saturation": 0
+    },
+    "stream": {
+        "auto_start": true,
+        "rebroadcast_port": 8080,
+        "max_clients": 10
+    }
+}
 ```
 
-### **Installation Features**
-- **Python 3.9.13** via pyenv management
-- **Virtual environment** with all dependencies
-- **SMB file sharing** for network file access
-- **Audio system** with TTS samples and testing
-- **GPIO/I2C interface** enabling and configuration
-- **Systemd service** creation for auto-start
-- **Bluetooth support** with pygame for controllers
+### `scenes_config.json`
 
-### **Manual Configuration Steps**
+Animation scene library (33+ scenes):
 
-#### **1. Verify TB6600 DIP Switch Settings**
-Ensure your TB6600 driver is configured for 1/4 microstepping:
-- **SW1-3**: Configure for 1/4 step (OFF, OFF, ON)
-- **SW4-6**: Set current rating to match your NEMA 23 motor
-
-#### **2. Hardware Connections**
-- Connect TB6600 to Raspberry Pi GPIO pins (16, 12, 13)
-- Install limit switch on GPIO 26
-- Connect emergency stop to GPIO 25
-- Verify power supply (24V recommended for NEMA 23)
-
-#### **3. Test Motor Configuration**
-```bash
-# Start system in test mode
-python main.py --test-mode
-
-# Test stepper motor homing
-# Use WebSocket API to send test commands
+```json
+{
+  "happy_beep": {
+    "label": "Happy Beep",
+    "emoji": "😊",
+    "duration": 2.5,
+    "audio_file": "beep_happy.wav",
+    "audio_enabled": true,
+    "categories": ["Happy", "Sound Effects"],
+    "servo_moves": [
+      {
+        "channel": "m1_ch0",
+        "timestamps": [0.0, 1.0, 2.0],
+        "positions": [1500, 1800, 1500],
+        "speeds": [50, 50, 30]
+      }
+    ]
+  }
+}
 ```
+
+### `controller_config.json`
+
+Bluetooth controller button/axis mappings:
+
+```json
+{
+  "left_stick_x": {
+    "action": "servo_control",
+    "channel": "m1_ch0",
+    "sensitivity": 1.0,
+    "invert": false,
+    "deadzone": 0.1
+  },
+  "button_a": {
+    "action": "scene_trigger",
+    "scene_name": "happy_beep"
+  }
+}
+```
+
+### `controller_calibration.json`
+
+Auto-generated calibration data (persists across restarts):
+
+```json
+{
+  "left_stick_x": {
+    "min": -32768,
+    "max": 32767,
+    "center": 0,
+    "deadzone": 0.05
+  }
+}
+```
+
+### Configuration Tuning
+
+**Stepper Motor:**
+- Increase `normal_speed` for faster movement (max 4800)
+- Increase `acceleration` for snappier response (test for smoothness)
+- Adjust `homing_speed` if limit switch detection is unreliable
+
+**Servo Response:**
+- Lower `servo_update_rate` (e.g., 0.01) for smoother interpolation
+- Adjust per-channel `accel` values for speed/smoothness balance
+
+**Telemetry:**
+- Increase `telemetry_interval` (e.g., 0.5) to reduce CPU load
+- Decrease (e.g., 0.1) for faster UI updates
 
 ---
 
 ## Bluetooth Controller Setup
 
-The backend supports Bluetooth game controllers (PS4, Xbox, generic gamepads) for robot control.
+### Supported Controllers
 
-### **Pairing a Bluetooth Controller**
+- Sony PlayStation 4 DualShock
+- Microsoft Xbox One/Series Controller
+- Nintendo Switch Pro Controller
+- Generic USB/Bluetooth gamepads
 
-#### **Step 1: Put Controller in Pairing Mode**
+### Initial Pairing
 
-- **PS4 DualShock 4**: Hold **Share + PS button** until light bar flashes white rapidly
-- **Xbox One**: Hold **pairing button** (small button on top) until Xbox button flashes rapidly
-- **Generic Bluetooth**: Refer to controller manual for pairing mode
-
-#### **Step 2: Pair via Raspberry Pi Terminal**
-
-SSH into your Raspberry Pi or use direct terminal access:
+#### Via Bluetooth (Recommended)
 
 ```bash
-# Start Bluetooth control utility
+# 1. Make Pi discoverable
 bluetoothctl
+power on
+agent on
+default-agent
+discoverable on
 
-# Enable scanning
+# 2. Put controller in pairing mode:
+#    PS4: Hold SHARE + PS button until light flashes
+#    Xbox: Hold pairing button until light flashes
+#    Switch Pro: Hold SYNC button until lights scroll
+
+# 3. Scan and pair
 scan on
-
-# Wait for your controller to appear in scan results
-# Example output: [NEW] Device XX:XX:XX:XX:XX:XX Wireless Controller
-# Note the MAC address (XX:XX:XX:XX:XX:XX)
-
-# Pair with the controller (replace with your actual MAC address)
+# Wait for controller MAC address
 pair XX:XX:XX:XX:XX:XX
-
-# If prompted for PIN, try: 0000 or 1234
-
-# Trust the device (enables auto-connect on future boots)
 trust XX:XX:XX:XX:XX:XX
-
-# Connect to the controller
 connect XX:XX:XX:XX:XX:XX
-
-# Turn off scanning
-scan off
-
-# Exit bluetoothctl
 exit
 ```
 
-#### **Step 3: Verify Controller Detection**
+#### Via USB
 
-Test if the controller is recognized by pygame:
+1. Plug controller into Raspberry Pi USB port
+2. Controller detected automatically via pygame
+3. No pairing required
+
+### Calibration
+
+Calibration data saves automatically to `controller_calibration.json`:
+
+```python
+# Calibration happens automatically on first use
+# Or trigger manual calibration via frontend:
+{
+    "type": "controller_calibrate",
+    "axis": "left_stick_x"
+}
+```
+
+### Button Mapping
+
+Edit `controller_config.json` to customize:
+
+```json
+{
+  "button_a": {
+    "action": "scene_trigger",
+    "scene_name": "happy_beep"
+  },
+  "button_b": {
+    "action": "emergency_stop"
+  },
+  "left_stick_x": {
+    "action": "servo_control",
+    "channel": "m1_ch0",
+    "sensitivity": 1.5,
+    "invert": false
+  },
+  "dpad_up": {
+    "action": "stepper_move",
+    "direction": "forward",
+    "speed": 2000
+  }
+}
+```
+
+**Action Types:**
+- `servo_control`: Direct servo position control
+- `scene_trigger`: Play animation scene
+- `emergency_stop`: Emergency stop all motors
+- `stepper_move`: Control NEMA23 stepper
+- `custom`: Execute custom command
+
+### Troubleshooting Controllers
 
 ```bash
-python3 << 'EOF'
-import pygame
-pygame.init()
-pygame.joystick.init()
-count = pygame.joystick.get_count()
-print(f"Controllers found: {count}")
+# Check connected devices
+lsusb  # USB controllers
+hcitool con  # Bluetooth controllers
 
-if count > 0:
-    controller = pygame.joystick.Joystick(0)
-    controller.init()
-    print(f"Controller name: {controller.get_name()}")
-    print(f"Axes: {controller.get_numaxes()}")
-    print(f"Buttons: {controller.get_numbuttons()}")
-    print(f"Hats (D-pads): {controller.get_numhats()}")
-else:
-    print("No controllers detected")
-EOF
-```
+# Test controller input
+jstest /dev/input/js0
 
-Expected output:
-```
-Controllers found: 1
-Controller name: Wireless Controller
-Axes: 6
-Buttons: 14
-Hats (D-pads): 1
-```
+# Pygame device info
+python -c "import pygame; pygame.joystick.init(); print(pygame.joystick.get_count())"
 
-#### **Step 4: Restart Backend Service**
-
-```bash
-# If running as systemd service
-sudo systemctl restart walle-backend
-
-# Or if running manually
-./DroidDeck.sh
-```
-
-The backend will automatically detect and initialize the controller on startup.
-
-### **Controller Calibration**
-
-After pairing, use the frontend (DroidDeck-GUI) to calibrate:
-
-1. Launch the GUI application
-2. Navigate to **Controller Screen**
-3. Click **"Start Calibration Wizard"**
-4. Follow on-screen instructions:
-   - Center all sticks and triggers
-   - Move left stick to all extremes (up, down, left, right)
-   - Move right stick to all extremes
-   - Pull both triggers fully
-   - Test all buttons
-5. **Save Calibration** - data persists in `controller_config.json`
-
-The backend broadcasts real-time controller data during calibration for live feedback.
-
-### **Troubleshooting Controller Connection**
-
-#### **Controller Not Detected in Scan**
-
-```bash
-# Ensure Bluetooth is enabled and running
-sudo systemctl status bluetooth
-
-# If not running, start it
-sudo systemctl start bluetooth
-
-# Make controller discoverable again
-# For PS4: Hold Share + PS until rapid white flash
-# For Xbox: Hold pairing button until rapid flash
-
-# Try scanning again
-bluetoothctl
-scan on
-```
-
-#### **Pairing Fails**
-
-```bash
-# Remove old pairing and try again
-bluetoothctl
-remove XX:XX:XX:XX:XX:XX
-scan on
-# Wait for device to appear
-pair XX:XX:XX:XX:XX:XX
-```
-
-#### **Controller Pairs but Doesn't Connect**
-
-```bash
-# Check if device is trusted
-bluetoothctl
-info XX:XX:XX:XX:XX:XX
-# Should show "Trusted: yes"
-
-# If not trusted
-trust XX:XX:XX:XX:XX:XX
-
-# Try connecting manually
-connect XX:XX:XX:XX:XX:XX
-```
-
-#### **Controller Connects but No Input**
-
-```bash
-# Check if pygame detects it (should show count > 0)
-python3 -c "import pygame; pygame.init(); pygame.joystick.init(); print(f'Count: {pygame.joystick.get_count()}')"
-
-# Check backend logs for controller initialization
-tail -f logs/walle_enhanced_backend.log | grep -i controller
-
-# Restart backend to re-initialize
-sudo systemctl restart walle-backend
-```
-
-#### **Controller Keeps Disconnecting**
-
-```bash
-# Increase Bluetooth power management timeout
-sudo nano /etc/bluetooth/main.conf
-
-# Add or modify under [General] section:
-[General]
-IdleTimeout = 0
-FastConnectable = true
-AutoEnable = true
-
-# Save and restart Bluetooth
+# Reconnect Bluetooth
 sudo systemctl restart bluetooth
-
-# Reconnect controller
 bluetoothctl connect XX:XX:XX:XX:XX:XX
-```
-
-#### **Multiple Controllers / Wrong Controller Selected**
-
-```bash
-# List all paired Bluetooth devices
-bluetoothctl devices
-
-# Remove unwanted controllers
-bluetoothctl remove XX:XX:XX:XX:XX:XX
-
-# Backend automatically uses first detected controller (index 0)
-# Check logs to see which controller is active
-tail -f logs/walle_enhanced_backend.log
-```
-
-### **Auto-Connect on Boot**
-
-For the controller to auto-connect when the Pi boots:
-
-```bash
-# Ensure controller is trusted
-bluetoothctl trust XX:XX:XX:XX:XX:XX
-
-# Enable Bluetooth auto-start
-sudo systemctl enable bluetooth
-
-# Backend service will auto-detect on startup if running as systemd service
-```
-
-### **Testing Controller Without Frontend**
-
-You can test controller functionality directly via WebSocket:
-
-```bash
-# Use wscat or similar WebSocket client
-wscat -c ws://YOUR_PI_IP:8766
-
-# Send command to get controller status
-{"type": "get_controller_status"}
-
-# Response will show controller state, axes, buttons
 ```
 
 ---
 
 ## API Documentation
 
-### **WebSocket API** (`ws://[IP]:8766`)
+### WebSocket API (Port 8766)
 
-#### **Stepper Motor Control**
+Primary API for PyQt6 frontend and programmatic control.
+
+#### Connection
+
+```javascript
+const ws = new WebSocket('ws://192.168.1.100:8766');
+
+ws.onopen = () => {
+    console.log('Connected to DroidDeck backend');
+};
+
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    handleMessage(data);
+};
+```
+
+#### Message Format
+
+All messages are JSON with `type` field:
+
 ```json
 {
-  "type": "stepper",
-  "command": "move_to_position",
-  "position_cm": 15.0
-}
-
-{
-  "type": "stepper", 
-  "command": "home"
-}
-
-{
-  "type": "stepper",
-  "command": "get_status"
+    "type": "command_name",
+    "param1": "value1",
+    "param2": "value2"
 }
 ```
 
-#### **Controller Management**
+---
+
+### Control Commands
+
+#### Servo Control
+
 ```json
 {
-  "type": "get_controller_status"
-}
-
-{
-  "type": "save_calibration",
-  "calibration": {
-    "left_stick_x": {"min": -32768, "max": 32767, "center": 0, "deadzone": 0.1},
-    "left_stick_y": {"min": -32768, "max": 32767, "center": 0, "deadzone": 0.1}
-  }
-}
-
-{
-  "type": "start_calibration_mode"
-}
-
-{
-  "type": "stop_calibration_mode"
+    "type": "servo",
+    "channel": "m1_ch0",
+    "position": 1500,
+    "speed": 50
 }
 ```
 
-#### **Configuration Management**
+**Parameters:**
+- `channel`: Format `m{maestro}_ch{channel}` (e.g., `m1_ch0`, `m2_ch17`)
+- `position`: Pulse width in microseconds (992-2000)
+- `speed`: Servo speed 0-255 (optional)
+
+**Response:**
 ```json
 {
-  "type": "config",
-  "action": "reload",
-  "config_name": "hardware"
+    "type": "servo_ack",
+    "channel": "m1_ch0",
+    "position": 1500,
+    "success": true
 }
+```
 
+#### Scene Playback
+
+```json
 {
-  "type": "config",
-  "action": "update",
-  "config_name": "hardware",
-  "updates": {
-    "stepper_motor": {
-      "normal_speed": 1500
+    "type": "scene",
+    "scene_name": "happy_beep",
+    "blocking": false
+}
+```
+
+**Parameters:**
+- `scene_name`: Scene identifier from `scenes_config.json`
+- `blocking`: Wait for completion before accepting new commands (optional)
+
+**Response:**
+```json
+{
+    "type": "scene_started",
+    "scene_name": "happy_beep",
+    "duration": 2.5
+}
+```
+
+```json
+{
+    "type": "scene_complete",
+    "scene_name": "happy_beep"
+}
+```
+
+#### Emergency Stop
+
+```json
+{
+    "type": "emergency_stop"
+}
+```
+
+Immediately stops all servos, steppers, and scenes.
+
+**Response:**
+```json
+{
+    "type": "emergency_stop_ack",
+    "timestamp": 1234567890.123
+}
+```
+
+#### Stepper Motor Control
+
+```json
+{
+    "type": "stepper_move",
+    "distance_cm": 5.0,
+    "speed": 2000
+}
+```
+
+**Parameters:**
+- `distance_cm`: Distance in centimeters (negative = reverse)
+- `speed`: Steps/second (default: configured `normal_speed`)
+
+**Response:**
+```json
+{
+    "type": "stepper_move_started",
+    "distance_cm": 5.0,
+    "estimated_duration": 2.1
+}
+```
+
+```json
+{
+    "type": "stepper_move_complete",
+    "distance_cm": 5.0,
+    "actual_steps": 6250
+}
+```
+
+#### Stepper Homing
+
+```json
+{
+    "type": "stepper_home"
+}
+```
+
+Moves stepper until limit switch triggers, then sets position to 0.
+
+---
+
+### Query Commands
+
+#### Get Scene List
+
+```json
+{
+    "type": "get_scene_list"
+}
+```
+
+**Response:**
+```json
+{
+    "type": "scene_list",
+    "scenes": [
+        {
+            "name": "happy_beep",
+            "label": "Happy Beep",
+            "emoji": "😊",
+            "duration": 2.5,
+            "categories": ["Happy", "Sound Effects"],
+            "audio_enabled": true
+        }
+    ]
+}
+```
+
+#### Get Telemetry
+
+```json
+{
+    "type": "get_telemetry"
+}
+```
+
+**Response:**
+```json
+{
+    "type": "telemetry",
+    "timestamp": 1234567890.123,
+    "voltage": 12.3,
+    "current_ch1": 1.2,
+    "current_ch2": 0.8,
+    "maestro1": {
+        "0": 1500,
+        "1": 1600
+    },
+    "maestro2": {
+        "0": 1400
+    },
+    "stepper": {
+        "position_steps": 1000,
+        "position_cm": 1.25,
+        "homed": true,
+        "state": "idle"
     }
-  }
 }
 ```
 
-#### **Scene Management**
+#### Get Failsafe Status
+
 ```json
 {
-  "type": "scene",
-  "emotion": "happy"
-}
-
-{
-  "type": "get_scenes"
-}
-
-{
-  "type": "test_scene",
-  "scene": {...}
+    "type": "get_failsafe_status"
 }
 ```
+
+**Response:**
+```json
+{
+    "type": "failsafe_status",
+    "failsafe_active": false,
+    "state": "normal",
+    "nema": {
+        "enabled": true,
+        "homed": true,
+        "state": "idle"
+    },
+    "track_channels": [12, 13]
+}
+```
+
+#### Get Controller Config
+
+```json
+{
+    "type": "get_controller_config"
+}
+```
+
+**Response:**
+```json
+{
+    "type": "controller_config",
+    "config": {
+        "left_stick_x": {
+            "action": "servo_control",
+            "channel": "m1_ch0",
+            "sensitivity": 1.0
+        }
+    }
+}
+```
+
+---
+
+### Failsafe Controls
+
+#### Enable Failsafe
+
+```json
+{
+    "type": "enable_failsafe"
+}
+```
+
+Disables NEMA23 motor and specified track channels (from controller config).
+
+**Response:**
+```json
+{
+    "type": "failsafe_enabled",
+    "disabled_channels": [12, 13],
+    "nema_disabled": true
+}
+```
+
+#### Disable Failsafe
+
+```json
+{
+    "type": "disable_failsafe"
+}
+```
+
+Re-enables motors (requires explicit action, safety by design).
+
+**Response:**
+```json
+{
+    "type": "failsafe_disabled",
+    "nema_enabled": true
+}
+```
+
+---
+
+### Broadcast Messages
+
+Backend automatically broadcasts these messages to all connected clients:
+
+#### Telemetry Updates
+
+Sent every `telemetry_interval` seconds (default 0.2s):
+
+```json
+{
+    "type": "telemetry",
+    "timestamp": 1234567890.123,
+    "voltage": 12.3,
+    "current_ch1": 1.2,
+    "current_ch2": 0.8,
+    "maestro1": { "0": 1500 },
+    "maestro2": { "0": 1400 }
+}
+```
+
+#### Scene Events
+
+```json
+{
+    "type": "scene_started",
+    "scene_name": "happy_beep"
+}
+```
+
+```json
+{
+    "type": "scene_complete",
+    "scene_name": "happy_beep"
+}
+```
+
+#### Controller Input
+
+When Bluetooth controller is active:
+
+```json
+{
+    "type": "controller_input",
+    "axes": {
+        "left_stick_x": 0.5,
+        "left_stick_y": -0.3
+    },
+    "buttons": {
+        "button_a": true,
+        "button_b": false
+    }
+}
+```
+
+---
+
+### Socket.IO API (Port 5000)
+
+Web browser client API using Flask-SocketIO.
+
+#### Connection
+
+```javascript
+const socket = io('http://192.168.1.100:5000');
+
+socket.on('connect', () => {
+    console.log('Connected to web server');
+});
+
+socket.on('backend_message', (data) => {
+    handleMessage(data);
+});
+```
+
+#### Send Commands
+
+```javascript
+socket.emit('backend_command', {
+    type: 'servo',
+    channel: 'm1_ch0',
+    position: 1500
+});
+```
+
+Uses same message format as WebSocket API.
+
+#### HTTP Endpoints
+
+```
+GET  /                    # Web UI
+GET  /health              # Backend status check
+POST /api/servo           # Direct servo control
+POST /api/scene           # Scene playback
+POST /api/emergency_stop  # Emergency stop
+GET  /api/scenes          # List all scenes
+GET  /api/telemetry       # Current telemetry
+```
+
+---
+
+## Bottango Integration
+
+Bottango is a professional animation software for servo control. DroidDeck includes automatic import/conversion.
+
+### Workflow
+
+1. **Create Animation in Bottango:**
+   - Design servo movements with visual timeline
+   - Use cubic bezier curves for smooth motion
+   - Export as JSON
+
+2. **Export from Bottango:**
+   - File → Export → "DroidDeck Format" (or generic JSON)
+   - Save as `animation_name.json`
+
+3. **Import to DroidDeck:**
+   - Place exported JSON files in `./bottango_imports/` directory
+   - On backend startup, files are auto-converted to DroidDeck scenes
+   - Converted scenes appear in `./scenes/` directory
+   - Source files in `bottango_imports/` are deleted after successful conversion
+
+4. **Play Animation:**
+   - Scenes automatically registered in `scenes_registry.json`
+   - Play via WebSocket: `{"type": "scene", "scene_name": "animation_name"}`
+   - Or via frontend scene browser
+
+### Bottango Export Format
+
+DroidDeck expects Bottango exports with curve commands:
+
+```json
+{
+  "commands": [
+    {
+      "type": "sC",
+      "channel": 0,
+      "start_time": 0,
+      "duration": 1000,
+      "start_pos": 1500,
+      "p1": 100,
+      "p2": 0,
+      "p3": 1800,
+      "p4": -50,
+      "p5": 0
+    }
+  ]
+}
+```
+
+### Conversion Details
+
+The `bottango_converter.py` module:
+
+- **Cubic Bezier Interpolation**: Preserves animator's timing and easing
+- **Multi-Channel Support**: Handles 36 channels (both Maestros)
+- **Audio Sync**: Optional audio file association
+- **Category Tagging**: Auto-categorizes based on filename/metadata
+- **Validation**: Checks for valid channel ranges and timing
+
+### Manual Conversion
+
+```bash
+# Convert single file
+python bottango_converter.py animation.json
+
+# Convert all files in directory
+python bottango_converter.py bottango_imports/
+
+# Specify output directory
+python bottango_converter.py input.json --output scenes/
+```
+
+### Troubleshooting Bottango
+
+**Issue: Animations play too fast/slow**
+- Check `duration` values in exported JSON
+- Bottango export uses milliseconds
+- DroidDeck scenes use seconds
+
+**Issue: Servos don't move smoothly**
+- Ensure bezier curve data is present (`p1`-`p5` parameters)
+- Try exporting with higher curve density
+- Check `servo_update_rate` in hardware config
+
+**Issue: Import fails**
+- Verify JSON syntax with `python -m json.tool file.json`
+- Check channel numbers are 0-17
+- Ensure position values are 992-2000 µs
 
 ---
 
 ## Troubleshooting
 
-### **TB6600 & Stepper Motor Issues**
+### Backend Won't Start
 
-#### **Motor Not Moving**
+**Check Python version:**
 ```bash
-# Check GPIO connections
+python --version  # Should be 3.9.13
+pyenv versions    # Verify pyenv setup
+```
+
+**Check virtual environment:**
+```bash
+source venv/bin/activate
+pip list  # Verify all dependencies installed
+```
+
+**Check port conflicts:**
+```bash
+sudo netstat -tulpn | grep :8766  # WebSocket port
+sudo netstat -tulpn | grep :5000  # Web server port
+```
+
+### Hardware Not Responding
+
+**Maestro Controllers:**
+```bash
+# Check USB connection
+lsusb | grep "Pololu"
+
+# Check serial port
+ls -l /dev/ttyAMA0
+sudo chmod 666 /dev/ttyAMA0
+
+# Test serial communication
+python -c "import serial; s=serial.Serial('/dev/ttyAMA0', 9600); print('OK')"
+```
+
+**I2C (ADS1115):**
+```bash
+# Check I2C bus
+sudo i2cdetect -y 1
+# Should show 0x48 (ADC address)
+
+# Enable I2C
+sudo raspi-config
+# Interface Options → I2C → Enable
+```
+
+**GPIO:**
+```bash
+# Check GPIO access
 gpio readall
 
-# Verify TB6600 power supply
-# Check limit switch state
-# Ensure proper DIP switch configuration
+# Add user to gpio group
+sudo usermod -a -G gpio $USER
+sudo usermod -a -G i2c $USER
 ```
 
-#### **Motor Movement Too Noisy**
-- Verify 1/4 microstepping configuration (SW1-3: OFF, OFF, ON)
-- Check motor current setting (SW4-6)
-- Ensure proper motor wiring (A+, A-, B+, B-)
+### Servo Issues
 
-#### **Homing Issues**
+**Servo doesn't move:**
+- Verify channel in `servo_config.json`
+- Check power supply voltage (5-6V for most servos)
+- Test with Maestro Control Center software
+- Verify `min`/`max` limits allow movement
+
+**Servo jitters:**
+- Lower `servo_update_rate` in hardware config
+- Add servo `accel` limit in servo config
+- Check power supply current capacity
+- Add capacitor (470µF-1000µF) near servos
+
+**Incorrect position:**
+- Calibrate servo home position in `servo_config.json`
+- Use Maestro Control Center to find correct µs values
+- Verify servo travel range (typically 900-2100µs)
+
+### Stepper Motor Issues
+
+**Motor not moving:**
 ```bash
-# Check limit switch connection
-# Verify GPIO 26 is properly configured
-# Test limit switch manually
+# Check GPIO pins
+gpio readall | grep -E "GPIO12|GPIO13|GPIO16"
+
+# Test manually
+echo "16" > /sys/class/gpio/export
+echo "out" > /sys/class/gpio/gpio16/direction
+echo "1" > /sys/class/gpio/gpio16/value  # Pulse
 ```
 
-### **Bluetooth Controller Issues**
+**Motor vibrates but doesn't turn:**
+- Verify DIP switch settings on TB6600
+- Check wiring (A+, A-, B+, B-)
+- Increase current limit (SW2 switches)
+- Verify 24V power supply
 
-See detailed troubleshooting in [Bluetooth Controller Setup](#bluetooth-controller-setup) section above.
-
-### **Configuration Issues**
-
-#### **Hot-Reload Not Working**
+**Limit switch not working:**
 ```bash
-# Check file watching permissions
-# Verify configuration file syntax
-# Review logs for validation errors
-tail -f logs/walle_enhanced_backend.log
+# Test switch
+gpio readall | grep "GPIO26"
+# Should change state when pressed
+
+# Check wiring
+gpio -g mode 26 up  # Enable pull-up
+gpio -g read 26     # Should be 1 when open, 0 when closed
 ```
 
-#### **Serial Communication Problems**
+### Camera Issues
+
+**Cannot connect to ESP32-CAM:**
+- Verify WiFi connection: `ping 192.168.1.100`
+- Check camera URL in `camera_config.json`
+- Test directly: `curl http://192.168.1.100`
+- Reflash ESP32-CAM with `esp32cam.ino`
+
+**Poor video quality:**
+- Increase `quality` parameter (lower number = higher quality)
+- Change `resolution` (SVGA, XGA, HD)
+- Improve WiFi signal strength
+- Reduce `max_clients` for better bandwidth
+
+**Stream lags:**
+- Lower resolution to SVGA (800x600)
+- Increase `quality` parameter to reduce bandwidth
+- Use wired Ethernet for Pi if possible
+
+### Network Issues
+
+**Cannot access from frontend:**
 ```bash
-# Check serial devices
-ls -la /dev/ttyAMA*
+# Check backend is running
+ps aux | grep python
 
-# Test serial connection
-screen /dev/ttyAMA0 9600
+# Check firewall
+sudo ufw status
+sudo ufw allow 8766/tcp  # WebSocket
+sudo ufw allow 5000/tcp  # Web server
+sudo ufw allow 8080/tcp  # Camera proxy
 
-# Verify Maestro device numbers (12 & 13)
+# Check IP address
+hostname -I
 ```
 
-### **System Diagnostics**
+**SMB share not accessible:**
 ```bash
-# Real-time system logs
-tail -f logs/walle_enhanced_backend.log
+# Check Samba status
+sudo systemctl status smbd
 
-# Hardware status check
-i2cdetect -y 1
+# Restart Samba
+sudo systemctl restart smbd nmbd
 
-# Network services
-netstat -tulpn | grep -E "(8766|8081)"
+# Test connection
+smbclient -L //localhost -U guest
+```
 
-# Python environment verification
-python --version  # Should be 3.9.13
-source venv/bin/activate && pip list
+### Performance Issues
 
-# Bluetooth status
-systemctl status bluetooth
-bluetoothctl devices
+**High CPU usage:**
+- Increase `telemetry_interval` (e.g., 0.5s)
+- Increase `servo_update_rate` (e.g., 0.05s)
+- Disable camera stream when not needed
+- Reduce number of active scenes
+
+**Memory leaks:**
+```bash
+# Monitor memory
+watch -n 1 free -h
+
+# Check process memory
+ps aux | grep python | awk '{print $6}'
+
+# Restart backend if memory grows continuously
+```
+
+**Slow WebSocket response:**
+- Check for network packet loss: `ping -c 100 192.168.1.100`
+- Verify no CPU throttling: `vcgencmd measure_temp`
+- Cool Raspberry Pi if temp > 70°C
+- Close unused frontend clients
+
+### Log Files
+
+```bash
+# View backend logs
+tail -f logs/droiddeck_backend.log
+
+# Search for errors
+grep ERROR logs/droiddeck_backend.log
+
+# Clear old logs
+rm logs/*.log
+```
+
+### Common Error Messages
+
+**"Serial port permission denied":**
+```bash
+sudo chmod 666 /dev/ttyAMA0
+sudo usermod -a -G dialout $USER
+```
+
+**"I2C address not found":**
+```bash
+# Check connections
+sudo i2cdetect -y 1
+# Verify ADS1115 at 0x48
+```
+
+**"WebSocket connection failed":**
+- Check firewall allows port 8766
+- Verify backend is running: `ps aux | grep main.py`
+- Test with curl: `curl http://localhost:8766`
+
+**"Config file not found":**
+```bash
+# Verify file exists
+ls -l configs/hardware_config.json
+
+# Create from template if missing
+cp configs/hardware_config.json.example configs/hardware_config.json
 ```
 
 ---
 
-## System Status & Features
+## Support & Resources
 
-### **✅ Production Ready**
-- Shared serial communication with priority queuing
-- NEMA 23 stepper control with TB6600 driver (1/4 microstepping)
-- Configuration management with hot-reload
-- ESP32-CAM streaming with multi-client support
-- Scene management with 33+ predefined scenes
-- Audio system with pygame integration
-- Telemetry monitoring with ADS1115 ADC
-- GPIO compatibility layer for different Pi models
-- **Bluetooth controller support** (PS4/Xbox/generic gamepads)
+- **Pololu Maestro Guide:** https://www.pololu.com/docs/0J40
+- **TB6600 Datasheet:** Search "TB6600 stepper driver manual"
+- **ADS1115 Library:** https://github.com/adafruit/Adafruit_CircuitPython_ADS1x15
+- **GPIO Pinout:** https://pinout.xyz
+- **Bottango Software:** https://bottango.com
 
-### **⚠️ In Progress**
-- Sabertooth tank drive integration
-- Advanced safety systems (voltage/current based)
-- Web-based configuration interface
+---
 
-### **❌ Future Enhancements**
-- AI behavior system
-- Voice recognition
-- Advanced computer vision
-
-**Overall Assessment**: The system demonstrates professional-grade robotics programming with excellent hardware abstraction, safety considerations, and modular architecture. The TB6600 stepper configuration with 1/4 microstepping provides optimal balance of precision, torque, and noise reduction for the WALL-E application.
+**Built with ❤️ for the WALL-E community**
