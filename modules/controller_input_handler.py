@@ -65,6 +65,22 @@ class BehaviorHandler:
         # Fallback to safe defaults
         return max(1000, min(2000, pulse))
 
+    def _set_mixer_target(self, channel: str, pulse: float) -> bool:
+        """Route a target to the MotionMixer joystick layer if available.
+        Returns True if routed to mixer (or joystick layer), False if caller should fall back to direct hardware.
+        """
+        try:
+            if self.processor and hasattr(self.processor, 'motion_mixer') and self.processor.motion_mixer:
+                self.processor.motion_mixer.set_joystick_channel(channel, float(pulse))
+                return True
+            if self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer:
+                # Fallback: write directly to the synced joystick layer
+                self._set_mixer_target(channel, float(pulse))
+                return True
+        except Exception:
+            return False
+        return False
+
 class DirectServoHandler(BehaviorHandler):
     """Handle direct servo control - single axis to single servo"""
     def __init__(self, *args, **kwargs):
@@ -89,7 +105,7 @@ class DirectServoHandler(BehaviorHandler):
                 return False
             
             channel_locked = self.scene_engine and self.scene_engine.is_channel_locked(servo_channel)
-            has_mixer = self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer
+            has_mixer = ((self.processor and hasattr(self.processor, 'motion_mixer') and self.processor.motion_mixer) or (self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer))
 
             # If channel is locked and no mixer available, skip entirely
             if channel_locked and not has_mixer:
@@ -117,7 +133,7 @@ class DirectServoHandler(BehaviorHandler):
                         logger.debug(f"[JOY->MIX] {servo_channel} raw={controller_input.raw_value:.3f} pulse={pulse} offset={center_offset} locked={channel_locked}")
                 except Exception:
                     pass
-                self.processor.joystick_layer.set_channel(servo_channel, float(pulse))
+                self._set_mixer_target(servo_channel, float(pulse))
                 success = True
             elif not channel_locked:
                 # Fallback: Send directly to hardware only when not locked
@@ -225,7 +241,7 @@ class MultiServoHandler(BehaviorHandler):
             if state['last_pulses'].get(channel) != target_pulse:
                 # Route through motion mixer if available
                 if self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer:
-                    self.processor.joystick_layer.set_channel(channel, float(target_pulse))
+                    self._set_mixer_target(channel, float(target_pulse))
                     success = True
                 else:
                     success = await self.hardware_service.set_servo_position(
@@ -273,7 +289,7 @@ class MultiServoHandler(BehaviorHandler):
             pulse = max(min_pulse, min(max_pulse, pulse))
 
             # Route through motion mixer if available
-            has_mixer = self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer
+            has_mixer = ((self.processor and hasattr(self.processor, 'motion_mixer') and self.processor.motion_mixer) or (self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer))
 
             # Change threshold only applies to direct hardware commands
             if not has_mixer:
@@ -282,7 +298,7 @@ class MultiServoHandler(BehaviorHandler):
                     continue
 
             if has_mixer:
-                self.processor.joystick_layer.set_channel(channel, float(pulse))
+                self._set_mixer_target(channel, float(pulse))
                 success = True
             else:
                 success = await self.hardware_service.set_servo_position(
@@ -343,7 +359,7 @@ class ToggleServoHandler(BehaviorHandler):
                 if target_pulse != state['last_pulse_sent']:
                     # Route through motion mixer if available
                     if self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer:
-                        self.processor.joystick_layer.set_channel(servo_channel, float(target_pulse))
+                        self._set_mixer_target(servo_channel, float(target_pulse))
                         success = True
                     else:
                         success = await self.hardware_service.set_servo_position(
@@ -383,7 +399,7 @@ class ToggleServoHandler(BehaviorHandler):
                     
                     # Route through motion mixer if available
                     if self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer:
-                        self.processor.joystick_layer.set_channel(servo_channel, float(pulse))
+                        self._set_mixer_target(servo_channel, float(pulse))
                         success = True
                     else:
                         success = await self.hardware_service.set_servo_position(
@@ -430,7 +446,7 @@ class JoystickPairHandler(BehaviorHandler):
             if not x_servo or not y_servo or not self.hardware_service:
                 return False
             
-            has_mixer = self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer
+            has_mixer = ((self.processor and hasattr(self.processor, 'motion_mixer') and self.processor.motion_mixer) or (self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer))
             success = False
             
             # Handle X axis
@@ -447,7 +463,7 @@ class JoystickPairHandler(BehaviorHandler):
                 
                 if has_mixer:
                     # Always update the joystick layer so the mixer can additive-blend it with scene output
-                    self.processor.joystick_layer.set_channel(x_servo, float(pulse))
+                    self._set_mixer_target(x_servo, float(pulse))
                     try:
                         if x_servo in ('m1_ch0','m1_ch1'):
                             logger.debug(f"[JOYPAIR->MIX] X {x_servo} raw={controller_input.raw_value:.3f} pulse={pulse} offset={x_center_offset} locked={x_locked}")
@@ -477,7 +493,7 @@ class JoystickPairHandler(BehaviorHandler):
                 
                 if has_mixer:
                     # Always update the joystick layer so the mixer can additive-blend it with scene output
-                    self.processor.joystick_layer.set_channel(y_servo, float(pulse))
+                    self._set_mixer_target(y_servo, float(pulse))
                     try:
                         if y_servo in ('m1_ch0','m1_ch1'):
                             logger.debug(f"[JOYPAIR->MIX] Y {y_servo} raw={controller_input.raw_value:.3f} pulse={pulse} offset={y_center_offset} locked={y_locked}")
@@ -623,8 +639,8 @@ class DifferentialTracksHandler(BehaviorHandler):
             
             # Send commands to both servos via motion mixer or direct fallback
             if self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer:
-                self.processor.joystick_layer.set_channel(left_servo, float(left_pulse))
-                self.processor.joystick_layer.set_channel(right_servo, float(right_pulse))
+                self._set_mixer_target(left_servo, float(left_pulse))
+                self._set_mixer_target(right_servo, float(right_pulse))
                 left_success = True
                 right_success = True
             else:
@@ -786,7 +802,7 @@ class ControllerInputProcessor:
             BehaviorType.MULTI_SERVO: MultiServoHandler(hardware_service, scene_engine, logger, self),
             BehaviorType.TOGGLE_SERVO: ToggleServoHandler(hardware_service, scene_engine, logger, self),
             BehaviorType.JOYSTICK_PAIR: JoystickPairHandler(hardware_service, scene_engine, logger, self),
-            BehaviorType.DIFFERENTIAL_TRACKS: DifferentialTracksHandler(hardware_service, scene_engine, logger),
+            BehaviorType.DIFFERENTIAL_TRACKS: DifferentialTracksHandler(hardware_service, scene_engine, logger, self),
             BehaviorType.SCENE_TRIGGER: SceneTriggerHandler(hardware_service, scene_engine, logger),
             BehaviorType.TOGGLE_SCENES: ToggleScenesHandler(hardware_service, scene_engine, logger),
             BehaviorType.NEMA_STEPPER: NemaStepperHandler(hardware_service, scene_engine, logger),
