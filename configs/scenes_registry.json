@@ -1,0 +1,19 @@
+{
+  "quick": {
+    "file": "scenes/quick.json",
+    "name": "quick",
+    "category": "Bottango",
+    "description": "Imported from Bottango controller: DroidDeck Driver",
+    "duration": 10.567,
+    "locked_channels": [
+      "m1_ch1"
+    ],
+    "metadata": {
+      "source": "bottango",
+      "controller": "DroidDeck Driver",
+      "converted_at": "2026-02-18 21:15:47",
+      "sample_rate_ms": 50,
+      "interpolation": "cubic_bezier"
+    }
+  }
+}

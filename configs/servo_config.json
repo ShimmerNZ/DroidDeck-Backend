@@ -1,88 +1,434 @@
 {
-  "nema": {
-    "lead_screw_pitch": 8.0,
-    "lead_screw_length": 20.0,
-    "homing_speed": 800,
-    "normal_speed": 4800,
-    "acceleration": 5163,
-    "min_position": 5.0,
-    "max_position": 15.0
+  "m1_ch0": {
+    "min": 900,
+    "max": 1600,
+    "home": 1000,
+    "name": "Head Tilt",
+    "speed": 25,
+    "accel": 5,
+    "deadband": 4
   },
-  "m2_ch0": {
-    "home": 1529,
-    "accel": 0
+  "m1_ch1": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "Head Pan",
+    "speed": 25,
+    "accel": 5,
+    "deadband": 4
   },
-  "m2_ch1": {
-    "home": 1520,
-    "accel": 0
+  "m1_ch2": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "Left Eye Tilt",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
   },
-  "m2_ch2": {
-    "home": 992
+  "m1_ch3": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "Right Eye Tilt",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
   },
-  "m2_ch3": {
-    "home": 992
+  "m1_ch4": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
   },
-  "m2_ch4": {
-    "home": 992
+  "m1_ch5": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
   },
-  "m2_ch5": {
-    "home": 992
-  },
-  "m2_ch6": {
-    "home": 992
-  },
-  "m2_ch7": {
-    "home": 992
-  },
-  "m2_ch8": {
-    "home": 992
-  },
-  "m2_ch9": {
-    "home": 992
-  },
-  "m2_ch10": {
-    "home": 992
-  },
-  "m2_ch11": {
-    "home": 992
-  },
-  "m2_ch12": {
-    "home": 992
-  },
-  "m2_ch13": {
-    "home": 992
-  },
-  "m2_ch14": {
-    "home": 992
-  },
-  "m2_ch15": {
-    "home": 992
-  },
-  "m2_ch16": {
-    "home": 992
-  },
-  "m2_ch17": {
-    "home": 992
-  },
-  "m2_ch18": {
-    "home": 992
-  },
-  "m2_ch19": {
-    "home": 992
-  },
-  "m2_ch20": {
-    "home": 992
-  },
-  "m2_ch21": {
-    "home": 992
-  },
-  "m2_ch22": {
-    "home": 992
-  },
-  "m2_ch23": {
-    "home": 992
+  "m1_ch6": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "L Shoulder Pivot",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
   },
   "m1_ch7": {
-    "accel": 0
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "L Wrist",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch8": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "L Finger",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch9": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "L Thumb",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch10": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch11": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch12": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "R Shoulder Pivot",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch13": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "R Wrist",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch14": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "R Finger",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch15": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "R Thumb",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch16": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch17": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch0": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch1": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch2": {
+    "min": 992,
+    "max": 2000,
+    "home": 1184,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch3": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch4": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch5": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch6": {
+    "min": 800,
+    "max": 2200,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch7": {
+    "min": 800,
+    "max": 2200,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch8": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch9": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch10": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch11": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch12": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch13": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch14": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch15": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch16": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch17": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch18": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch19": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch20": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch21": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch22": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m2_ch23": {
+    "min": 992,
+    "max": 2000,
+    "home": 992,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch18": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch19": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch20": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch21": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch22": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
+  },
+  "m1_ch23": {
+    "min": 992,
+    "max": 2000,
+    "home": 1500,
+    "name": "",
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
+    "deadband": 4
   }
 }

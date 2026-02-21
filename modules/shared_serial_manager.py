@@ -222,7 +222,7 @@ class EnhancedSharedSerialPortManager:
         self.registered_devices[device_id] = weakref.ref(device_ref)
         self.device_numbers[device_number] = device_id
         
-        logger.info(f"📍 Registered device: {device_id} (#{device_number})")
+        logger.info(f"📝 Registered device: {device_id} (#{device_number})")
         return True
     
     def send_command(self, command: SharedSerialCommand) -> bool:
@@ -297,34 +297,50 @@ class EnhancedSharedSerialPortManager:
         
         try:
             if cmd_type == "set_multiple_targets":
-                # NEW: Batch servo target setting
                 targets = command.batch_targets
                 if not targets:
                     logger.warning("Batch command with no targets")
                     return False
-                
-                # Sort targets by channel for efficient protocol
+
+                # Sort by channel number
                 targets.sort(key=lambda t: t.channel)
-                
-                # Build Pololu "Set Multiple Targets" command (0x1F)
-                cmd_bytes = [0xAA, device_num, 0x1F, len(targets)]
-                
+
+                # Send speed/acceleration for any target that specifies them
                 for target in targets:
-                    # Set speed and acceleration first if specified
                     if target.speed is not None:
                         self._send_speed_command(device_num, target.channel, target.speed)
                     if target.acceleration is not None:
                         self._send_acceleration_command(device_num, target.channel, target.acceleration)
-                    
-                    # Add channel and target to batch command
-                    cmd_bytes.append(target.channel)
-                    target_quarter_us = target.target * 4
-                    cmd_bytes.append(target_quarter_us & 0x7F)
-                    cmd_bytes.append((target_quarter_us >> 7) & 0x7F)
-                
-                # Send the batch command
-                self.serial_conn.write(bytes(cmd_bytes))
-                logger.debug(f"📦 Sent batch command: {len(targets)} servos to device #{device_num}")
+
+                # Check whether channels form a contiguous block
+                first_ch = targets[0].channel
+                is_contiguous = all(
+                    targets[i].channel == first_ch + i for i in range(len(targets))
+                )
+
+                if is_contiguous:
+                    # Pololu Set Multiple Targets (0x1F):
+                    # 0xAA, device, 0x1F, count, first_channel, lo, hi, lo, hi, ...
+                    # Only the first channel number appears; subsequent channels are implied.
+                    cmd_bytes = [0xAA, device_num, 0x1F, len(targets), first_ch]
+                    for target in targets:
+                        target_quarter_us = target.target * 4
+                        cmd_bytes.append(target_quarter_us & 0x7F)
+                        cmd_bytes.append((target_quarter_us >> 7) & 0x7F)
+                    self.serial_conn.write(bytes(cmd_bytes))
+                    logger.debug(f"Sent Set Multiple Targets: {len(targets)} contiguous channels from ch{first_ch} to device #{device_num}")
+                else:
+                    # Non-contiguous channels: send individual Set Target commands
+                    for target in targets:
+                        target_quarter_us = target.target * 4
+                        cmd_bytes = bytes([
+                            0xAA, device_num, 0x04, target.channel,
+                            target_quarter_us & 0x7F,
+                            (target_quarter_us >> 7) & 0x7F
+                        ])
+                        self.serial_conn.write(cmd_bytes)
+                    logger.debug(f"Sent {len(targets)} individual Set Target commands (non-contiguous) to device #{device_num}")
+
                 return True
                 
             elif cmd_type == "set_target":
@@ -478,7 +494,7 @@ class EnhancedMaestroControllerShared:
         if self.shared_manager.register_device(device_id, device_number, self):
             logger.info(f"🎛️ Created enhanced Maestro controller: {device_id} (device #{device_number})")
         else:
-            logger.error(f"Ã¢ÂÅ’ Failed to register {device_id} with shared manager")
+            logger.error(f"❌ Failed to register {device_id} with shared manager")
     
     def start(self) -> bool:
         """Start the controller"""
@@ -810,7 +826,7 @@ def get_shared_manager(port: str, baud_rate: int = 9600) -> EnhancedSharedSerial
             manager.start()
             _global_managers[manager_key] = manager
         else:
-            logger.debug(f"Ã¢â„¢Â»Ã¯Â¸Â Reusing existing shared manager for {port}")
+            logger.debug(f"♻️ Reusing existing shared manager for {port}")
         
         return _global_managers[manager_key]
 
@@ -864,17 +880,17 @@ def demo_batch_commands():
     ])
     
     # Example 3: Using the builder pattern directly
-    print("ðŸŽ¯ Example 3: Builder pattern")
+    print("🎯 Example 3: Builder pattern")
     builder = manager.create_batch_builder("maestro1", 12)
     builder.add_target(0, 1500, speed=60) \
            .add_target(1, 1400, acceleration=25) \
            .add_target(2, 1600) \
            .set_priority(CommandPriority.REALTIME) \
-           .set_callback(lambda: print("âœ… Batch movement completed!"))
+           .set_callback(lambda: print("✅ Batch movement completed!"))
     
     manager.send_batch_command(builder)
     
-    print("ðŸ“Š Performance comparison:")
+    print("📊 Performance comparison:")
     print("  Individual commands: 4 serial transactions + queue delays")
     print("  Batch command: 1 serial transaction, synchronized movement")
     print("  Typical improvement: 3-5x faster, much better synchronization")

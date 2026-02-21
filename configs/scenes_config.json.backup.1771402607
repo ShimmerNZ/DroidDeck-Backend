@@ -27,6 +27,19 @@
     "delay": 0
   },
   {
+    "label": "Breathy Question",
+    "emoji": "🎭",
+    "categories": [
+      "Idle"
+    ],
+    "audio_enabled": true,
+    "audio_file": "00059_Whu - Breathy_0001_00004869.mp3",
+    "script_enabled": false,
+    "bottango_scene": "",
+    "duration": 2.0,
+    "delay": 0
+  },
+  {
     "label": "Confused Why",
     "emoji": "🎭",
     "categories": [
@@ -501,19 +514,6 @@
     "delay": 0
   },
   {
-    "label": "Breathy Question",
-    "emoji": "🎭",
-    "categories": [
-      "Idle"
-    ],
-    "audio_enabled": true,
-    "audio_file": "00059_Whu - Breathy_0001_00004869.mp3",
-    "script_enabled": false,
-    "bottango_scene": "",
-    "duration": 2.0,
-    "delay": 0
-  },
-  {
     "label": "Quick Exhale",
     "emoji": "🎭",
     "categories": [
@@ -751,7 +751,7 @@
     "audio_enabled": true,
     "audio_file": "00012_High Struggling Noises_0001_00002300.mp3",
     "script_enabled": true,
-    "bottango_scene": "quick",
+    "bottango_scene": "Test2",
     "duration": 11.0,
     "delay": 0
   },

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 GPIO Compatibility Layer for WALL-E Robot Control System
 Supports both RPi.GPIO (Pi 4 and older) and gpiozero (Pi 5 recommended)
@@ -75,10 +76,10 @@ class GPIOWrapper:
                 if hasattr(device, 'close'):
                     device.close()
                 del self._gpio_objects[pin]
-                logger.debug(f"🔓 Released GPIO pin {pin}")
+                logger.debug(f"🔘 Released GPIO pin {pin}")
                 return True
             except Exception as e:
-                logger.error(f"❌ Failed to release pin {pin}: {e}")
+                logger.error(f"✗ Failed to release pin {pin}: {e}")
                 return False
         return True  # Pin wasn't in use anyway
     
@@ -94,7 +95,7 @@ class GPIOWrapper:
                     existing_device = self._gpio_objects[pin]
                     # If it's already an OutputDevice, reuse it
                     if hasattr(existing_device, 'on') and hasattr(existing_device, 'off'):
-                        logger.debug(f"🔄 Reusing existing output pin {pin}")
+                        logger.debug(f"🔚 Reusing existing output pin {pin}")
                         # Set initial state
                         if initial_state:
                             existing_device.on()
@@ -103,7 +104,7 @@ class GPIOWrapper:
                         return True
                     else:
                         # Wrong type, close and recreate
-                        logger.debug(f"🔄 Replacing pin {pin} (wrong type)")
+                        logger.debug(f"🔚 Replacing pin {pin} (wrong type)")
                         existing_device.close()
                         del self._gpio_objects[pin]
                 
@@ -125,7 +126,7 @@ class GPIOWrapper:
                 return True
                 
         except Exception as e:
-            logger.error(f"❌ Failed to setup output pin {pin}: {e}")
+            logger.error(f"✗ Failed to setup output pin {pin}: {e}")
             return False
     
     def setup_input_pin(self, pin: int, pull_up: bool = False, pull_down: bool = False) -> bool:
@@ -140,11 +141,11 @@ class GPIOWrapper:
                     existing_device = self._gpio_objects[pin]
                     # If it's already an InputDevice with correct pull, reuse it
                     if hasattr(existing_device, 'is_active'):
-                        logger.debug(f"🔄 Reusing existing input pin {pin}")
+                        logger.debug(f"🔚 Reusing existing input pin {pin}")
                         return True
                     else:
                         # Wrong type, close and recreate
-                        logger.debug(f"🔄 Replacing pin {pin} (wrong type)")
+                        logger.debug(f"🔚 Replacing pin {pin} (wrong type)")
                         existing_device.close()
                         del self._gpio_objects[pin]
                 
@@ -178,7 +179,7 @@ class GPIOWrapper:
                 return True
                 
         except Exception as e:
-            logger.error(f"❌ Failed to setup input pin {pin}: {e}")
+            logger.error(f"✗ Failed to setup input pin {pin}: {e}")
             return False
     
     def set_output(self, pin: int, state: bool) -> bool:
@@ -202,7 +203,7 @@ class GPIOWrapper:
                 return True
                 
         except Exception as e:
-            logger.error(f"❌ Failed to set pin {pin} to {state}: {e}")
+            logger.error(f"✗ Failed to set pin {pin} to {state}: {e}")
             return False
     
     def read_input(self, pin: int) -> Optional[bool]:
@@ -220,7 +221,7 @@ class GPIOWrapper:
                 return bool(self.GPIO.input(pin))
                 
         except Exception as e:
-            logger.error(f"❌ Failed to read pin {pin}: {e}")
+            logger.error(f"✗ Failed to read pin {pin}: {e}")
             return None
     
     def pulse_pin(self, pin: int, duration_us: int = 5) -> bool:
@@ -244,7 +245,130 @@ class GPIOWrapper:
                 return True
                 
         except Exception as e:
-            logger.error(f"❌ Failed to pulse pin {pin}: {e}")
+            logger.error(f"✗ Failed to pulse pin {pin}: {e}")
+            return False
+    
+    def setup_pwm_pin(self, pin: int, frequency: float) -> bool:
+        """Setup a PWM pin with specified frequency"""
+        if not self.available:
+            return False
+        
+        try:
+            if self.library == GPIOLibrary.GPIOZERO:
+                from gpiozero import PWMOutputDevice
+                
+                # Release existing pin if configured
+                if pin in self._gpio_objects:
+                    self._gpio_objects[pin].close()
+                    del self._gpio_objects[pin]
+                
+                # Create PWM device
+                device = PWMOutputDevice(pin, frequency=frequency)
+                self._gpio_objects[pin] = device
+                logger.debug(f"🔌 Setup PWM pin {pin} at {frequency} Hz with gpiozero")
+                return True
+                    
+            elif self.library == GPIOLibrary.RPI_GPIO:
+                if not hasattr(self, '_gpio_mode_set'):
+                    self.GPIO.setmode(self.GPIO.BCM)
+                    self._gpio_mode_set = True
+                
+                self.GPIO.setup(pin, self.GPIO.OUT)
+                pwm = self.GPIO.PWM(pin, frequency)
+                self._gpio_objects[f"pwm_{pin}"] = pwm
+                logger.debug(f"🔌 Setup PWM pin {pin} at {frequency} Hz with RPi.GPIO")
+                return True
+                
+        except Exception as e:
+            logger.error(f"âŒ Failed to setup PWM on pin {pin}: {e}")
+            return False
+    
+    def start_pwm(self, pin: int, duty_cycle: float = 50.0) -> bool:
+        """Start PWM on a pin with specified duty cycle (0-100)"""
+        if not self.available:
+            return False
+        
+        try:
+            if self.library == GPIOLibrary.GPIOZERO:
+                device = self._gpio_objects.get(pin)
+                if device and hasattr(device, 'value'):
+                    device.value = duty_cycle / 100.0  # gpiozero uses 0.0-1.0
+                    return True
+                    
+            elif self.library == GPIOLibrary.RPI_GPIO:
+                pwm = self._gpio_objects.get(f"pwm_{pin}")
+                if pwm:
+                    pwm.start(duty_cycle)
+                    return True
+                
+        except Exception as e:
+            logger.error(f"âŒ Failed to start PWM on pin {pin}: {e}")
+            return False
+    
+    def stop_pwm(self, pin: int) -> bool:
+        """Stop PWM on a pin"""
+        if not self.available:
+            return False
+        
+        try:
+            if self.library == GPIOLibrary.GPIOZERO:
+                device = self._gpio_objects.get(pin)
+                if device and hasattr(device, 'value'):
+                    device.value = 0
+                    return True
+                    
+            elif self.library == GPIOLibrary.RPI_GPIO:
+                pwm = self._gpio_objects.get(f"pwm_{pin}")
+                if pwm:
+                    pwm.stop()
+                    return True
+                
+        except Exception as e:
+            logger.error(f"âŒ Failed to stop PWM on pin {pin}: {e}")
+            return False
+    
+    def change_pwm_frequency(self, pin: int, frequency: float) -> bool:
+        """Change PWM frequency on a pin"""
+        if not self.available:
+            return False
+        
+        try:
+            if self.library == GPIOLibrary.GPIOZERO:
+                device = self._gpio_objects.get(pin)
+                if device and hasattr(device, 'frequency'):
+                    device.frequency = frequency
+                    return True
+                    
+            elif self.library == GPIOLibrary.RPI_GPIO:
+                pwm = self._gpio_objects.get(f"pwm_{pin}")
+                if pwm:
+                    pwm.ChangeFrequency(frequency)
+                    return True
+                
+        except Exception as e:
+            logger.error(f"âŒ Failed to change PWM frequency on pin {pin}: {e}")
+            return False
+    
+    def change_pwm_duty_cycle(self, pin: int, duty_cycle: float) -> bool:
+        """Change PWM duty cycle on a pin (0-100)"""
+        if not self.available:
+            return False
+        
+        try:
+            if self.library == GPIOLibrary.GPIOZERO:
+                device = self._gpio_objects.get(pin)
+                if device and hasattr(device, 'value'):
+                    device.value = duty_cycle / 100.0
+                    return True
+                    
+            elif self.library == GPIOLibrary.RPI_GPIO:
+                pwm = self._gpio_objects.get(f"pwm_{pin}")
+                if pwm:
+                    pwm.ChangeDutyCycle(duty_cycle)
+                    return True
+                
+        except Exception as e:
+            logger.error(f"âŒ Failed to change PWM duty cycle on pin {pin}: {e}")
             return False
     
     def setup_button_callback(self, pin: int, callback: Callable, edge: str = "falling") -> bool:
@@ -276,7 +400,7 @@ class GPIOWrapper:
                 return True
                 
         except Exception as e:
-            logger.error(f"❌ Failed to setup callback for pin {pin}: {e}")
+            logger.error(f"✗ Failed to setup callback for pin {pin}: {e}")
             return False
     
     def cleanup(self):
@@ -298,7 +422,7 @@ class GPIOWrapper:
                 logger.info("🧹 RPi.GPIO cleanup complete")
                 
         except Exception as e:
-            logger.error(f"❌ GPIO cleanup error: {e}")
+            logger.error(f"✗ GPIO cleanup error: {e}")
 
 # Global GPIO wrapper instance
 gpio_wrapper = GPIOWrapper()
@@ -336,3 +460,18 @@ def is_pin_configured(pin: int) -> bool:
 
 def release_pin(pin: int) -> bool:
     return gpio_wrapper.release_pin(pin)
+
+def setup_pwm_pin(pin: int, frequency: float) -> bool:
+    return gpio_wrapper.setup_pwm_pin(pin, frequency)
+
+def start_pwm(pin: int, duty_cycle: float = 50.0) -> bool:
+    return gpio_wrapper.start_pwm(pin, duty_cycle)
+
+def stop_pwm(pin: int) -> bool:
+    return gpio_wrapper.stop_pwm(pin)
+
+def change_pwm_frequency(pin: int, frequency: float) -> bool:
+    return gpio_wrapper.change_pwm_frequency(pin, frequency)
+
+def change_pwm_duty_cycle(pin: int, duty_cycle: float) -> bool:
+    return gpio_wrapper.change_pwm_duty_cycle(pin, duty_cycle)

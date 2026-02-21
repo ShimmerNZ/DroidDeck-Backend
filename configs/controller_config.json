@@ -1,70 +1,155 @@
 {
-  "left_trigger": {
-    "behavior": "direct_servo",
-    "input_type": "trigger",
-    "target": "m1_ch7",
-    "invert": false
-  },
-  "button_x": {
-    "behavior": "toggle_scenes",
-    "input_type": "button",
-    "scene_1": "Curious",
-    "scene_2": "Alert",
-    "trigger_timing": "on_press"
-  },
-  "left_stick_y": {
-    "behavior": "differential_tracks",
-    "left_servo": "m2_ch0",
-    "right_servo": "m2_ch1"
-  },
-  "left_stick_x": {
-    "behavior": "differential_tracks",
-    "left_servo": "m2_ch0",
-    "right_servo": "m2_ch1"
-  },
-  "button_y": {
-    "behavior": "nema_stepper",
-    "min_position": 5.0,
-    "max_position": 15.0,
-    "normal_speed": 4800,
-    "acceleration": 5163,
-    "nema_behavior": "toggle_positions"
-  },
-  "right_stick_x": {
-    "behavior": "direct_servo",
-    "target": "m1_ch0",
-    "invert": false,
-    "sensitivity": 0.8
-  },
-  "right_stick_y": {
-    "behavior": "direct_servo",
-    "target": "m1_ch1",
-    "invert": false,
-    "sensitivity": 0.8
-  },
-  "dpad_up": {
-    "behavior": "system_control",
-    "system_action": "up",
-    "trigger_timing": "on_press"
-  },
-  "dpad_down": {
+  "button_a": [
+    {
+      "behavior": "nema_stepper",
+      "min_position": 1.0,
+      "max_position": 13.0,
+      "normal_speed": 4800,
+      "acceleration": 5163,
+      "nema_behavior": "toggle_positions"
+    }
+  ],
+  "button_b": [
+    {
+      "behavior": "nema_stepper",
+      "min_position": 1.0,
+      "max_position": 13.0,
+      "normal_speed": 4800,
+      "acceleration": 5163,
+      "nema_behavior": "toggle_positions"
+    }
+  ],
+  "button_menu": [
+    {
       "behavior": "system_control",
-      "system_action": "down",
-      "trigger_timing": "on_press"
-  },
-  "dpad_left": {
+      "system_action": "exit_app"
+    }
+  ],
+  "button_x": [
+    {
       "behavior": "system_control",
-      "system_action": "left",
-      "trigger_timing": "on_press"
-  },
-  "dpad_right": {
+      "system_action": "up"
+    }
+  ],
+  "button_y": [
+    {
       "behavior": "system_control",
-      "system_action": "right",
-      "trigger_timing": "on_press"
-  },
-  "button_a": {
+      "system_action": "select"
+    }
+  ],
+  "dpad_down": [
+    {
       "behavior": "system_control",
-      "system_action": "select",
-      "trigger_timing": "on_press"
-  }
+      "system_action": "down"
+    }
+  ],
+  "dpad_left": [
+    {
+      "behavior": "system_control",
+      "system_action": "left"
+    }
+  ],
+  "dpad_right": [
+    {
+      "behavior": "system_control",
+      "system_action": "right"
+    }
+  ],
+  "dpad_up": [
+    {
+      "behavior": "system_control",
+      "system_action": "up"
+    }
+  ],
+  "left_stick_x": [
+    {
+      "behavior": "differential_tracks",
+      "left_servo": "m2_ch12",
+      "right_servo": "m2_ch13"
+    }
+  ],
+  "left_stick_y": [
+    {
+      "behavior": "differential_tracks",
+      "left_servo": "m2_ch12",
+      "right_servo": "m2_ch13"
+    }
+  ],
+  "left_trigger": [
+    {
+      "behavior": "multi_servo",
+      "servos": [
+        {
+          "channel": "m2_ch6",
+          "invert": true
+        },
+        {
+          "channel": "m2_ch7",
+          "invert": false
+        }
+      ]
+    }
+  ],
+  "right_stick_x": [
+    {
+      "behavior": "direct_servo",
+      "target": "m1_ch1",
+      "center_offset": 0
+    }
+  ],
+  "right_stick_y": [
+    {
+      "behavior": "direct_servo",
+      "target": "m1_ch0",
+      "invert": true,
+      "center_offset": -500
+    }
+  ],
+  "right_trigger": [
+    {
+      "behavior": "multi_servo",
+      "servos": [
+        {
+          "channel": "m2_ch8",
+          "invert": true
+        },
+        {
+          "channel": "m2_ch9",
+          "invert": true
+        }
+      ]
+    }
+  ],
+  "shoulder_left": [
+    {
+      "behavior": "toggle_servo",
+      "target": "m1_ch3",
+      "position_1": 1496,
+      "position_2": 896,
+      "trigger_mode": "hold"
+    },
+    {
+      "behavior": "toggle_servo",
+      "target": "m1_ch2",
+      "position_1": 1496,
+      "position_2": 1136,
+      "trigger_mode": "hold"
+    }
+  ],
+  "shoulder_right": [
+    {
+      "behavior": "toggle_servo",
+      "position_1": 1496,
+      "position_2": 1850,
+      "trigger_mode": "hold",
+      "target": "m1_ch3"
+    },
+    {
+      "behavior": "toggle_servo",
+      "target": "m1_ch2",
+      "trigger_mode": "hold",
+      "position_1": 1496,
+      "position_2": 2000
+    }
+  ]
 }

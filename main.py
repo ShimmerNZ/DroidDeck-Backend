@@ -50,6 +50,7 @@ from modules.hardware_service import HardwareService, create_hardware_service
 from modules.config_manager import ConfigurationManager
 from modules.bluetooth_controller import BackendBluetoothController
 from modules.controller_input_handler import ControllerInputProcessor
+from modules.motion_system import MotionMixer, BlendMode
 from web.webapp import DroidDeckWebServer
 
 # Import Bottango integration
@@ -125,9 +126,27 @@ class WALLEBackend:
             history_size=1000,
             alert_callback=self.handle_telemetry_alert
         )
+        
+        # Initialize motion blending system (must be before scene_engine and controller_input_processor)
+        self.motion_mixer = MotionMixer(
+            hardware_service=self.hardware_service,
+            servo_config_path="configs/servo_config.json"
+        )
+
+        # --- Enforce joystick layer as ADDITIVE (so joystick always blends on top of scene) ---
+        try:
+            if hasattr(self, 'motion_mixer') and self.motion_mixer and getattr(self.motion_mixer, 'joystick_layer', None):
+                before = getattr(self.motion_mixer.joystick_layer, 'blend_mode', None)
+                self.motion_mixer.joystick_layer.blend_mode = BlendMode.ADDITIVE
+                after = getattr(self.motion_mixer.joystick_layer, 'blend_mode', None)
+                logger.info(f"[INIT] Joystick layer blend_mode forced: {getattr(before, 'value', before)} -> {getattr(after, 'value', after)}")
+        except Exception as e:
+            logger.warning(f"[INIT] Failed to force joystick layer blend_mode: {e}")
+        
         self.scene_engine = SceneEngine(
             hardware_service=self.hardware_service,
-            audio_controller=self.audio_controller
+            audio_controller=self.audio_controller,
+            motion_mixer=self.motion_mixer
         )
         
 
@@ -141,8 +160,9 @@ class WALLEBackend:
         self.controller_input_processor = ControllerInputProcessor(
             hardware_service=self.hardware_service,
             scene_engine=self.scene_engine,
-            stepper_controller=None,  # You don't have this parameter
-            backend_ref=self  # ADD THIS
+            stepper_controller=None,
+            backend_ref=self,
+            motion_mixer=self.motion_mixer
         )
 
         
@@ -903,6 +923,9 @@ class WALLEBackend:
         try:
             logger.info("Starting WALL-E Backend System")
             
+            # Start motion mixer tick loop (50Hz servo blending)
+            self.motion_mixer.start()
+            
             # Start bluetooth controller
             await self.start_bluetooth_controller()
             
@@ -1028,7 +1051,14 @@ class WALLEBackend:
                 except asyncio.TimeoutError:
                     logger.warning("WebSocket server close timeout")
             
-            # 5. Stop scene engine and audio
+            # 5. Stop motion mixer and scene engine
+            logger.info("Stopping motion mixer...")
+            try:
+                if hasattr(self, 'motion_mixer'):
+                    self.motion_mixer.cleanup()
+            except Exception as e:
+                logger.error(f"Motion mixer cleanup error: {e}")
+            
             logger.info("Stopping scene engine...")
             try:
                 await asyncio.wait_for(self.scene_engine.stop_current_scene(), timeout=2.0)
@@ -1308,6 +1338,7 @@ def setup_logging():
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("modules.websocket_handler").setLevel(logging.INFO)
     logging.getLogger("modules.shared_serial_manager").setLevel(logging.INFO)
+    logging.getLogger("modules.motion_system").setLevel(logging.DEBUG)
     logging.getLogger("__main__").setLevel(logging.INFO)
     
     # Suppress GPIO warning on RPi5
@@ -1317,7 +1348,7 @@ def setup_logging():
 
 async def play_startup_track(backend):
     await asyncio.sleep(2)
-    success = backend.audio_controller.play_track('track_001')
+    success = backend.audio_controller.play_track('00052_WALL-E 3 - Long_0001_00002510.mp3')
     if not success:
         print("[audio] Could not play track_001.wav after startup")
     else:

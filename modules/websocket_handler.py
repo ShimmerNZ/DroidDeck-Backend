@@ -27,7 +27,7 @@ class WebSocketMessageHandler:
         self.backend = backend_ref  # Reference to main backend for broadcasting
         self.controller_input_processor = controller_input_processor  # For reloading servo home positions
         self.last_navigation_time = 0
-        self.navigation_cooldown = 2.3 #debounce navigation commands
+        self.navigation_cooldown = 0.3  # debounce navigation commands
         # Message type routing table
         self.handlers = {
             # Servo control
@@ -1181,17 +1181,23 @@ class WebSocketMessageHandler:
     
     # ==================== SCENE MANAGEMENT HANDLERS ====================
     
-    async def _handle_scene_command(self, websocket, data: Dict[str, Any]):
-        """Handle scene playback command"""
+
+    async def _handle_scene_command(self, websocket, data):
         emotion = data.get("emotion")
-        if emotion:
-            success = await self.scene_engine.play_scene(emotion)
-            logger.info(f"Scene '{emotion}': {'[OK]' if success else ' '}")
-            
-            if not success:
-                await self._send_error_response(websocket, f"Failed to play scene: {emotion}")
-        else:
+        if not emotion:
             await self._send_error_response(websocket, "Missing emotion/scene name")
+            return
+
+        # Fire-and-forget so we don't block controller message handling
+        asyncio.create_task(self.scene_engine.play_scene(emotion))
+
+        # Optional: immediate ack so UI gets feedback
+        await self._send_websocket_message(websocket, {
+            "type": "scene_queued",
+            "scene_name": emotion,
+            "timestamp": time.time()
+        })
+
     
     async def _handle_get_scenes(self, websocket, data: Dict[str, Any]):
         """Handle request for scene list"""
@@ -1320,7 +1326,7 @@ class WebSocketMessageHandler:
             }
             
             await self._send_websocket_message(websocket, response)
-            logger.info(f"📋 Sent {len(audio_files)} audio files to client")
+            logger.info(f"ðŸ“‹ Sent {len(audio_files)} audio files to client")
             
         except Exception as e:
             logger.error(f"Failed to get audio files: {e}")
@@ -1343,10 +1349,10 @@ class WebSocketMessageHandler:
             }
             
             await self._send_websocket_message(websocket, response)
-            logger.info(f"🔄 Sent refresh response: {len(audio_files)} audio files, {len(bottango_scenes)} Bottango scenes")
+            logger.info(f"ðŸ”„ Sent refresh response: {len(audio_files)} audio files, {len(bottango_scenes)} Bottango scenes")
             
         except Exception as e:
-            logger.error(f"❌ Error handling refresh_backend: {e}")
+            logger.error(f"âŒ Error handling refresh_backend: {e}")
             await self._send_websocket_message(websocket, {
                 "type": "backend_refresh_response",
                 "audio_files": [],
@@ -1361,7 +1367,7 @@ class WebSocketMessageHandler:
         registry_path = Path("configs/scenes_registry.json")
         
         if not registry_path.exists():
-            logger.warning("⚠️ Bottango scenes registry not found")
+            logger.warning("âš ï¸ Bottango scenes registry not found")
             return []
         
         try:
@@ -1376,18 +1382,18 @@ class WebSocketMessageHandler:
                     "channels": len(scene_data.get("channels", []))
                 })
             
-            logger.debug(f"📋 Loaded {len(scenes)} Bottango scenes from registry")
+            logger.debug(f"ðŸ“‹ Loaded {len(scenes)} Bottango scenes from registry")
             return scenes
             
         except Exception as e:
-            logger.error(f"❌ Failed to read Bottango scenes registry: {e}")
+            logger.error(f"âŒ Failed to read Bottango scenes registry: {e}")
             return []
     
     # ==================== SYSTEM CONTROL HANDLERS ====================
     
     async def _handle_emergency_stop(self, websocket, data: Dict[str, Any]):
         """Handle emergency stop command"""
-        logger.critical("Ã°Å¸Å¡Â¨ EMERGENCY STOP ACTIVATED via WebSocket")
+        logger.critical("ÃƒÂ°Ã…Â¸Ã…Â¡Ã‚Â¨ EMERGENCY STOP ACTIVATED via WebSocket")
         
         # Emergency stop all systems
         await self.hardware_service.emergency_stop_all()
@@ -1532,19 +1538,48 @@ class WebSocketMessageHandler:
             await self.backend.set_failsafe_mode(state)
     
     async def _handle_mode_control(self, websocket, data: Dict[str, Any]):
-        """Handle system mode control"""
-        mode_name = data.get("name")
-        state = data.get("state", True)
-        
-        logger.info(f" Mode '{mode_name}' {'activated' if state else 'deactivated'}")
-        
-        # Handle different modes
-        if mode_name == "idle":
-            # TODO: Implement idle mode
-            pass
-        elif mode_name == "demo":
-            # TODO: Implement demo mode
-            pass
+        """Handle system mode control (idle, demo, etc.)"""
+        try:
+            mode_name = data.get("name")
+            state = data.get("state", True)
+            
+            logger.info(f"ðŸ”„ Mode '{mode_name}' {'activated' if state else 'deactivated'}")
+            
+            # Handle different modes
+            if mode_name == "idle":
+                # Toggle idle mode in scene engine
+                if hasattr(self.scene_engine, 'set_idle_mode'):
+                    self.scene_engine.set_idle_mode(state)
+                    logger.info(f"ðŸŒ™ Idle mode {'ENABLED' if state else 'DISABLED'} via frontend")
+                    
+                    # Send confirmation back to frontend
+                    await self._send_response(websocket, {
+                        "type": "mode_response",
+                        "mode": "idle",
+                        "state": state,
+                        "success": True
+                    })
+                else:
+                    logger.error("Scene engine does not support idle mode (missing set_idle_mode method)")
+                    await self._send_error_response(websocket, "Idle mode not available")
+                    
+            elif mode_name == "demo":
+                # TODO: Implement demo mode
+                logger.warning("Demo mode not yet implemented")
+                await self._send_response(websocket, {
+                    "type": "mode_response",
+                    "mode": "demo",
+                    "state": state,
+                    "success": False,
+                    "message": "Demo mode not yet implemented"
+                })
+            else:
+                logger.warning(f"Unknown mode: {mode_name}")
+                await self._send_error_response(websocket, f"Unknown mode: {mode_name}")
+                
+        except Exception as e:
+            logger.error(f"Error handling mode control: {e}")
+            await self._send_error_response(websocket, f"Mode error: {str(e)}")
     
     # ==================== UTILITY METHODS ====================
     

@@ -88,21 +88,44 @@ class DirectServoHandler(BehaviorHandler):
             if not servo_channel or not self.hardware_service:
                 return False
             
+            channel_locked = self.scene_engine and self.scene_engine.is_channel_locked(servo_channel)
+            has_mixer = self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer
+
+            # If channel is locked and no mixer available, skip entirely
+            if channel_locked and not has_mixer:
+                return True
+            
             # Apply inversion and sensitivity
             value = -controller_input.raw_value if invert else controller_input.raw_value
             value *= sensitivity
 
-            last_value = self.last_sent_values.get(servo_channel, None)
-            if last_value is not None and abs(value - last_value) < self.change_threshold:
-                return True  
+            # Change threshold only applies to direct hardware commands.
+            # When routing through the mixer the current position must always
+            # be written so the blend system has fresh data every poll cycle.
+            if not has_mixer:
+                last_value = self.last_sent_values.get(servo_channel, None)
+                if last_value is not None and abs(value - last_value) < self.change_threshold:
+                    return True
 
             # Use center_offset to adjust center position, and actual servo min/max for clamping
             pulse = self._clamp_pulse(value, center_offset, servo_channel)
-            
-            # Send servo command
-            success = await self.hardware_service.set_servo_position(
-                servo_channel, pulse, "realtime"
-            )
+
+            if has_mixer:
+                # Debug: log mixer-routed joystick targets for key servos
+                try:
+                    if servo_channel in ('m1_ch0','m1_ch1'):
+                        logger.debug(f"[JOY->MIX] {servo_channel} raw={controller_input.raw_value:.3f} pulse={pulse} offset={center_offset} locked={channel_locked}")
+                except Exception:
+                    pass
+                self.processor.joystick_layer.set_channel(servo_channel, float(pulse))
+                success = True
+            elif not channel_locked:
+                # Fallback: Send directly to hardware only when not locked
+                success = await self.hardware_service.set_servo_position(
+                    servo_channel, pulse, "realtime"
+                )
+            else:
+                return True
             
             if success:
                 self.logger.debug(f"Direct servo {servo_channel}: {pulse} (raw: {controller_input.raw_value:.2f}, offset: {center_offset})")
@@ -200,9 +223,14 @@ class MultiServoHandler(BehaviorHandler):
             
             # Only send if changed
             if state['last_pulses'].get(channel) != target_pulse:
-                success = await self.hardware_service.set_servo_position(
-                    channel, target_pulse, "realtime"
-                )
+                # Route through motion mixer if available
+                if self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer:
+                    self.processor.joystick_layer.set_channel(channel, float(target_pulse))
+                    success = True
+                else:
+                    success = await self.hardware_service.set_servo_position(
+                        channel, target_pulse, "realtime"
+                    )
                 
                 if success:
                     state['last_pulses'][channel] = target_pulse
@@ -241,18 +269,25 @@ class MultiServoHandler(BehaviorHandler):
             # Apply invert and calculate pulse
             value = -controller_input.raw_value if invert else controller_input.raw_value
             
-            # Check threshold
-            last_value = self.last_sent_values.get(channel, None)
-            if last_value is not None and abs(value - last_value) < self.change_threshold:
-                continue
-            
             pulse = center + int(value * pulse_range)
             pulse = max(min_pulse, min(max_pulse, pulse))
-            
-            # Send servo command
-            success = await self.hardware_service.set_servo_position(
-                channel, pulse, "realtime"
-            )
+
+            # Route through motion mixer if available
+            has_mixer = self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer
+
+            # Change threshold only applies to direct hardware commands
+            if not has_mixer:
+                last_value = self.last_sent_values.get(channel, None)
+                if last_value is not None and abs(value - last_value) < self.change_threshold:
+                    continue
+
+            if has_mixer:
+                self.processor.joystick_layer.set_channel(channel, float(pulse))
+                success = True
+            else:
+                success = await self.hardware_service.set_servo_position(
+                    channel, pulse, "realtime"
+                )
             
             if success:
                 self.logger.debug(f"Multi servo {channel}: {pulse} (raw: {controller_input.raw_value:.2f}, inverted: {invert})")
@@ -306,9 +341,14 @@ class ToggleServoHandler(BehaviorHandler):
                 
                 # Only send command if position changed
                 if target_pulse != state['last_pulse_sent']:
-                    success = await self.hardware_service.set_servo_position(
-                        servo_channel, target_pulse, "realtime"
-                    )
+                    # Route through motion mixer if available
+                    if self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer:
+                        self.processor.joystick_layer.set_channel(servo_channel, float(target_pulse))
+                        success = True
+                    else:
+                        success = await self.hardware_service.set_servo_position(
+                            servo_channel, target_pulse, "realtime"
+                        )
                     
                     if success:
                         state['last_pulse_sent'] = target_pulse
@@ -341,10 +381,14 @@ class ToggleServoHandler(BehaviorHandler):
                         pulse = position_2
                         state['current_position'] = 1
                     
-                    # Send servo command
-                    success = await self.hardware_service.set_servo_position(
-                        servo_channel, pulse, "realtime"
-                    )
+                    # Route through motion mixer if available
+                    if self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer:
+                        self.processor.joystick_layer.set_channel(servo_channel, float(pulse))
+                        success = True
+                    else:
+                        success = await self.hardware_service.set_servo_position(
+                            servo_channel, pulse, "realtime"
+                        )
                     
                     if success:
                         state['last_pulse_sent'] = pulse
@@ -386,17 +430,34 @@ class JoystickPairHandler(BehaviorHandler):
             if not x_servo or not y_servo or not self.hardware_service:
                 return False
             
+            has_mixer = self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer
             success = False
             
             # Handle X axis
             if controller_input.control_name.endswith('_x'):
+                x_locked = self.scene_engine and self.scene_engine.is_channel_locked(x_servo)
+
+                # If locked and no mixer, skip entirely
+                if x_locked and not has_mixer:
+                    return True
+
                 value = -controller_input.raw_value if invert_x else controller_input.raw_value
                 value *= sensitivity
                 pulse = self._clamp_pulse(value, x_center_offset, x_servo)
                 
-                success = await self.hardware_service.set_servo_position(
-                    x_servo, pulse, "realtime"
-                )
+                if has_mixer:
+                    # Always update the joystick layer so the mixer can additive-blend it with scene output
+                    self.processor.joystick_layer.set_channel(x_servo, float(pulse))
+                    try:
+                        if x_servo in ('m1_ch0','m1_ch1'):
+                            logger.debug(f"[JOYPAIR->MIX] X {x_servo} raw={controller_input.raw_value:.3f} pulse={pulse} offset={x_center_offset} locked={x_locked}")
+                    except Exception:
+                        pass
+                    success = True
+                elif not x_locked:
+                    success = await self.hardware_service.set_servo_position(
+                        x_servo, pulse, "realtime"
+                    )
                 
                 if success:
                     self.last_x_value = controller_input.raw_value
@@ -404,13 +465,29 @@ class JoystickPairHandler(BehaviorHandler):
             
             # Handle Y axis
             elif controller_input.control_name.endswith('_y'):
+                y_locked = self.scene_engine and self.scene_engine.is_channel_locked(y_servo)
+
+                # If locked and no mixer, skip entirely
+                if y_locked and not has_mixer:
+                    return True
+
                 value = -controller_input.raw_value if invert_y else controller_input.raw_value
                 value *= sensitivity
                 pulse = self._clamp_pulse(value, y_center_offset, y_servo)
                 
-                success = await self.hardware_service.set_servo_position(
-                    y_servo, pulse, "realtime"
-                )
+                if has_mixer:
+                    # Always update the joystick layer so the mixer can additive-blend it with scene output
+                    self.processor.joystick_layer.set_channel(y_servo, float(pulse))
+                    try:
+                        if y_servo in ('m1_ch0','m1_ch1'):
+                            logger.debug(f"[JOYPAIR->MIX] Y {y_servo} raw={controller_input.raw_value:.3f} pulse={pulse} offset={y_center_offset} locked={y_locked}")
+                    except Exception:
+                        pass
+                    success = True
+                elif not y_locked:
+                    success = await self.hardware_service.set_servo_position(
+                        y_servo, pulse, "realtime"
+                    )
                 
                 if success:
                     self.last_y_value = controller_input.raw_value
@@ -544,13 +621,19 @@ class DifferentialTracksHandler(BehaviorHandler):
             left_pulse = self._clamp_pulse(left_speed)
             right_pulse = self._clamp_pulse(right_speed)
             
-            # Send commands to both servos
-            left_success = await self.hardware_service.set_servo_position(
-                left_servo, left_pulse, "realtime"
-            )
-            right_success = await self.hardware_service.set_servo_position(
-                right_servo, right_pulse, "realtime"
-            )
+            # Send commands to both servos via motion mixer or direct fallback
+            if self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer:
+                self.processor.joystick_layer.set_channel(left_servo, float(left_pulse))
+                self.processor.joystick_layer.set_channel(right_servo, float(right_pulse))
+                left_success = True
+                right_success = True
+            else:
+                left_success = await self.hardware_service.set_servo_position(
+                    left_servo, left_pulse, "realtime"
+                )
+                right_success = await self.hardware_service.set_servo_position(
+                    right_servo, right_pulse, "realtime"
+                )
             
             if left_success and right_success:
                 self.last_sent_left = left_speed
@@ -682,14 +765,20 @@ class ToggleScenesHandler(BehaviorHandler):
 class ControllerInputProcessor:
     """Main controller input processing system"""
         
-    def __init__(self, hardware_service=None, scene_engine=None, stepper_controller=None, backend_ref=None):
+    def __init__(self, hardware_service=None, scene_engine=None, stepper_controller=None, backend_ref=None, motion_mixer=None):
         self.hardware_service = hardware_service
         self.scene_engine = scene_engine
         self.stepper_controller = stepper_controller
         self.backend = backend_ref
+        self.motion_mixer = motion_mixer
         
         # Load servo home positions to use as center offsets
         self.servo_home_positions = self._load_servo_home_positions()
+        
+        # Create persistent joystick layer in motion mixer if available
+        self.joystick_layer = None
+        if self.motion_mixer:
+            self._init_joystick_layer()
         
         # Initialize behavior handlers (pass self so they can access get_center_offset_for_servo)
         self.handlers = {
@@ -965,6 +1054,18 @@ class ControllerInputProcessor:
             return offset
         return 0  # Default: no offset
     
+    def _init_joystick_layer(self):
+        """Sync with the joystick layer already created by MotionMixer"""
+        try:
+            self.joystick_layer = self.motion_mixer.joystick_layer
+            mode = getattr(self.joystick_layer, 'blend_mode', None)
+            mode_str = mode.value if mode else 'unknown'
+            logger.info(f"Joystick layer synced from motion mixer ({mode_str}, priority=0)")
+        except Exception as e:
+            logger.error(f"Failed to sync joystick layer: {e}")
+            self.joystick_layer = None
+
+    
     def reload_servo_home_positions(self) -> bool:
         """Reload servo home positions from config file (call when config changes)"""
         try:
@@ -1164,7 +1265,7 @@ class ControllerInputProcessor:
             else:
                 self.stats["failed_commands"] += 1
             
-            return success
+            return any_success
             
         except Exception as e:
             logger.error(f"Controller input processing error: {e}")

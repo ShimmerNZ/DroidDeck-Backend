@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 NEMA 23 Stepper Controller for WALL-E Gantry System - Pi 5 Compatible
 Handles homing, positioning, and smooth movement with TB6600 driver
@@ -66,7 +67,7 @@ class StepperConfig:
     max_speed: int = 1200            # Maximum speed
     
     # Acceleration settings
-    acceleration: int = 800          # Steps per secondÂ²
+    acceleration: int = 800          # Steps per second²
     
     # Timing (microseconds)
     step_pulse_width: int = 5        # Minimum pulse width for TB6600
@@ -134,7 +135,7 @@ class NEMA23Controller:
     def setup_gpio(self):
         """Initialize GPIO pins for stepper control using compatibility layer"""
         if not is_gpio_available():
-            logger.warning("⚠️ GPIO not available - stepper control disabled")
+            logger.warning("âš Ã️  GPIO not available - stepper control disabled")
             return
         
         try:
@@ -150,10 +151,10 @@ class NEMA23Controller:
                 self.gpio_initialized = True
                 logger.info(f"✅ GPIO initialized for stepper motor using {get_gpio_library()}")
             else:
-                logger.error("âŒ Failed to setup one or more GPIO pins")
+                logger.error("✗ Failed to setup one or more GPIO pins")
             
         except Exception as e:
-            logger.error(f"âŒ Failed to setup GPIO: {e}")
+            logger.error(f"✗ Failed to setup GPIO: {e}")
             self.gpio_initialized = False
         
     def enable_motor(self):
@@ -206,7 +207,7 @@ class NEMA23Controller:
         if new_state != self.state:
             old_state = self.state
             self.state = new_state
-            logger.info(f"🎯 Motor state: {old_state.value} â†’ {new_state.value}")
+            logger.info(f"🎯 Motor state: {old_state.value} → {new_state.value}")
             
             if self.state_changed_callback:
                 try:
@@ -259,13 +260,13 @@ class NEMA23Controller:
         was_disabled = self.intentionally_disabled
         self.intentionally_disabled = False
 
-        logger.info("🏠 Starting homing sequence...")
+        logger.info("ðŸ  Starting homing sequence...")
         self.set_state(MotorState.HOMING)
         self.enable_motor()
         
         try:
             # Phase 1: Move toward home until limit switch triggers
-            logger.info("🏠 Phase 1: Moving toward limit switch...")
+            logger.info("ðŸ  Phase 1: Moving toward limit switch...")
             self.set_direction(MoveDirection.TOWARD_HOME)
             
             steps_moved = 0
@@ -273,7 +274,7 @@ class NEMA23Controller:
             
             while not self.is_limit_switch_triggered() and steps_moved < max_homing_steps:
                 if self.stop_movement.is_set():
-                    logger.warning("🏠 Homing interrupted")
+                    logger.warning("ðŸ  Homing interrupted")
                     return False
                 
                 self.step_pulse()
@@ -281,21 +282,21 @@ class NEMA23Controller:
                 steps_moved += 1
             
             if steps_moved >= max_homing_steps:
-                logger.error("🏠 Homing failed - limit switch not found")
+                logger.error("ðŸ  Homing failed - limit switch not found")
                 self.set_state(MotorState.ERROR)
                 if was_disabled:
                     self.intentionally_disabled = True
                 return False
             
-            logger.info(f"🏠 Limit switch triggered after {steps_moved} steps")
+            logger.info(f"ðŸ  Limit switch triggered after {steps_moved} steps")
             
             # Phase 2: Back off from limit switch to establish zero position
-            logger.info("🏠 Phase 2: Backing off from limit switch...")
+            logger.info("ðŸ  Phase 2: Backing off from limit switch...")
             self.set_direction(MoveDirection.AWAY_FROM_HOME)
             
             for step in range(self.home_offset_steps):
                 if self.stop_movement.is_set():
-                    logger.warning("🏠 Homing interrupted during backoff")
+                    logger.warning("ðŸ  Homing interrupted during backoff")
                     return False
                 
                 self.step_pulse()
@@ -323,7 +324,7 @@ class NEMA23Controller:
 
 
         except Exception as e:
-            logger.error(f"🏠 Homing failed: {e}")
+            logger.error(f"ðŸ  Homing failed: {e}")
             self.set_state(MotorState.ERROR)
             if was_disabled:
                 self.intentionally_disabled = True
@@ -364,7 +365,7 @@ class NEMA23Controller:
         
         with self.movement_lock:
             logger.info(f"🎯 Moving from {self.current_position_steps} to {target_steps} steps")
-            logger.info(f"    ({self.steps_to_cm(self.current_position_steps):.1f} cm â†’ {self.steps_to_cm(target_steps):.1f} cm)")
+            logger.info(f"    ({self.steps_to_cm(self.current_position_steps):.1f} cm → {self.steps_to_cm(target_steps):.1f} cm)")
             
             self.target_position_steps = target_steps
             self.set_state(MotorState.MOVING)
@@ -475,13 +476,13 @@ class NEMA23Controller:
     
     async def move_to_default_position(self) -> bool:
         """Move to the default position (rear position)"""
-        logger.info("🔄 Moving to default position...")
+        logger.info("🛠 Moving to default position...")
         return await self.move_to_position_cm(self.config.default_position_cm)
     
     async def move_to_forward_position(self) -> bool:
         """Move to the forward position"""
         forward_position = self.config.max_travel_cm - 2.0  # 2cm from max travel
-        logger.info("🔄 Moving to forward position...")
+        logger.info("🛠 Moving to forward position...")
         return await self.move_to_position_cm(forward_position)
     
     def emergency_stop(self):
@@ -532,7 +533,7 @@ class NEMA23Controller:
             if not self.sweep_active:
                 return True
             
-            logger.info("⏸️ Stopping sweep...")
+            logger.info("â¸ï¸ Stopping sweep...")
             self.sweep_active = False
             
             # Signal movement to stop immediately
@@ -799,7 +800,7 @@ if __name__ == "__main__":
         print("1. Homing motor...")
         success = await stepper.home_motor()
         if not success:
-            print("âŒ Homing failed")
+            print("✗ Homing failed")
             return
         
         # Wait a moment

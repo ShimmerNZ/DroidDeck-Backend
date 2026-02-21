@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Bottango Animation Converter with Bezier Interpolation
 Enhanced version with proper cubic hermite/bezier curve evaluation
@@ -61,7 +62,7 @@ class BottangoCurve:
         Evaluate cubic bezier curve at normalized time t (0.0 to 1.0)
         
         Standard cubic bezier formula:
-        B(t) = (1-t)Â³Pâ‚€ + 3(1-t)Â²tPâ‚ + 3(1-t)tÂ²Pâ‚‚ + tÂ³Pâ‚ƒ
+        B(t) = (1-t)³P₀ + 3(1-t)²tP₁ + 3(1-t)t²P₂ + t³P₃
         
         Where control points are:
         - P0 = start_position
@@ -121,8 +122,8 @@ class BottangoConverter:
     WITH proper cubic hermite/bezier interpolation
     
     Channel Mapping:
-        Channels 0-23  â†’ Maestro 1 (m1_ch0 to m1_ch23)
-        Channels 24-47 â†’ Maestro 2 (m2_ch0 to m2_ch23)
+        Channels 0-23  → Maestro 1 (m1_ch0 to m1_ch23)
+        Channels 24-47 → Maestro 2 (m2_ch0 to m2_ch23)
     """
     
     # Sampling rate for discrete timesteps (milliseconds)
@@ -214,7 +215,7 @@ class BottangoConverter:
                 
                 logger.debug(f"Parsed bezier curve: Ch{curve.channel} "
                            f"@ {curve.start_time_ms}ms for {curve.duration_ms}ms "
-                           f"({curve.start_position} â†’ {curve.end_position})")
+                           f"({curve.start_position} → {curve.end_position})")
                 
             except (IndexError, ValueError) as e:
                 logger.warning(f"Failed to parse animation command: {line} - {e}")
@@ -250,8 +251,8 @@ class BottangoConverter:
         """
         Map Bottango channel to DroidDeck maestro channel ID
         
-        Channels 0-23  â†’ m1_ch0 to m1_ch23 (Maestro 1)
-        Channels 24-47 â†’ m2_ch0 to m2_ch23 (Maestro 2)
+        Channels 0-23  → m1_ch0 to m1_ch23 (Maestro 1)
+        Channels 24-47 → m2_ch0 to m2_ch23 (Maestro 2)
         """
         if 0 <= bottango_channel <= 23:
             return f"m1_ch{bottango_channel}"
@@ -318,7 +319,7 @@ class BottangoConverter:
         logger.info(f"  Duration: {duration_ms}ms ({duration_sec:.2f}s)")
         logger.info(f"  Active channels: {active_channels}")
         logger.info(f"  Locked channels: {locked_channels}")
-        logger.info(f"  Interpolation: âœ¨ Cubic Bezier")
+        logger.info(f"  Interpolation: ✨ Cubic Bezier")
         
         # Sample animation at fixed intervals using bezier curves
         steps = []
@@ -373,7 +374,7 @@ class BottangoConverter:
     def convert_file(self, input_path: Path, output_dir: Path) -> Optional[Path]:
         """Convert a Bottango JSON export file to DroidDeck scene format"""
         try:
-            logger.info(f"ðŸ“¥ Processing: {input_path.name}")
+            logger.info(f"📥 Processing: {input_path.name}")
             
             with open(input_path, 'r') as f:
                 bottango_data = json.load(f)
@@ -415,7 +416,7 @@ class BottangoConverter:
             with open(output_path, 'w') as f:
                 json.dump(scene, f, indent=2)
             
-            logger.info(f"âœ… Converted to: {output_path.name}")
+            logger.info(f"✅ Converted to: {output_path.name}")
             logger.info(f"   Duration: {scene['duration']:.2f}s, "
                        f"Steps: {len(scene['steps'])}, "
                        f"Channels: {len(scene['locked_channels'])}")
@@ -423,7 +424,7 @@ class BottangoConverter:
             return output_path
             
         except Exception as e:
-            logger.error(f"âŒ Failed to convert {input_path.name}: {e}")
+            logger.error(f"✗ Failed to convert {input_path.name}: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -450,7 +451,7 @@ class BottangoImportWatchdog:
         if not json_files:
             return []
         
-        logger.info(f"ðŸ” Found {len(json_files)} file(s) to process")
+        logger.info(f"🔍 Found {len(json_files)} file(s) to process")
         
         converted_files = []
         
@@ -463,7 +464,7 @@ class BottangoImportWatchdog:
                 if self.delete_after_conversion:
                     try:
                         json_file.unlink()
-                        logger.info(f"ðŸ—‘ï¸  Deleted source: {json_file.name}")
+                        logger.info(f"ðŸ—️  Deleted source: {json_file.name}")
                     except Exception as e:
                         logger.warning(f"Failed to delete {json_file.name}: {e}")
         
@@ -500,7 +501,7 @@ def main():
         output_path = converter.convert_file(input_path, args.output_dir)
         
         if output_path:
-            logger.info(f"âœ¨ Success! Bezier-interpolated scene: {output_path}")
+            logger.info(f"✨ Success! Bezier-interpolated scene: {output_path}")
             sys.exit(0)
         else:
             sys.exit(1)
@@ -510,11 +511,11 @@ def main():
             not args.keep_imports
         )
         
-        logger.info("ðŸš€ Starting Bottango import processor (with bezier)")
+        logger.info("🚀 Starting Bottango import processor (with bezier)")
         converted = watchdog.process_imports()
         
         if converted:
-            logger.info(f"âœ… Converted {len(converted)} scene(s) with smooth bezier curves")
+            logger.info(f"✅ Converted {len(converted)} scene(s) with smooth bezier curves")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Complete Enhanced Scene Engine for WALL-E Robot Control System
 Manages scenes, emotions, and audio-synchronized servo movements with batch command optimization
@@ -15,7 +16,15 @@ from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
 
+
+# Audio duration utilities
 logger = logging.getLogger(__name__)
+try:
+    from modules.audio_utils import get_audio_duration
+except ImportError:
+    logger.warning("audio_utils module not available - audio duration auto-calculation disabled")
+    def get_audio_duration(filepath):
+        return None
 
 class SceneCategory(Enum):
     """Scene category enumeration for better organization"""
@@ -62,10 +71,12 @@ class EnhancedSceneEngine:
     Complete Enhanced Scene Engine with batch command optimization and advanced features
     """
     
-    def __init__(self, hardware_service, audio_controller, config_path: str = "configs/scenes_config.json"):
+    def __init__(self, hardware_service, audio_controller, config_path: str = "configs/scenes_config.json",
+                 motion_mixer=None):
         self.hardware_service = hardware_service
         self.audio_controller = audio_controller
         self.config_path = config_path
+        self.motion_mixer = motion_mixer
         
         # Scene data
         self.scenes = {}
@@ -74,9 +85,9 @@ class EnhancedSceneEngine:
         self.scene_playing = False
         self.scene_queue = []  # For scene chaining
         
-        # NEW: Channel locking for Bottango scene animation priority
-        self.locked_channels = set()  # Set of channel IDs currently locked by scene
-        self.lock_lock = asyncio.Lock()  # Thread-safe lock management
+        # Channel locking for legacy scenes (used when motion_mixer is not available)
+        self.locked_channels = set()
+        self.lock_lock = asyncio.Lock()
         
         # Performance metrics
         self.metrics = SceneMetrics()
@@ -92,11 +103,12 @@ class EnhancedSceneEngine:
         self.scene_error_callback: Optional[Callable] = None
         self.scene_progress_callback: Optional[Callable] = None
         
-        # Advanced features
-        self.auto_idle_enabled = False
-        self.idle_timeout = 30.0  # seconds
-        self.last_activity_time = time.time()
-        self.idle_scenes = ["Casual Look Around", "Standby Mode", "Waiting Animation"]
+        # Legacy auto-idle removed - now uses frontend-controlled idle mode
+        
+        # Idle mode with ADDITIVE blending (controlled by frontend)
+        self.idle_mode_enabled = False
+        self.idle_loop_task = None
+        self.audio_dir = Path("audio")
         
         # Load scenes from configuration
         self.load_scenes()
@@ -105,43 +117,120 @@ class EnhancedSceneEngine:
         self._start_background_tasks()
         
         logger.info(f"🎭 Enhanced Scene Engine initialized with {len(self.scenes)} scenes")
-        logger.info(f"📊 Available categories: {', '.join(self.get_available_categories())}")
+        logger.info(f"📂 Available categories: {', '.join(self.get_available_categories())}")
         logger.info(f"🔒 Channel locking enabled for Bottango scene priority")
     
     def _start_background_tasks(self):
         """Start background tasks for auto-idle and cleanup"""
         try:
             # Auto-idle task
-            if self.auto_idle_enabled:
-                asyncio.create_task(self._auto_idle_loop())
-                logger.debug("🔄 Auto-idle system started")
+            pass
         except Exception as e:
             logger.warning(f"⚠️ Failed to start background tasks: {e}")
     
-    async def _auto_idle_loop(self):
-        """Background task to play idle scenes when inactive"""
-        while True:
-            try:
-                await asyncio.sleep(5.0)  # Check every 5 seconds
-                
-                if (not self.scene_playing and 
-                    time.time() - self.last_activity_time > self.idle_timeout):
-                    
-                    # Play random idle scene
-                    idle_scene = await self.get_random_scene_by_category("Idle")
-                    if idle_scene:
-                        logger.info(f"😴 Auto-playing idle scene: {idle_scene}")
-                        await self.play_scene(idle_scene, auto_triggered=True)
-                        
-                    # Reset timer
-                    self.last_activity_time = time.time()
-                    
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"❌ Auto-idle loop error: {e}")
-                await asyncio.sleep(10.0)
     
+
+    def calculate_scene_duration(self, scene_data: Dict[str, Any]) -> float:
+        """
+        Auto-calculate scene duration from Bottango timeline or audio file
+        
+        Priority:
+        1. Bottango steps → use max timestep
+        2. Audio file → parse MP3/WAV duration
+        3. Explicit duration field → use as-is
+        4. Default → 2.0 seconds
+        """
+        # 1. Check for Bottango timeline
+        steps = scene_data.get("steps", [])
+        if steps:
+            max_time = max(step.get("time", 0.0) for step in steps)
+            logger.debug(f"Duration from Bottango timeline: {max_time:.2f}s")
+            return max_time
+        
+        # 2. Check for audio file
+        audio_enabled = scene_data.get("audio_enabled", False)
+        audio_file = scene_data.get("audio_file")
+        if audio_enabled and audio_file:
+            audio_path = self.audio_dir / audio_file
+            audio_duration = get_audio_duration(audio_path)
+            if audio_duration:
+                logger.debug(f"Duration from audio '{audio_file}': {audio_duration:.2f}s")
+                return audio_duration
+        
+        # 3. Explicit duration or default
+        return float(scene_data.get("duration", 2.0))
+
+    def set_idle_mode(self, enabled: bool):
+        """
+        Enable or disable idle mode (called from WebSocket handler)
+        
+        When enabled: starts background loop playing random Idle scenes with ADDITIVE blending
+        When disabled: stops the loop
+        """
+        self.idle_mode_enabled = enabled
+        
+        if enabled:
+            logger.info("🌙 Idle mode ENABLED - starting idle scene loop")
+            if self.idle_loop_task is None or self.idle_loop_task.done():
+                self.idle_loop_task = asyncio.create_task(self._idle_scene_loop())
+        else:
+            logger.info("☀️ Idle mode DISABLED - stopping idle scene loop")
+            if self.idle_loop_task and not self.idle_loop_task.done():
+                self.idle_loop_task.cancel()
+                self.idle_loop_task = None
+
+    async def _idle_scene_loop(self):
+        """
+        Background loop that plays random Idle scenes with ADDITIVE blending
+        Runs continuously while idle_mode_enabled is True
+        """
+        try:
+            while self.idle_mode_enabled:
+                idle_scenes = self.get_scenes_by_category("Idle")
+                
+                if not idle_scenes:
+                    logger.warning("No Idle scenes available, waiting...")
+                    await asyncio.sleep(10.0)
+                    continue
+                
+                scene_info = random.choice(idle_scenes)
+                scene_name = scene_info["name"]
+                scene_data = self.scenes.get(scene_name)
+                
+                if not scene_data:
+                    await asyncio.sleep(5.0)
+                    continue
+                
+                logger.info(f"🌙 Playing idle scene: {scene_name}")
+                
+                if self.motion_mixer:
+                    from modules.motion_system import BlendMode
+                    
+                    await self.motion_mixer.play_scene(
+                        scene_name=scene_name,
+                        scene_data=scene_data,
+                        crossfade_in=2.0,
+                        crossfade_out=2.0,
+                        blend_mode=BlendMode.ADDITIVE,
+                        priority=5
+                    )
+                    
+                    duration = self.calculate_scene_duration(scene_data)
+                    await asyncio.sleep(duration + 4.0)
+                else:
+                    await self.play_scene(scene_name)
+                
+                pause = random.uniform(3.0, 8.0)
+                logger.debug(f"Idle pause: {pause:.1f}s before next scene")
+                await asyncio.sleep(pause)
+                
+        except asyncio.CancelledError:
+            logger.info("Idle scene loop cancelled")
+        except Exception as e:
+            logger.error(f"Error in idle scene loop: {e}")
+            import traceback
+            traceback.print_exc()
+
     # ==================== CHANNEL LOCKING FOR BOTTANGO SCENES ====================
     
     async def lock_channels(self, channels: List[str]):
@@ -228,6 +317,28 @@ class EnhancedSceneEngine:
             
             if validation_errors:
                 logger.warning(f"⚠️ Found {len(validation_errors)} scene validation issues")
+            
+        
+            # Auto-calculate duration for each scene
+            for scene_name, scene_data in self.scenes.items():
+                if not isinstance(scene_data, dict):
+                    continue
+                
+                # Auto-calculate if no duration set OR if Bottango steps exist
+                should_calculate = (
+                    "duration" not in scene_data or
+                    scene_data.get("steps")
+                )
+                
+                if should_calculate:
+                    calculated_duration = self.calculate_scene_duration(scene_data)
+                    scene_data["duration"] = calculated_duration
+                    
+                    if "metadata" not in scene_data:
+                        scene_data["metadata"] = {}
+                    scene_data["metadata"]["duration_auto_calculated"] = True
+                    
+                    logger.debug(f"Scene '{scene_name}': auto-duration = {calculated_duration:.2f}s")
             
             logger.info(f"📋 Loaded {len(self.scenes)} scenes from {self.config_path}")
             
@@ -341,31 +452,31 @@ class EnhancedSceneEngine:
     
     async def play_scene(self, scene_name: str, auto_triggered: bool = False) -> bool:
         if scene_name not in self.scenes:
-            logger.warning(f"⚠️ Scene '{scene_name}' not found")
+            logger.warning(f"Scene '{scene_name}' not found")
             return False
         
         if self.scene_playing:
-            logger.warning(f"⚠️ Scene already playing ({self.current_scene}), ignoring '{scene_name}'")
+            logger.warning(f"Scene already playing ({self.current_scene}), ignoring '{scene_name}'")
             return False
         
         # Make a copy of the scene to avoid modifying the original
         scene = self.scenes[scene_name].copy()
         
-        # NEW: If scene references a Bottango scene, load full data
+        # If scene references a Bottango scene, load full data
         if scene.get("script_enabled") and scene.get("bottango_scene"):
             bottango_name = scene["bottango_scene"]
             full_scene_data = await self._load_bottango_scene(bottango_name)
             if full_scene_data:
-                # Merge Bottango data into scene
+                # Bottango scene duration takes priority over config duration
+                bottango_duration = full_scene_data.get("duration", full_scene_data.get("duration_ms", 1000) / 1000.0)
                 scene.update({
                     "steps": full_scene_data.get("steps", []),
                     "locked_channels": full_scene_data.get("locked_channels", []),
-                    # Use Bottango duration if not manually overridden
-                    "duration": scene.get("duration") or (full_scene_data.get("duration_ms", 1000) / 1000.0)
+                    "duration": bottango_duration
                 })
-                logger.info(f"🎬 Loaded Bottango scene: {bottango_name} ({len(scene.get('steps', []))} steps)")
+                logger.info(f"Loaded Bottango scene: {bottango_name} ({len(scene.get('steps', []))} steps)")
             else:
-                logger.warning(f"⚠️ Failed to load Bottango scene: {bottango_name}")
+                logger.warning(f"Failed to load Bottango scene: {bottango_name}")
         
         self.current_scene = scene_name
         self.scene_playing = True
@@ -373,109 +484,235 @@ class EnhancedSceneEngine:
         self.pause_requested = False
         self.scene_start_time = time.time()
         
-        # NEW: Lock channels used by this scene (for Bottango scenes)
+        # Determine if this scene should use the motion mixer
+        has_steps = bool(scene.get('steps'))
+        use_mixer = has_steps and self.motion_mixer is not None
+        
+        # Lock channels only for legacy (non-mixer) playback
         locked_channels = scene.get('locked_channels', [])
-        if locked_channels:
+        if locked_channels and not use_mixer:
             await self.lock_channels(locked_channels)
-            logger.info(f"🔒 Locked {len(locked_channels)} channel(s) for scene animation")
+            logger.info(f"Locked {len(locked_channels)} channel(s) for legacy scene animation")
         
         try:
-            logger.info(f"🎬 Playing scene: '{scene_name}' ({scene.get('emoji', '🎭')})")
+            mode_tag = ' [mixer]' if use_mixer else ' [legacy]'
+            logger.info(f"Playing scene: '{scene_name}' ({scene.get('emoji', '')}){mode_tag}")
             
-            # Update activity time (for auto-idle)
             if not auto_triggered:
-                self.last_activity_time = time.time()
+                0  # Legacy removed = time.time()
             
-            # Add to scene history
             self.scene_history.append({
                 "name": scene_name,
                 "timestamp": time.time(),
                 "auto_triggered": auto_triggered
             })
-            
-            # Keep history manageable
             if len(self.scene_history) > 100:
                 self.scene_history = self.scene_history[-50:]
-            
-            # DEBUG: Check callback before calling
-            logger.debug(f"DEBUG: scene_started_callback exists: {self.scene_started_callback is not None}")
             
             # Notify scene started
             if self.scene_started_callback:
                 try:
-                    logger.debug(f"DEBUG: Calling scene_started_callback for {scene_name}")
                     await self.scene_started_callback(scene_name, scene)
-                    logger.debug(f"DEBUG: scene_started_callback completed successfully")
                 except Exception as e:
                     logger.error(f"Scene started callback error: {e}")
+            
+            if use_mixer:
+                # Route through motion mixer for frame-by-frame Bottango playback
+                success = await self._execute_scene_via_mixer(scene, scene_name)
             else:
-                logger.warning(f"DEBUG: No scene_started_callback set!")
-            
-            # Execute scene components with enhanced batch support
-            success = await self._execute_scene_components(scene)
-            
-            # Wait for scene duration with interrupt support
-            duration = scene.get("duration", 2.0)
-            await self._wait_with_interrupt_support(duration)
+                # Legacy path: check if scene has timesteps (Bottango) or single servo config
+                if has_steps:
+                    # Play timestep-based animation directly
+                    success = await self._execute_timestep_animation(scene, scene_name)
+                else:
+                    # Traditional scene: batch servo commands + wait
+                    success = await self._execute_scene_components(scene)
+                    duration = scene.get("duration", 2.0)
+                    await self._wait_with_interrupt_support(duration)
             
             # Update metrics
             execution_time = time.time() - self.scene_start_time
             self._update_scene_metrics(scene_name, scene, execution_time, success)
             
-            logger.info(f"✅ Scene '{scene_name}' completed in {execution_time:.2f}s")
-            
-            # DEBUG: Check callback before calling
-            logger.debug(f"DEBUG: About to call scene_completed_callback, callback exists: {self.scene_completed_callback is not None}")
+
+            logger.info(f"Scene '{scene_name}' completed in {execution_time:.2f}s")
             
             # Notify scene completed
             if self.scene_completed_callback:
                 try:
-                    logger.debug(f"DEBUG: Calling scene_completed_callback for {scene_name}")
                     await self.scene_completed_callback(scene_name, scene, success)
-                    logger.debug(f"DEBUG: scene_completed_callback completed successfully")
                 except Exception as e:
                     logger.error(f"Scene completed callback error: {e}")
-            else:
-                logger.warning(f"DEBUG: No scene_completed_callback set!")
             
-            # Process scene queue if any
             await self._process_scene_queue()
-            
             return success
             
         except asyncio.CancelledError:
-            logger.info(f"🛑 Scene '{scene_name}' was cancelled")
+            logger.info(f"Scene '{scene_name}' was cancelled")
             return False
         except Exception as e:
-            logger.error(f"❌ Failed to play scene '{scene_name}': {e}")
-            
-            # DEBUG: Check callback before calling
-            logger.debug(f"DEBUG: scene_error_callback exists: {self.scene_error_callback is not None}")
+            logger.error(f"Failed to play scene '{scene_name}': {e}")
             import traceback
             traceback.print_exc()
             
-            # Notify scene error
             if self.scene_error_callback:
                 try:
-                    logger.debug(f"DEBUG: Calling scene_error_callback for {scene_name}")
                     await self.scene_error_callback(scene_name, scene, str(e))
-                    logger.debug(f"DEBUG: scene_error_callback completed successfully")
-                except Exception as e:
-                    logger.error(f"Scene error callback error: {e}")
-            else:
-                logger.warning(f"DEBUG: No scene_error_callback set!")
-            
+                except Exception as cb_err:
+                    logger.error(f"Scene error callback error: {cb_err}")
             return False
         finally:
-            # NEW: Always unlock channels when scene ends
-            if locked_channels:
+            # Unlock channels after scene completes (legacy only)
+            if locked_channels and not use_mixer:
                 await self.unlock_channels(locked_channels)
-                logger.info(f"🔓 Unlocked {len(locked_channels)} channel(s)")
+                logger.info(f"Unlocked {len(locked_channels)} channel(s)")
             
             self.scene_playing = False
             self.current_scene = None
             self.interrupt_requested = False
             self.pause_requested = False
+
+    async def _execute_scene_via_mixer(self, scene: Dict[str, Any], scene_name: str) -> bool:
+        """Execute a Bottango scene through the motion mixer for blended playback"""
+        try:
+            from modules.motion_system import BlendMode
+            
+            # Detect if this is an Idle scene
+            categories = scene.get("categories", [])
+            is_idle_scene = "Idle" in categories
+            
+            crossfade_in = scene.get('crossfade_in', 0.3)
+            crossfade_out = scene.get('crossfade_out', 0.5)
+            
+            # Auto-select blend mode for Idle scenes
+            if is_idle_scene and self.idle_mode_enabled:
+                blend_mode = BlendMode.ADDITIVE
+                priority = 5
+                logger.info(f"🌙 Playing {scene_name} as ADDITIVE idle layer")
+            else:
+                blend_mode_str = scene.get('blend_mode', 'override')
+                blend_mode = BlendMode.ADDITIVE if blend_mode_str == 'additive' else BlendMode.OVERRIDE
+                priority = 10
+            
+            
+            # Start audio if enabled
+            if scene.get("audio_enabled", False):
+                audio_file = scene.get("audio_file")
+                if audio_file and self.audio_controller:
+                    if self.audio_controller.get_audio_info(audio_file):
+                        self.audio_controller.play_track(audio_file)
+                        logger.info(f"Started audio: {audio_file}")
+            
+            # Handle initial delay
+            initial_delay = scene.get("delay", 0)
+            if initial_delay > 0:
+                await asyncio.sleep(initial_delay / 1000.0)
+            
+            # Start the scene in the motion mixer
+            await self.motion_mixer.play_scene(
+                scene_name=scene_name,
+                scene_data=scene,
+                crossfade_in=crossfade_in,
+                crossfade_out=crossfade_out,
+                blend_mode=blend_mode,
+                priority=10
+            )
+            
+            # Wait for scene to complete, with interrupt support
+            duration = scene.get("duration", 2.0)
+            total_wait = duration + crossfade_out + 0.1
+            start_time = time.time()
+            
+            while time.time() - start_time < total_wait:
+                if self.interrupt_requested:
+                    await self.motion_mixer.stop_scene(scene_name, crossfade_out=0.2)
+                    logger.info(f"Scene '{scene_name}' interrupted")
+                    break
+                
+                if not self.motion_mixer.is_scene_playing(scene_name):
+                    break
+                
+                if self.scene_progress_callback:
+                    progress = min(1.0, (time.time() - start_time) / duration)
+                    try:
+                        await self.scene_progress_callback(self.current_scene, progress)
+                    except Exception:
+                        pass
+                
+                await asyncio.sleep(0.05)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Mixer scene execution error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    async def _execute_timestep_animation(self, scene: Dict[str, Any], scene_name: str) -> bool:
+        """
+        Execute a timestep-based Bottango animation without motion mixer
+        Plays through each timestep in the steps array at the correct time
+        """
+        try:
+            steps = scene.get("steps", [])
+            if not steps:
+                logger.warning("No steps found in scene")
+                return False
+            
+            duration = scene.get("duration", 10.0)
+            locked_channels = scene.get("locked_channels", [])
+            
+            logger.info(f"Playing timestep animation: {len(steps)} steps over {duration:.1f}s")
+            
+            # Start audio if enabled
+            if scene.get("audio_enabled", False):
+                audio_file = scene.get("audio_file")
+                if audio_file and self.audio_controller:
+                    if self.audio_controller.get_audio_info(audio_file):
+                        self.audio_controller.play_track(audio_file)
+                        logger.info(f"Started audio: {audio_file}")
+            
+            # Play through timesteps
+            start_time = time.time()
+            current_step_index = 0
+            
+            while current_step_index < len(steps) and not self.interrupt_requested:
+                elapsed = time.time() - start_time
+                step = steps[current_step_index]
+                step_time = step.get("time", 0.0)
+                
+                # Wait until it's time for this step
+                if elapsed < step_time:
+                    await asyncio.sleep(0.01)  # Small sleep to prevent busy-waiting
+                    continue
+                
+                # Execute this step's servo movements
+                servos = step.get("servos", {})
+                if servos:
+                    # Convert to format expected by batch executor
+                    temp_scene = {"servos": servos}
+                    await self._execute_servo_movements_batch(temp_scene)
+                    logger.debug(f"Step {current_step_index + 1}/{len(steps)}: {len(servos)} servos @ {step_time:.2f}s")
+                
+                current_step_index += 1
+            
+            # Wait for any remaining duration
+            elapsed = time.time() - start_time
+            if elapsed < duration and not self.interrupt_requested:
+                remaining = duration - elapsed
+                logger.debug(f"Waiting {remaining:.2f}s for animation completion")
+                await asyncio.sleep(remaining)
+            
+            logger.info(f"Timestep animation completed in {time.time() - start_time:.2f}s")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Timestep animation execution error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
 
     async def _wait_with_interrupt_support(self, duration: float):
         """Wait for scene duration with support for interrupts and pauses"""
@@ -484,7 +721,7 @@ class EnhancedSceneEngine:
         
         while time.time() - start_time < duration:
             if self.interrupt_requested:
-                logger.info("🛑 Scene interrupted by user")
+                logger.info("⏹️ Scene interrupted by user")
                 break
             
             if self.pause_requested:
@@ -540,7 +777,7 @@ class EnhancedSceneEngine:
                     logger.debug(f"DEBUG: play_track returned: {audio_started}")
 
                     if audio_started:
-                        logger.info(f"🎵 Started audio: {audio_file}")
+                        logger.info(f"🔊 Started audio: {audio_file}")
                     else:
                         logger.warning(f"⚠️ Failed to start audio: {audio_file}")
                         success = False
@@ -560,13 +797,13 @@ class EnhancedSceneEngine:
             # Check for Maestro 1 script
             script_maestro1 = scene.get("script_maestro1")
             if script_maestro1 is not None:
-                logger.debug(f"🎬 Queuing script #{script_maestro1} for Maestro 1")
+                logger.debug(f"📜 Queuing script #{script_maestro1} for Maestro 1")
                 script_tasks.append(self._execute_maestro_script("maestro1", script_maestro1))
             
             # Check for Maestro 2 script
             script_maestro2 = scene.get("script_maestro2")
             if script_maestro2 is not None:
-                logger.debug(f"🎬 Queuing script #{script_maestro2} for Maestro 2")
+                logger.debug(f"📜 Queuing script #{script_maestro2} for Maestro 2")
                 script_tasks.append(self._execute_maestro_script("maestro2", script_maestro2))
             
             # Execute both scripts concurrently if any exist
@@ -583,7 +820,7 @@ class EnhancedSceneEngine:
     async def _execute_maestro_script(self, maestro_name: str, script_number: int) -> bool:
         """Execute a script on a specific Maestro controller"""
         try:
-            logger.debug(f"🎬 Executing script #{script_number} on {maestro_name}")
+            logger.debug(f"📜 Executing script #{script_number} on {maestro_name}")
             result = await self.hardware_service.restart_maestro_script(maestro_name, script_number)
             if result:
                 logger.debug(f"✅ Script #{script_number} started on {maestro_name}")
@@ -615,7 +852,7 @@ class EnhancedSceneEngine:
                 
                 servo_config = {
                     "channel": channel,
-                    "target": settings["target"]
+                    "target": settings.get("target", settings.get("position"))
                 }
                 
                 # Add speed and acceleration if specified
@@ -681,7 +918,7 @@ class EnhancedSceneEngine:
                     self.metrics.average_setup_time_ms * 0.9 + (setup_time * 1000) * 0.1
                 )
         
-        logger.debug(f"⚡ Scene servo setup: {servo_count} servos in {setup_time*1000:.1f}ms")
+        logger.debug(f"⚠ Scene servo setup: {servo_count} servos in {setup_time*1000:.1f}ms")
         
         return success
     
@@ -766,7 +1003,7 @@ class EnhancedSceneEngine:
         """Process any queued scenes"""
         if self.scene_queue and not self.scene_playing:
             next_scene = self.scene_queue.pop(0)
-            logger.info(f"🔄 Playing queued scene: {next_scene}")
+            logger.info(f"🔾 Playing queued scene: {next_scene}")
             await self.play_scene(next_scene)
     
     # ==================== SCENE CONTROL METHODS ====================
@@ -774,10 +1011,10 @@ class EnhancedSceneEngine:
     async def stop_current_scene(self) -> bool:
         """Stop the currently playing scene"""
         if not self.scene_playing:
-            logger.info("ℹ️ No scene currently playing")
+            logger.info("⛔ No scene currently playing")
             return True
         
-        logger.info(f"🛑 Stopping current scene: {self.current_scene}")
+        logger.info(f"⏹️ Stopping current scene: {self.current_scene}")
         
         self.interrupt_requested = True
         
@@ -794,7 +1031,7 @@ class EnhancedSceneEngine:
     async def pause_current_scene(self) -> bool:
         """Pause the currently playing scene"""
         if not self.scene_playing:
-            logger.info("ℹ️ No scene currently playing")
+            logger.info("⛔ No scene currently playing")
             return False
         
         self.pause_requested = True
@@ -807,7 +1044,7 @@ class EnhancedSceneEngine:
     async def resume_current_scene(self) -> bool:
         """Resume the currently paused scene"""
         if not self.scene_playing or not self.pause_requested:
-            logger.info("ℹ️ No scene currently paused")
+            logger.info("⛔ No scene currently paused")
             return False
         
         self.pause_requested = False
@@ -824,7 +1061,7 @@ class EnhancedSceneEngine:
             return False
         
         self.scene_queue.append(scene_name)
-        logger.info(f"📝 Queued scene: {scene_name} (queue length: {len(self.scene_queue)})")
+        logger.info(f"📁 Queued scene: {scene_name} (queue length: {len(self.scene_queue)})")
         return True
     
     async def play_scene_sequence(self, scene_names: List[str], delay_between: float = 1.0) -> bool:
@@ -832,7 +1069,7 @@ class EnhancedSceneEngine:
         if not scene_names:
             return False
         
-        logger.info(f"🎬 Playing scene sequence: {', '.join(scene_names)}")
+        logger.info(f"📜 Playing scene sequence: {', '.join(scene_names)}")
         
         success = True
         for i, scene_name in enumerate(scene_names):
@@ -1237,14 +1474,14 @@ class EnhancedSceneEngine:
                     "scene_queue_length": len(self.scene_queue),
                     "interrupt_requested": self.interrupt_requested,
                     "pause_requested": self.pause_requested,
-                    "auto_idle_enabled": self.auto_idle_enabled,
-                    "last_activity_time": self.last_activity_time
+                    "idle_mode_enabled": self.idle_mode_enabled,
+                    
                 },
                 "recent_history": self.scene_history[-10:] if self.scene_history else [],
                 "features": {
                     "batch_command_optimization": True,
                     "scene_validation": True,
-                    "auto_idle_scenes": True,
+                    "frontend_controlled_idle": True,
                     "scene_queuing": True,
                     "interrupt_support": True,
                     "progress_callbacks": True,
@@ -1321,125 +1558,52 @@ class EnhancedSceneEngine:
         """Reset all performance statistics"""
         self.metrics = SceneMetrics()
         self.scene_history = []
-        logger.info("📊 Scene engine statistics reset")
+        logger.info("📂 Scene engine statistics reset")
     
     # ==================== DEFAULT SCENES ====================
     
     def _get_default_scenes(self) -> Dict[str, Any]:
-        """Get comprehensive default scene configurations optimized for batch commands"""
-        return {
-            "excited_greeting": {
-                "label": "Excited Greeting",
-                "emoji": "🤩",
-                "categories": ["Happy", "Greeting"],
-                "duration": 3.0,
-                "audio_enabled": True,
-                "audio_file": "Audio-clip-_CILW-2022_-Greetings.mp3",
-                "script_enabled": True,
-                "script_name": 1,
-                "delay": 0,
-                "servos": {
-                    "m1_ch0": {"target": 1600, "speed": 60, "acceleration": 40},
-                    "m1_ch1": {"target": 1300, "speed": 50, "acceleration": 30},
-                    "m1_ch2": {"target": 1700, "speed": 70, "acceleration": 50},
-                    "m1_ch3": {"target": 1400, "speed": 55}
-                }
-            },
-            "happy_dance": {
-                "label": "Happy Dance",
-                "emoji": "💃",
-                "categories": ["Happy", "Energetic"],
-                "duration": 4.0,
-                "audio_enabled": True,
-                "audio_file": "SPK1950 - Spark Spotify 30sec Radio Dad Rock -14LKFS Radio Mix 05-08-25.mp3",
-                "script_enabled": True,
-                "script_name": 2,
-                "delay": 200,
-                "servos": {
-                    "m1_ch0": {"target": 1800, "speed": 80, "acceleration": 60},
-                    "m1_ch1": {"target": 800, "speed": 80, "acceleration": 60},
-                    "m1_ch2": {"target": 1600, "speed": 70, "acceleration": 50},
-                    "m2_ch0": {"target": 1600, "speed": 70, "acceleration": 40},
-                    "m2_ch1": {"target": 1400, "speed": 60, "acceleration": 35}
-                }
-            },
-            "curious_tilt": {
-                "label": "Curious Head Tilt",
-                "emoji": "🤔",
-                "categories": ["Curious"],
-                "duration": 2.5,
-                "audio_enabled": False,
-                "audio_file": "",
-                "script_enabled": True,
-                "script_name": 20,
-                "delay": 0,
-                "servos": {
-                    "m1_ch0": {"target": 1300, "speed": 30},
-                    "m1_ch1": {"target": 1600, "speed": 25},
-                    "m1_ch2": {"target": 1500, "speed": 40}
-                }
-            },
-            "sad_droop": {
-                "label": "Sad Expression",
-                "emoji": "😢",
-                "categories": ["Sad"],
-                "duration": 3.5,
-                "audio_enabled": True,
-                "audio_file": "Audio-clip-_CILW-2022_-Goodbye-I_m-off-now.mp3",
-                "script_enabled": True,
-                "script_name": 10,
-                "delay": 500,
-                "servos": {
-                    "m1_ch0": {"target": 1500, "speed": 20},
-                    "m1_ch1": {"target": 1000, "speed": 15},
-                    "m1_ch2": {"target": 1400, "speed": 18},
-                    "m1_ch3": {"target": 1200, "speed": 20}
-                }
-            },
-            "idle_scan": {
-                "label": "Idle Scanning",
-                "emoji": "💀",
-                "categories": ["Idle"],
-                "duration": 4.0,
-                "audio_enabled": False,
-                "audio_file": "",
-                "script_enabled": True,
-                "script_name": 80,
-                "delay": 0,
-                "servos": {
-                    "m1_ch0": {"target": 1700, "speed": 25},
-                    "m1_ch2": {"target": 1600, "speed": 30}
-                }
-            }
-        }
+        """Return empty defaults - scenes are configured via scenes_config.json"""
+        return {}
     
     # ==================== CALLBACK MANAGEMENT ====================
     
     def set_scene_started_callback(self, callback: Callable):
         """Set callback for when scene starts"""
         self.scene_started_callback = callback
-        logger.debug("📞 Scene started callback registered")
+        logger.debug("📆 Scene started callback registered")
     
     def set_scene_completed_callback(self, callback: Callable):
         """Set callback for when scene completes"""
         self.scene_completed_callback = callback
-        logger.debug("📞 Scene completed callback registered")
+        logger.debug("📆 Scene completed callback registered")
     
     def set_scene_error_callback(self, callback: Callable):
         """Set callback for when scene encounters error"""
         self.scene_error_callback = callback
-        logger.debug("📞 Scene error callback registered")
+        logger.debug("📆 Scene error callback registered")
     
     def set_scene_progress_callback(self, callback: Callable):
         """Set callback for scene progress updates"""
         self.scene_progress_callback = callback
-        logger.debug("📞 Scene progress callback registered")
+        logger.debug("📆 Scene progress callback registered")
     
     # ==================== BOTTANGO SCENE LOADING ====================
     
     async def _load_bottango_scene(self, scene_name: str) -> dict:
         """Load full Bottango scene data from scenes/ folder"""
         scene_path = Path(f"scenes/{scene_name}.json")
+        
+        # Try exact match first
+        if not scene_path.exists():
+            # Try case-insensitive search
+            scenes_dir = Path("scenes")
+            if scenes_dir.exists():
+                for file in scenes_dir.glob("*.json"):
+                    if file.stem.lower() == scene_name.lower():
+                        scene_path = file
+                        logger.debug(f"📁 Found scene file via case-insensitive match: {scene_path}")
+                        break
         
         if not scene_path.exists():
             logger.error(f"❌ Bottango scene file not found: {scene_path}")
@@ -1503,7 +1667,7 @@ async def demo_enhanced_scene_engine():
     
     # Show categories
     categories = engine.get_available_categories()
-    print(f"\n📂 Categories: {', '.join(categories)}")
+    print(f"\n📚 Categories: {', '.join(categories)}")
     
     # Performance preview
     if scenes:
@@ -1515,7 +1679,7 @@ async def demo_enhanced_scene_engine():
     
     # Show engine stats
     stats = engine.get_engine_stats()
-    print(f"\n📊 Engine Statistics:")
+    print(f"\n📂 Engine Statistics:")
     print(f"  • Total scenes: {stats['scene_library']['total_scenes']}")
     print(f"  • Categories: {len(stats['scene_library']['categories'])}")
     print(f"  • Batch optimization: {stats['features']['batch_command_optimization']}")
