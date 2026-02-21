@@ -131,6 +131,9 @@ class SceneTimelinePlayer:
         self.playing = False
         self.completed = False
 
+        # Cached step index — advances forward so tick() is O(1) amortised
+        self._current_step_idx: int = 0
+
         # Set the layer's channel mask from locked_channels
         self.layer.channel_mask = set(self.locked_channels)
 
@@ -147,6 +150,7 @@ class SceneTimelinePlayer:
         self.start_time = time.monotonic()
         self.playing = True
         self.completed = False
+        self._current_step_idx = 0
         self.layer.fade_in(self.crossfade_in)
         logger.debug(f"Timeline started: {len(self.steps)} steps, {self.duration:.2f}s")
 
@@ -176,21 +180,14 @@ class SceneTimelinePlayer:
                 self.on_completed()
             return False
 
-        # Find bracketing steps and interpolate
-        prev_step = None
-        next_step = None
+        # Advance cached index forward — O(1) amortised over the scene lifetime
+        i = self._current_step_idx
+        while i < len(self.steps) - 1 and self.steps[i + 1].get('time', 0.0) <= elapsed:
+            i += 1
+        self._current_step_idx = i
 
-        for i, step in enumerate(self.steps):
-            step_time = step.get('time', 0.0)
-            if step_time <= elapsed:
-                prev_step = step
-            else:
-                next_step = step
-                break
-
-        if prev_step is None:
-            logger.warning(f"No prev_step found at elapsed={elapsed:.3f}s")
-            return True
+        prev_step = self.steps[i]
+        next_step = self.steps[i + 1] if i + 1 < len(self.steps) else None
 
         # If no next step, hold the last position
         if next_step is None:
@@ -250,30 +247,185 @@ class SceneTimelinePlayer:
                 self.layer.set_channel(channel_id, float(next_pos))
 
 
+
+
+# ============================================================================
+# Scene Curve Player (v2)
+# ============================================================================
+class SceneCurvePlayer:
+    """Plays back a v2 curve-based scene (tracks + segments), evaluating curves at runtime.
+
+    Phase 2.5: supports per-segment LUT acceleration (if present) for ultra-smooth, low-CPU playback.
+    """
+
+    def __init__(self, scene_data: Dict[str, Any], layer: MotionLayer,
+                 crossfade_in: float = 0.3, crossfade_out: float = 0.5):
+        self.duration = float(scene_data.get('duration', 0.0))
+        self.locked_channels = scene_data.get('locked_channels', [])
+        self.tracks = scene_data.get('tracks', {})  # channel_id -> {interp, segments}
+        self.layer = layer
+        self.crossfade_in = crossfade_in
+        self.crossfade_out = crossfade_out
+        self.start_time: Optional[float] = None
+        self.playing = False
+        self.completed = False
+
+        # Compatibility for any caller that logs len(player.steps)
+        self.steps: list = []
+
+        self.layer.channel_mask = set(self.locked_channels)
+
+        self._seg_lists: Dict[str, List[Dict[str, Any]]] = {}
+        self._seg_idx: Dict[str, int] = {}
+        self._last_value: Dict[str, float] = {}
+
+        for ch in self.locked_channels:
+            track = self.tracks.get(ch)
+            if not isinstance(track, dict):
+                continue
+            segs = list(track.get('segments', []))
+            segs.sort(key=lambda s: float(s.get('t0', 0.0)))
+            if not segs:
+                continue
+            self._seg_lists[ch] = segs
+            self._seg_idx[ch] = 0
+            self._last_value[ch] = float(segs[0].get('p0', 1500))
+
+        self.on_completed: Optional[Callable] = None
+
+    def start(self):
+        if self.duration <= 0 or not self._seg_lists:
+            logger.warning('Scene has no curve tracks to play (missing/empty tracks in v2 scene JSON)')
+            self.completed = True
+            return
+        self.start_time = time.monotonic()
+        self.playing = True
+        self.completed = False
+        self.layer.fade_in(self.crossfade_in)
+
+    def stop(self):
+        if self.playing:
+            self.playing = False
+            self.layer.fade_out(self.crossfade_out)
+            self.layer.auto_remove = True
+
+    @staticmethod
+    def _eval_lut(lut: List[int], u: float) -> float:
+        n = len(lut)
+        if n == 0:
+            return 0.0
+        x = max(0.0, min(1.0, u)) * (n - 1)
+        i0 = int(x)
+        i1 = min(n - 1, i0 + 1)
+        frac = x - i0
+        return float(lut[i0] + (lut[i1] - lut[i0]) * frac)
+
+    @staticmethod
+    def _eval_bezier(p0: float, p1: float, p2: float, p3: float, u: float) -> float:
+        one = 1.0 - u
+        return (one**3)*p0 + 3*(one**2)*u*p1 + 3*one*(u**2)*p2 + (u**3)*p3
+
+    def _value_for_channel(self, ch: str, t: float) -> Optional[float]:
+        segs = self._seg_lists.get(ch)
+        if not segs:
+            return None
+
+        i = self._seg_idx.get(ch, 0)
+        while i < len(segs) - 1:
+            s = segs[i]
+            t0 = float(s.get('t0', 0.0))
+            dt = float(s.get('dt', 0.0))
+            if t < (t0 + dt):
+                break
+            i += 1
+        self._seg_idx[ch] = i
+        s = segs[i]
+        t0 = float(s.get('t0', 0.0))
+        dt = float(s.get('dt', 0.0))
+
+        if dt <= 0:
+            v = float(s.get('p3', s.get('p0', 1500)))
+            self._last_value[ch] = v
+            return v
+
+        if t <= t0:
+            v = float(s.get('p0', self._last_value.get(ch, 1500)))
+            self._last_value[ch] = v
+            return v
+
+        if t >= t0 + dt:
+            v = float(s.get('p3', self._last_value.get(ch, 1500)))
+            self._last_value[ch] = v
+            return v
+
+        u = (t - t0) / dt
+        lut = s.get('lut')
+        if isinstance(lut, list) and lut:
+            v = self._eval_lut(lut, u)
+        else:
+            p0 = float(s.get('p0', 1500))
+            p1 = float(s.get('p1', p0))
+            p2 = float(s.get('p2', p0))
+            p3 = float(s.get('p3', p0))
+            v = self._eval_bezier(p0, p1, p2, p3, u)
+
+        self._last_value[ch] = v
+        return v
+
+    def tick(self) -> bool:
+        if not self.playing or self.start_time is None:
+            return False
+
+        elapsed = time.monotonic() - self.start_time
+        if elapsed >= self.duration:
+            self.stop()
+            self.completed = True
+            if self.on_completed:
+                self.on_completed()
+            return False
+
+        for ch in self.locked_channels:
+            v = self._value_for_channel(ch, elapsed)
+            if v is not None:
+                self.layer.set_channel(ch, float(v))
+        return True
 # ============================================================================
 # Constraint Pipeline
 # ============================================================================
 
 class ConstraintPipeline:
-    """
+    """ 
     Enforces position limits, velocity limits, acceleration limits,
     and deadband filtering on every output command.
+
+    Also supports optional error-diffusion quantization (dither) to reduce
+    visible stair-stepping during very slow scene motion.
     """
 
     def __init__(self):
         self.constraints: Dict[str, ChannelConstraints] = {}
         self.states: Dict[str, ChannelState] = {}
         self.emergency_stop = False
+
         # Channels currently driven by a scene (used to disable deadband)
         self.scene_channels: Set[str] = set()
+
         # Channels where joystick overlay smoothing should be applied during scenes
         self.overlay_channels: Set[str] = set()
+
+        # --- Quantization error diffusion (dither) ---
+        # Operates at 0.25µs resolution (Maestro native step size).
+        # Enabled only for scene-driven channels to preserve sub-step motion in slow scenes.
+        self.enable_dither: bool = True
+        self._dither_only_for_scene: bool = True
+        self._quant_residual: Dict[str, float] = {}
 
     def set_scene_channels(self, channels: Set[str]):
         """Update the set of channels currently driven by scene playback.
 
-        Scene playback often updates targets in small increments (especially at 100Hz).
-        Disabling deadband for these channels prevents staircase motion.
+        Scene playback often updates targets in small increments.
+        Disabling deadband for these channels prevents staircase motion caused
+        by deadband suppression.
         """
         self.scene_channels = set(channels)
 
@@ -284,7 +436,6 @@ class ConstraintPipeline:
         """
         self.overlay_channels = set(channels)
 
-
     def load_constraints(self, servo_config: Dict[str, Any]):
         """Load per-channel constraints from servo_config.json data"""
         for channel_id, cfg in servo_config.items():
@@ -292,7 +443,6 @@ class ConstraintPipeline:
                 continue
             if not isinstance(cfg, dict):
                 continue
-
             self.constraints[channel_id] = ChannelConstraints(
                 min_position=cfg.get('min', 992),
                 max_position=cfg.get('max', 2000),
@@ -301,7 +451,6 @@ class ConstraintPipeline:
                 max_acceleration=cfg.get('max_acceleration', 50000.0),
                 deadband=cfg.get('deadband', 2),
             )
-
         logger.info(f"Loaded constraints for {len(self.constraints)} channels")
 
     def get_home_position(self, channel_id: str) -> float:
@@ -313,14 +462,42 @@ class ConstraintPipeline:
         """Get constraints for a channel, with defaults if not configured"""
         return self.constraints.get(channel_id, ChannelConstraints())
 
-    def process(self, channel_id: str, raw_target: float, dt: float) -> Optional[int]:
-        """Apply constraints to a blended target.
+    def _quantize(self, channel_id: str, value: float, use_dither: bool) -> float:
+        """Apply optional error-diffusion to a float µs target.
+
+        Returns a float value rounded to the nearest 0.25µs step (the Maestro's
+        native resolution). When use_dither is True, sub-step residuals are
+        accumulated across ticks so slow scene motion never flatlines between steps.
+        """
+        # Maestro quarter-µs resolution: round to nearest 0.25
+        STEP = 0.25
+        if not use_dither:
+            return round(value / STEP) * STEP
+
+        r = float(self._quant_residual.get(channel_id, 0.0))
+        v = float(value) + r
+        out = round(v / STEP) * STEP
+
+        # Update residual (bounded to ±1µs to prevent wind-up)
+        self._quant_residual[channel_id] = float(value) - out + r
+        if self._quant_residual[channel_id] > 1.0:
+            self._quant_residual[channel_id] -= 1.0
+        elif self._quant_residual[channel_id] < -1.0:
+            self._quant_residual[channel_id] += 1.0
+
+        return out
+
+    def process(self, channel_id: str, raw_target: float, dt: float) -> Optional[float]:
+        """Apply constraints to a blended target. Returns a float in µs (0.25µs resolution)
+        or None if the target is within deadband and should not be sent.
 
         Baseline: clamp + deadband.
 
-        If channel_id is in overlay_channels, apply software velocity/acceleration limiting
-        using max_velocity/max_acceleration from servo_config.json. This smooths joystick
-        overlay (including snap-to-center) while a scene is driving the same channel.
+        If channel_id is in overlay_channels, apply software velocity/acceleration
+        limiting using max_velocity/max_acceleration from servo_config.json.
+
+        Dither: error diffusion quantization at 0.25µs resolution to eliminate
+        staircase motion during slow scene playback.
         """
         if self.emergency_stop:
             return None
@@ -333,23 +510,30 @@ class ConstraintPipeline:
                 last_output=float(constraints.home_position),
                 last_velocity=0.0,
                 last_update_time=time.monotonic(),
-                initialized=False
+                initialized=False,
             )
         state = self.states[channel_id]
 
         # Clamp target
         target = self._clamp(raw_target, constraints.min_position, constraints.max_position)
 
+        # Decide whether to dither this channel
+        use_dither = bool(getattr(self, 'enable_dither', False)) and (
+            (not bool(getattr(self, '_dither_only_for_scene', True))) or (channel_id in self.scene_channels)
+        )
+
         # First command: always send
         if not state.initialized:
-            state.last_output = target
+            out = self._quantize(channel_id, target, use_dither)
+            state.last_output = float(out)
             state.last_velocity = 0.0
             state.last_update_time = time.monotonic()
             state.initialized = True
-            return int(round(target))
+            return out
 
         dt_safe = max(dt, 1e-6)
 
+        # Overlay smoothing path (vel/accel limiting)
         if channel_id in getattr(self, 'overlay_channels', set()):
             desired_v = (target - state.last_output) / dt_safe
 
@@ -373,28 +557,33 @@ class ConstraintPipeline:
             if abs(smoothed - state.last_output) < effective_deadband:
                 return None
 
-            state.last_velocity = (smoothed - state.last_output) / dt_safe
-            state.last_output = smoothed
+            out = self._quantize(channel_id, smoothed, use_dither)
+            state.last_velocity = (float(out) - state.last_output) / dt_safe
+            state.last_output = float(out)
             state.last_update_time = time.monotonic()
-            return int(round(smoothed))
+            return out
 
         # Baseline path
         effective_deadband = 0 if channel_id in self.scene_channels else constraints.deadband
         if abs(target - state.last_output) < effective_deadband:
             return None
 
-        state.last_output = target
+        out = self._quantize(channel_id, target, use_dither)
+        state.last_output = float(out)
         state.last_update_time = time.monotonic()
-        return int(round(target))
+        return out
 
     def reset_channel(self, channel_id: str):
         """Reset a channel's tracking state"""
         if channel_id in self.states:
             del self.states[channel_id]
+        if channel_id in self._quant_residual:
+            del self._quant_residual[channel_id]
 
     def reset_all(self):
         """Reset all channel states"""
         self.states.clear()
+        self._quant_residual.clear()
 
     @staticmethod
     def _clamp(value: float, min_val: float, max_val: float) -> float:
@@ -410,8 +599,8 @@ class CommandDispatcher:
     Batches and sends servo commands to hardware at a fixed tick rate.
     Collects per-Maestro command groups and sends efficiently.
     
-    For scene-animated channels: sends speed=0, acceleration=0 so the Maestro
-    jumps instantly to each target (the mixer's 50Hz stream IS the smooth curve).
+    For scene-animated channels: uses servo_config speed as a cap but keeps acceleration unlimited (0)
+    so motion stays smooth without per-step accel/decel shaping.
     For joystick channels: sends the speed/accel from servo_config.json so the
     Maestro provides hardware-level smoothing between input updates.
     
@@ -422,9 +611,12 @@ class CommandDispatcher:
     def __init__(self, hardware_service=None, servo_config: Optional[Dict] = None):
         self.hardware_service = hardware_service
         self.servo_config = servo_config or {}
-        self.pending_commands: Dict[str, int] = {}  # channel -> position
+        self.pending_commands: Dict[str, float] = {}  # channel -> position (µs, 0.25µs resolution)
         self.scene_channels: Set[str] = set()       # channels currently driven by scenes
         self._prev_scene_channels: Set[str] = set() # last tick's scene channels (for restoration)
+        # Tracks channels that have already had scene-mode speed/accel sent to the Maestro.
+        # Cleared when channels leave the scene set so settings are re-applied if they re-enter.
+        self._scene_settings_applied: Set[str] = set()
         self.stats = {
             "ticks": 0,
             "commands_sent": 0,
@@ -433,13 +625,32 @@ class CommandDispatcher:
 
     def set_scene_channels(self, channels: Set[str]):
         """Update which channels are currently driven by scene animation.
-        When channels leave the scene set, queue speed/accel restoration."""
+        Tracks channel entry/exit for scene mode; restores configured
+        speed/accel when channels leave scene control."""
         channels = set(channels)
         released = self.scene_channels - channels
+        entered = channels - self.scene_channels
+
         if released:
+            # Clear applied-settings tracking so they're re-sent if channels re-enter
+            self._scene_settings_applied -= released
             asyncio.ensure_future(self._restore_channel_settings(released))
+
+        if entered:
+            # Track channels entering scene mode (no Maestro commands needed)
+            asyncio.ensure_future(self._apply_scene_channel_settings(entered))
+
         self._prev_scene_channels = self.scene_channels.copy()
         self.scene_channels = channels
+
+    async def _apply_scene_channel_settings(self, channels: Set[str]):
+        """Track channels entering scene control. No Maestro speed/accel commands are sent
+        here — the Maestro flash settings (same as joystick channels) handle smoothing.
+        Sending accel=0 disables the flash acceleration ramp and causes micro-stuttering
+        from asyncio.sleep timing jitter between position updates."""
+        self._scene_settings_applied.update(channels)
+        if channels:
+            logger.debug(f"Scene-mode tracking started for {len(channels)} channel(s) (using flash speed/accel)")
 
     async def _restore_channel_settings(self, channels: Set[str]):
         """Restore Maestro speed/acceleration for channels released from scene control.
@@ -496,7 +707,7 @@ class CommandDispatcher:
             total = len(restore_cmds_m1) + len(restore_cmds_m2)
             logger.info(f"Restored Maestro speed/accel for {total} channel(s) after scene")
 
-    async def dispatch(self, channel_id: str, position: int):
+    async def dispatch(self, channel_id: str, position: float):
         """Queue a command for the next batch send"""
         self.pending_commands[channel_id] = position
 
@@ -517,17 +728,18 @@ class CommandDispatcher:
 
                 cmd = {"channel": channel, "target": position}
 
+                cfg = self.servo_config.get(channel_id, {})
+
                 if channel_id in self.scene_channels:
-                    # Scene channels: speed=0/accel=0 so the 50Hz stream is the motion curve
-                    cmd["speed"] = 0
-                    cmd["acceleration"] = 0
+                    # Scene channels: speed/accel already sent once via _apply_scene_channel_settings.
+                    # Only send the target position each tick to avoid serial overhead.
+                    pass
                 else:
                     # Joystick channels: use configured speed/accel for hardware smoothing
-                    cfg = self.servo_config.get(channel_id, {})
-                    if "speed" in cfg:
-                        cmd["speed"] = cfg["speed"]
-                    if "accel" in cfg:
-                        cmd["acceleration"] = cfg["accel"]
+                    if 'speed' in cfg:
+                        cmd['speed'] = cfg['speed']
+                    if 'accel' in cfg:
+                        cmd['acceleration'] = cfg['accel']
 
                 if maestro_num == 1:
                     maestro1_cmds.append(cmd)
@@ -747,14 +959,32 @@ class MotionMixer:
             blend_mode=blend_mode,
             auto_remove=True,
         )
+        # Create the timeline/curve player
+        has_v2_tracks = False
+        try:
+            tracks = scene_data.get('tracks') or {}
+            if isinstance(tracks, dict):
+                for _ch, t in tracks.items():
+                    if isinstance(t, dict) and t.get('segments') and len(t.get('segments', [])) > 0:
+                        has_v2_tracks = True
+                        break
+        except Exception:
+            has_v2_tracks = False
 
-        # Create the timeline player
-        player = SceneTimelinePlayer(
-            scene_data=scene_data,
-            layer=layer,
-            crossfade_in=crossfade_in,
-            crossfade_out=crossfade_out,
-        )
+        if has_v2_tracks:
+            player = SceneCurvePlayer(
+                scene_data=scene_data,
+                layer=layer,
+                crossfade_in=crossfade_in,
+                crossfade_out=crossfade_out,
+            )
+        else:
+            player = SceneTimelinePlayer(
+                scene_data=scene_data,
+                layer=layer,
+                crossfade_in=crossfade_in,
+                crossfade_out=crossfade_out,
+            )
 
         def on_scene_completed():
             logger.info(f"Scene completed: {scene_name}")
@@ -767,9 +997,20 @@ class MotionMixer:
         self.timeline_players[layer_name] = player
         player.start()
 
-        logger.info(f"Scene started: {scene_name} ({len(player.steps)} steps, "
-                     f"{player.duration:.2f}s, {blend_mode.value} blend, "
-                     f"fade in={crossfade_in:.2f}s, out={crossfade_out:.2f}s)")
+        if getattr(player, 'completed', False) and not getattr(player, 'playing', False):
+            logger.error(f"Scene '{scene_name}' could not start (no v2 tracks/segments and no steps)")
+            return False
+
+        # Build readable detail string (segments vs steps)
+        try:
+            if hasattr(player, '_seg_lists') and isinstance(getattr(player, '_seg_lists', None), dict):
+                detail = f"{sum(len(v) for v in player._seg_lists.values())} segments"
+            else:
+                detail = f"{len(getattr(player, 'steps', []))} steps"
+        except Exception:
+            detail = 'scene'
+
+        logger.info(f"Scene started: {scene_name} ({detail}, {player.duration:.2f}s, {blend_mode.value} blend, fade in={crossfade_in:.2f}s, out={crossfade_out:.2f}s)")
         return True
 
     async def stop_scene(self, scene_name: str, crossfade_out: float = 0.5):
@@ -885,60 +1126,29 @@ class MotionMixer:
         self.dispatcher.set_scene_channels(scene_channels)
         # Keep constraint pipeline aware of scene-driven channels (for deadband handling)
         self.constraints.set_scene_channels(scene_channels)
-        # Determine overlay channels.
-        # We enable overlay smoothing when either:
-        #  1) joystick is away from home (user actively offsetting), OR
-        #  2) the constrained output hasn't yet converged to the current blended target (prevents snap when stick is released).
+        # Determine overlay channels (scene-driven + joystick recently moved away from home).
         overlay_channels: Set[str] = set()
         try:
             now = time.monotonic()
-
-            # Drop state for channels no longer scene-driven
             for ch in list(self._overlay_last_active.keys()):
                 if ch not in scene_channels:
                     self._overlay_last_active.pop(ch, None)
 
             for ch in scene_channels:
                 home = float(self.constraints.get_home_position(ch))
-
-                # Current joystick value for this channel (if any)
                 joy_val = None
                 if self.joystick_layer is not None:
                     joy_val = self.joystick_layer.channel_values.get(ch)
                 if joy_val is not None:
                     joy_val = float(joy_val)
-
-                # Blended target for this channel this tick
-                tgt = blended.get(ch)
-                if tgt is not None:
-                    tgt = float(tgt)
-
-                # Current constrained output (where we actually are)
-                st = self.constraints.states.get(ch)
-                last_out = float(st.last_output) if (st and st.initialized) else home
-
-                # Thresholds
-                db = float(self.constraints.get_constraints(ch).deadband)
-                joy_thresh = max(2.0, db)
-                # Convergence threshold: once we're within this many microseconds of target, we can stop smoothing
-                conv_thresh = max(10.0, db * 3.0)
-
-                # Update last_active if joystick is away from home
-                if joy_val is not None and abs(joy_val - home) > joy_thresh:
-                    self._overlay_last_active[ch] = now
-
+                    db = float(self.constraints.get_constraints(ch).deadband)
+                    if abs(joy_val - home) > max(2.0, db):
+                        self._overlay_last_active[ch] = now
                 last = self._overlay_last_active.get(ch)
-                recently_active = last is not None and (now - last) <= self._overlay_hold_seconds
-
-                # If we haven't converged to target yet, keep overlay smoothing active even after release
-                not_converged = (tgt is not None) and (abs(tgt - last_out) > conv_thresh)
-
-                if recently_active or not_converged:
+                if last is not None and (now - last) <= self._overlay_hold_seconds:
                     overlay_channels.add(ch)
-
         except Exception as e:
             logger.debug(f"Overlay detection error: {e}")
-
         self.constraints.set_overlay_channels(overlay_channels)
 
 

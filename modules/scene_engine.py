@@ -472,9 +472,23 @@ class EnhancedSceneEngine:
                 scene.update({
                     "steps": full_scene_data.get("steps", []),
                     "locked_channels": full_scene_data.get("locked_channels", []),
+                    # v2 curve scenes
+                    "version": full_scene_data.get("version", 1),
+                    "tracks": full_scene_data.get("tracks", {}),
                     "duration": bottango_duration
                 })
-                logger.info(f"Loaded Bottango scene: {bottango_name} ({len(scene.get('steps', []))} steps)")
+                seg_count = 0
+                try:
+                    tracks = scene.get('tracks') or {}
+                    for _ch, t in tracks.items():
+                        if isinstance(t, dict):
+                            seg_count += len(t.get('segments', []))
+                except Exception:
+                    seg_count = 0
+                if seg_count > 0:
+                    logger.info(f"Loaded Bottango scene: {bottango_name} ({seg_count} segments)")
+                else:
+                    logger.info(f"Loaded Bottango scene: {bottango_name} ({len(scene.get('steps', []))} steps)")
             else:
                 logger.warning(f"Failed to load Bottango scene: {bottango_name}")
         
@@ -486,13 +500,25 @@ class EnhancedSceneEngine:
         
         # Determine if this scene should use the motion mixer
         has_steps = bool(scene.get('steps'))
-        use_mixer = has_steps and self.motion_mixer is not None
+        # v2 curve scenes: presence of tracks/segments should trigger mixer path
+        has_tracks = False
+        try:
+            tracks = scene.get('tracks') or {}
+            if isinstance(tracks, dict):
+                for _ch, t in tracks.items():
+                    if isinstance(t, dict) and t.get('segments'):
+                        if len(t.get('segments', [])) > 0:
+                            has_tracks = True
+                            break
+        except Exception:
+            has_tracks = False
+        use_mixer = (has_tracks or has_steps) and self.motion_mixer is not None
         
-        # Lock channels only for legacy (non-mixer) playback
+        # Lock channels for scene animation (both mixer and legacy paths)
         locked_channels = scene.get('locked_channels', [])
-        if locked_channels and not use_mixer:
+        if locked_channels:
             await self.lock_channels(locked_channels)
-            logger.info(f"Locked {len(locked_channels)} channel(s) for legacy scene animation")
+            logger.info(f"Locked {len(locked_channels)} channel(s) for scene animation")
         
         try:
             mode_tag = ' [mixer]' if use_mixer else ' [legacy]'
@@ -562,8 +588,8 @@ class EnhancedSceneEngine:
                     logger.error(f"Scene error callback error: {cb_err}")
             return False
         finally:
-            # Unlock channels after scene completes (legacy only)
-            if locked_channels and not use_mixer:
+            # Unlock channels after scene completes
+            if locked_channels:
                 await self.unlock_channels(locked_channels)
                 logger.info(f"Unlocked {len(locked_channels)} channel(s)")
             

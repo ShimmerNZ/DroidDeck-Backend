@@ -29,7 +29,7 @@ class CommandPriority(Enum):
 class BatchServoTarget:
     """Individual servo target within a batch command"""
     channel: int
-    target: int
+    target: float  # microseconds (0.25µs resolution float; converted to quarter-µs ints at serial boundary)
     speed: Optional[int] = None
     acceleration: Optional[int] = None
 
@@ -69,7 +69,7 @@ class BatchCommandBuilder:
         self.priority = CommandPriority.NORMAL
         self.callback = None
         
-    def add_target(self, channel: int, target: int, speed: Optional[int] = None, 
+    def add_target(self, channel: int, target: float, speed: Optional[int] = None, 
                  acceleration: Optional[int] = None) -> 'BatchCommandBuilder':
         """Add a servo target to the batch"""
         self.targets.append(BatchServoTarget(
@@ -153,7 +153,7 @@ class EnhancedSharedSerialPortManager:
             "average_batch_size": 0.0
         }
         
-        logger.info(f"🔧 Created enhanced shared serial port manager for {port} @ {baud_rate}")
+        logger.info(f"ðŸ”§ Created enhanced shared serial port manager for {port} @ {baud_rate}")
     
     def create_batch_builder(self, device_id: str, device_number: int) -> BatchCommandBuilder:
         """Create a new batch command builder"""
@@ -167,7 +167,7 @@ class EnhancedSharedSerialPortManager:
     def start(self) -> bool:
         """Start the shared serial manager"""
         try:
-            logger.info(f"🚀 Starting enhanced shared serial manager for {self.port}")
+            logger.info(f"ðŸš€ Starting enhanced shared serial manager for {self.port}")
             
             # Connect to serial port
             with self.connection_lock:
@@ -178,7 +178,7 @@ class EnhancedSharedSerialPortManager:
                     write_timeout=1.0
                 )
                 self.connected = True
-                logger.info(f"✅ Serial connection established: {self.port}")
+                logger.info(f"âœ… Serial connection established: {self.port}")
             
             # Start worker thread
             self.running = True
@@ -186,17 +186,17 @@ class EnhancedSharedSerialPortManager:
             self.worker_thread.start()
             
             self.stats["connection_attempts"] += 1
-            logger.info("✅ Enhanced shared serial manager started successfully")
+            logger.info("âœ… Enhanced shared serial manager started successfully")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to start shared serial manager: {e}")
+            logger.error(f"âŒ Failed to start shared serial manager: {e}")
             self.stats["last_error"] = str(e)
             return False
     
     def stop(self):
         """Stop the shared serial manager"""
-        logger.info("🛑 Stopping enhanced shared serial manager")
+        logger.info("ðŸ›‘ Stopping enhanced shared serial manager")
         
         self.running = False
         if self.worker_thread and self.worker_thread.is_alive():
@@ -205,7 +205,7 @@ class EnhancedSharedSerialPortManager:
         with self.connection_lock:
             if self.serial_conn and self.serial_conn.is_open:
                 self.serial_conn.close()
-                logger.info("✅ Serial connection closed")
+                logger.info("âœ… Serial connection closed")
             self.connected = False
     
     def register_device(self, device_id: str, device_number: int, device_ref) -> bool:
@@ -222,7 +222,7 @@ class EnhancedSharedSerialPortManager:
         self.registered_devices[device_id] = weakref.ref(device_ref)
         self.device_numbers[device_number] = device_id
         
-        logger.info(f"📝 Registered device: {device_id} (#{device_number})")
+        logger.info(f"ðŸ“ Registered device: {device_id} (#{device_number})")
         return True
     
     def send_command(self, command: SharedSerialCommand) -> bool:
@@ -240,7 +240,7 @@ class EnhancedSharedSerialPortManager:
     
     def _worker_loop(self):
         """Main worker loop for processing commands"""
-        logger.info("🔄 Enhanced shared serial worker loop started")
+        logger.info("ðŸ”„ Enhanced shared serial worker loop started")
         
         while self.running:
             try:
@@ -259,7 +259,7 @@ class EnhancedSharedSerialPortManager:
                 logger.error(f"Worker loop error: {e}")
                 self.stats["commands_failed"] += 1
         
-        logger.info("🛑 Enhanced shared serial worker loop stopped")
+        logger.info("ðŸ›‘ Enhanced shared serial worker loop stopped")
     
     def _execute_command(self, command: SharedSerialCommand):
         """Execute a single command"""
@@ -324,7 +324,8 @@ class EnhancedSharedSerialPortManager:
                     # Only the first channel number appears; subsequent channels are implied.
                     cmd_bytes = [0xAA, device_num, 0x1F, len(targets), first_ch]
                     for target in targets:
-                        target_quarter_us = target.target * 4
+                        # Convert float µs to integer quarter-µs (Maestro native resolution)
+                        target_quarter_us = int(round(target.target * 4))
                         cmd_bytes.append(target_quarter_us & 0x7F)
                         cmd_bytes.append((target_quarter_us >> 7) & 0x7F)
                     self.serial_conn.write(bytes(cmd_bytes))
@@ -332,7 +333,8 @@ class EnhancedSharedSerialPortManager:
                 else:
                     # Non-contiguous channels: send individual Set Target commands
                     for target in targets:
-                        target_quarter_us = target.target * 4
+                        # Convert float µs to integer quarter-µs (Maestro native resolution)
+                        target_quarter_us = int(round(target.target * 4))
                         cmd_bytes = bytes([
                             0xAA, device_num, 0x04, target.channel,
                             target_quarter_us & 0x7F,
@@ -348,7 +350,8 @@ class EnhancedSharedSerialPortManager:
                 channel = data["channel"]
                 target = data["target"]
                 
-                target_quarter_us = target * 4
+                # Convert float µs to integer quarter-µs (Maestro native resolution)
+                target_quarter_us = int(round(target * 4))
                 cmd_bytes = bytes([
                     0xAA, device_num, 0x04, channel,
                     target_quarter_us & 0x7F,
@@ -423,7 +426,7 @@ class EnhancedSharedSerialPortManager:
                 subroutine = data.get("subroutine", 0)
                 cmd_bytes = bytes([0xAA, device_num, 0xA7, subroutine & 0x7F, (subroutine >> 7) & 0x7F])
                 self.serial_conn.write(cmd_bytes)
-                logger.debug(f"🎬 Started script #{subroutine} on device #{device_num}")
+                logger.debug(f"ðŸŽ¬ Started script #{subroutine} on device #{device_num}")
                 return True
                     
             else:
@@ -492,20 +495,20 @@ class EnhancedMaestroControllerShared:
         
         # Register with shared manager
         if self.shared_manager.register_device(device_id, device_number, self):
-            logger.info(f"🎛️ Created enhanced Maestro controller: {device_id} (device #{device_number})")
+            logger.info(f"ðŸŽ›ï¸ Created enhanced Maestro controller: {device_id} (device #{device_number})")
         else:
-            logger.error(f"❌ Failed to register {device_id} with shared manager")
+            logger.error(f"âŒ Failed to register {device_id} with shared manager")
     
     def start(self) -> bool:
         """Start the controller"""
         self.connected = True
-        logger.info(f"✅ Started enhanced Maestro controller: {self.device_id}")
+        logger.info(f"âœ… Started enhanced Maestro controller: {self.device_id}")
         return True
     
     def stop(self):
         """Stop the controller"""
         self.connected = False
-        logger.info(f"🛑 Stopped enhanced Maestro controller: {self.device_id}")
+        logger.info(f"ðŸ›‘ Stopped enhanced Maestro controller: {self.device_id}")
     
     def set_multiple_targets(self, targets: List[Tuple[int, int]], 
                            priority: CommandPriority = CommandPriority.NORMAL,
@@ -605,7 +608,7 @@ class EnhancedMaestroControllerShared:
                                     
                                     test_response = self.shared_manager.serial_conn.read(2)
                                     if len(test_response) == 2:
-                                        print(f"  ✅ Channel {test_channel} responded - detected {test_channel + 1} channels")
+                                        print(f"  âœ… Channel {test_channel} responded - detected {test_channel + 1} channels")
                                         if test_channel >= 23:
                                             detected_channels = 24
                                         elif test_channel >= 17:
@@ -821,12 +824,12 @@ def get_shared_manager(port: str, baud_rate: int = 9600) -> EnhancedSharedSerial
     
     with _manager_lock:
         if manager_key not in _global_managers:
-            logger.info(f"🎭 Creating new shared manager for {port} @ {baud_rate}")
+            logger.info(f"ðŸŽ­ Creating new shared manager for {port} @ {baud_rate}")
             manager = EnhancedSharedSerialPortManager(port, baud_rate)
             manager.start()
             _global_managers[manager_key] = manager
         else:
-            logger.debug(f"♻️ Reusing existing shared manager for {port}")
+            logger.debug(f"â™»ï¸ Reusing existing shared manager for {port}")
         
         return _global_managers[manager_key]
 
@@ -837,18 +840,18 @@ def cleanup_shared_managers():
     global _global_managers
     
     with _manager_lock:
-        logger.info(f"🧹 Cleaning up {len(_global_managers)} shared managers")
+        logger.info(f"ðŸ§¹ Cleaning up {len(_global_managers)} shared managers")
         
         for manager_key, manager in _global_managers.items():
             try:
                 port, baud_rate = manager_key
-                logger.info(f"🛑 Stopping manager for {port}")
+                logger.info(f"ðŸ›‘ Stopping manager for {port}")
                 manager.stop()
             except Exception as e:
                 logger.error(f"Error stopping manager {manager_key}: {e}")
         
         _global_managers.clear()
-        logger.info("✅ All shared managers cleaned up")
+        logger.info("âœ… All shared managers cleaned up")
 
 # Example usage functions
 def demo_batch_commands():
@@ -862,7 +865,7 @@ def demo_batch_commands():
     maestro2 = EnhancedMaestroControllerShared("maestro2", 13, manager)
     
     # Example 1: Simple batch movement
-    print("🎯 Example 1: Simple batch movement")
+    print("ðŸŽ¯ Example 1: Simple batch movement")
     maestro1.set_multiple_targets([
         (0, 1500),  # Head pan center
         (1, 1200),  # Head tilt up
@@ -871,7 +874,7 @@ def demo_batch_commands():
     ], priority=CommandPriority.NORMAL)
     
     # Example 2: Complex batch with individual settings
-    print("🎯 Example 2: Complex batch with settings")
+    print("ðŸŽ¯ Example 2: Complex batch with settings")
     maestro1.set_multiple_targets_with_settings([
         {"channel": 0, "target": 1600, "speed": 50, "acceleration": 30},
         {"channel": 1, "target": 1300, "speed": 20},
@@ -880,17 +883,17 @@ def demo_batch_commands():
     ])
     
     # Example 3: Using the builder pattern directly
-    print("🎯 Example 3: Builder pattern")
+    print("ðŸŽ¯ Example 3: Builder pattern")
     builder = manager.create_batch_builder("maestro1", 12)
     builder.add_target(0, 1500, speed=60) \
            .add_target(1, 1400, acceleration=25) \
            .add_target(2, 1600) \
            .set_priority(CommandPriority.REALTIME) \
-           .set_callback(lambda: print("✅ Batch movement completed!"))
+           .set_callback(lambda: print("âœ… Batch movement completed!"))
     
     manager.send_batch_command(builder)
     
-    print("📊 Performance comparison:")
+    print("ðŸ“Š Performance comparison:")
     print("  Individual commands: 4 serial transactions + queue delays")
     print("  Batch command: 1 serial transaction, synchronized movement")
     print("  Typical improvement: 3-5x faster, much better synchronization")
