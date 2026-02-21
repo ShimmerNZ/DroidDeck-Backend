@@ -1361,36 +1361,71 @@ class WebSocketMessageHandler:
             })
     
     async def _get_bottango_scenes(self) -> list:
-        """Read scenes_registry.json and return available Bottango scenes"""
-        from pathlib import Path
-        
-        registry_path = Path("configs/scenes_registry.json")
-        
-        if not registry_path.exists():
-            logger.warning("âš ï¸ Bottango scenes registry not found")
-            return []
-        
-        try:
-            with open(registry_path, 'r', encoding='utf-8') as f:
-                registry = json.load(f)
-            
+            """Return available Bottango scene files from the scenes/ folder.
+
+            configs/scenes_registry.json can be stale if scenes are copied/created after startup.
+            To ensure the Scene screen sees all available scenes, scan scenes/*.json directly.
+            """
+            from pathlib import Path
+            scenes_dir = Path("scenes")
             scenes = []
-            for scene_name, scene_data in registry.items():
-                scenes.append({
-                    "name": scene_name,
-                    "duration": scene_data.get("duration_ms", 0) / 1000.0,  # Convert ms to seconds
-                    "channels": len(scene_data.get("channels", []))
-                })
-            
-            logger.debug(f"ðŸ“‹ Loaded {len(scenes)} Bottango scenes from registry")
-            return scenes
-            
-        except Exception as e:
-            logger.error(f"âŒ Failed to read Bottango scenes registry: {e}")
-            return []
-    
-    # ==================== SYSTEM CONTROL HANDLERS ====================
-    
+
+            try:
+                if scenes_dir.exists():
+                    for fp in sorted(scenes_dir.glob("*.json")):
+                        try:
+                            data = json.loads(fp.read_text(encoding='utf-8'))
+                            name = data.get('name') or fp.stem
+                            if 'duration' in data:
+                                duration = float(data.get('duration') or 0.0)
+                            else:
+                                duration = float(data.get('duration_ms', 0) or 0) / 1000.0
+                            locked = data.get('locked_channels')
+                            if isinstance(locked, list):
+                                ch_count = len(locked)
+                            elif isinstance(data.get('tracks'), dict):
+                                ch_count = len(data.get('tracks').keys())
+                            elif isinstance(data.get('steps'), list) and data.get('steps'):
+                                s0 = data['steps'][0]
+                                ch_count = len((s0.get('servos') or {}).keys())
+                            else:
+                                ch_count = 0
+                            scenes.append({'name': str(name), 'duration': float(duration), 'channels': int(ch_count)})
+                        except Exception as e:
+                            logger.debug(f"Skipping scene file {fp.name}: {e}")
+
+                # Fallback to registry if the folder doesn't exist or yields nothing
+                if not scenes:
+                    registry_path = Path("configs/scenes_registry.json")
+                    if registry_path.exists():
+                        try:
+                            registry = json.loads(registry_path.read_text(encoding='utf-8'))
+                            for scene_name, scene_data in (registry or {}).items():
+                                try:
+                                    duration = float(scene_data.get('duration', 0.0) or 0.0)
+                                    locked = scene_data.get('locked_channels', [])
+                                    ch_count = len(locked) if isinstance(locked, list) else 0
+                                    scenes.append({'name': str(scene_name), 'duration': float(duration), 'channels': int(ch_count)})
+                                except Exception:
+                                    continue
+                        except Exception as e:
+                            logger.warning(f"Failed to read scenes_registry.json: {e}")
+
+                # Deduplicate
+                deduped = []
+                seen = set()
+                for s in scenes:
+                    n = s.get('name')
+                    if n in seen:
+                        continue
+                    seen.add(n)
+                    deduped.append(s)
+
+                logger.debug(f"Loaded {len(deduped)} Bottango scenes")
+                return deduped
+            except Exception as e:
+                logger.error(f"Failed to enumerate Bottango scenes: {e}")
+                return []
     async def _handle_emergency_stop(self, websocket, data: Dict[str, Any]):
         """Handle emergency stop command"""
         logger.critical("ÃƒÂ°Ã…Â¸Ã…Â¡Ã‚Â¨ EMERGENCY STOP ACTIVATED via WebSocket")
