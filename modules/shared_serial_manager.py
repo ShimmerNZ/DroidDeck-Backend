@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Enhanced Shared Serial Manager with Batch Command Support
 Adds efficient multi-servo batch commands to your existing system

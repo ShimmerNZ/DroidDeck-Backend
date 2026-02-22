@@ -62,7 +62,7 @@ function updateSceneList() {
         const emptyItem = document.createElement('div');
         emptyItem.className = 'scene-list-item';
         emptyItem.innerHTML = `
-            <div class="scene-item-emoji">🎭</div>
+            <div class="scene-item-emoji">ðŸŽ­</div>
             <div class="scene-item-details">
                 <div class="scene-item-title">No scenes in this category</div>
                 <div class="scene-item-meta">Try selecting a different category</div>
@@ -82,10 +82,10 @@ function updateSceneList() {
         if (scene.script_enabled) features.push('Script');
         if (scene.servo_count > 0) features.push(`${scene.servo_count} Servos`);
         
-        const metaText = features.length > 0 ? features.join(' • ') : 'Basic scene';
+        const metaText = features.length > 0 ? features.join(' â€¢ ') : 'Basic scene';
         
         sceneItem.innerHTML = `
-            <div class="scene-item-emoji">${scene.emoji || '🎭'}</div>
+            <div class="scene-item-emoji">${scene.emoji || 'ðŸŽ­'}</div>
             <div class="scene-item-details">
                 <div class="scene-item-title">${scene.label}</div>
                 <div class="scene-item-meta">${metaText}</div>
@@ -159,7 +159,7 @@ function updateSceneGrid() {
         sceneButton.onclick = () => playScene(scene.label);
         
         sceneButton.innerHTML = `
-            <div class="scene-emoji">${scene.emoji || '🎭'}</div>
+            <div class="scene-emoji">${scene.emoji || 'ðŸŽ­'}</div>
             <div class="scene-label">${scene.label}</div>
             <div class="scene-duration">${scene.duration}s</div>
         `;
@@ -179,7 +179,7 @@ function loadDetailedScenes() {
         sceneCard.innerHTML = `
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
                 <div>
-                    <h4>${scene.emoji || '🎭'} ${scene.label}</h4>
+                    <h4>${scene.emoji || 'ðŸŽ­'} ${scene.label}</h4>
                     <div style="color: var(--text-secondary); font-size: 0.875rem;">
                         Duration: ${scene.duration}s | Categories: ${scene.categories ? scene.categories.join(', ') : 'None'}
                     </div>
@@ -608,19 +608,19 @@ function getBehaviorDisplayText(mapping) {
     const behavior = mapping.behavior;
     switch (behavior) {
         case 'direct_servo':
-            return `Direct Servo → ${mapping.target || 'Unknown'}`;
+            return `Direct Servo â†’ ${mapping.target || 'Unknown'}`;
         case 'joystick_pair':
-            return `Joystick Pair → X: ${mapping.x_servo || 'None'}, Y: ${mapping.y_servo || 'None'}`;
+            return `Joystick Pair â†’ X: ${mapping.x_servo || 'None'}, Y: ${mapping.y_servo || 'None'}`;
         case 'differential_tracks':
-            return `Differential Tracks → L: ${mapping.left_servo || 'None'}, R: ${mapping.right_servo || 'None'}`;
+            return `Differential Tracks â†’ L: ${mapping.left_servo || 'None'}, R: ${mapping.right_servo || 'None'}`;
         case 'scene_trigger':
-            return `Scene Trigger → ${mapping.scene || 'Unknown'}`;
+            return `Scene Trigger â†’ ${mapping.scene || 'Unknown'}`;
         case 'toggle_scenes':
-            return `Toggle Scenes → ${mapping.scene_1 || 'None'} / ${mapping.scene_2 || 'None'}`;
+            return `Toggle Scenes â†’ ${mapping.scene_1 || 'None'} / ${mapping.scene_2 || 'None'}`;
         case 'nema_stepper':
-            return `NEMA Stepper → ${mapping.nema_behavior || 'Unknown'}`;
+            return `NEMA Stepper â†’ ${mapping.nema_behavior || 'Unknown'}`;
         case 'system_control':
-            return `System Control → ${mapping.system_action || 'Unknown'}`;
+            return `System Control â†’ ${mapping.system_action || 'Unknown'}`;
         default:
             return 'Unknown behavior';
     }
@@ -1095,11 +1095,11 @@ function toggleNemaEnable() {
     // Optimistic UI update
     nemaEnabled = willEnable;
     if (willEnable) {
-        btn.textContent = '🔴 DISABLE';
+        btn.textContent = 'ðŸ”´ DISABLE';
         btn.classList.add('btn-danger');
         btn.classList.remove('btn-success');
     } else {
-        btn.textContent = '⚡ ENABLE';
+        btn.textContent = 'âš¡ ENABLE';
         btn.classList.remove('btn-danger');
         btn.classList.add('btn-success');
     }
@@ -1121,7 +1121,7 @@ function toggleNemaSweep() {
     if (nemaSweeping) {
         // Stop sweep
         sendWebSocketMessage({ type: 'nema_stop_sweep' });
-        btn.textContent = '▶️ TEST SWEEP';
+        btn.textContent = 'â–¶ï¸ TEST SWEEP';
         btn.classList.remove('btn-warning-active');
         nemaSweeping = false;
         console.log('Stopping NEMA sweep');
@@ -1134,10 +1134,10 @@ function toggleNemaSweep() {
             normal_speed: nemaConfig.normal_speed,
             acceleration: nemaConfig.acceleration
         });
-        btn.textContent = '⏹️ STOP SWEEP';
+        btn.textContent = 'â¹ï¸ STOP SWEEP';
         btn.classList.add('btn-warning-active');
         nemaSweeping = true;
-        showToast(`Sweep: ${nemaConfig.min_position}cm ↔ ${nemaConfig.max_position}cm`, 'info');
+        showToast(`Sweep: ${nemaConfig.min_position}cm â†” ${nemaConfig.max_position}cm`, 'info');
         console.log('Starting NEMA sweep');
     }
 }
@@ -1150,7 +1150,7 @@ function stopNema() {
     // Reset UI
     nemaSweeping = false;
     const sweepBtn = document.getElementById('nemaSweepBtn');
-    sweepBtn.textContent = '▶️ TEST SWEEP';
+    sweepBtn.textContent = 'â–¶ï¸ TEST SWEEP';
     sweepBtn.classList.remove('btn-warning-active');
     
     showToast('NEMA stopped', 'warning');
@@ -1234,12 +1234,12 @@ function updateNemaStatus(data) {
     
     const homedEl = document.getElementById('nemaHomedIndicator');
     if (homedEl) {
-        homedEl.textContent = nemaConfig.homed ? '✅' : '❌';
+        homedEl.textContent = nemaConfig.homed ? 'âœ…' : 'âŒ';
     }
     
     const enabledEl = document.getElementById('nemaEnabledIndicator');
     if (enabledEl) {
-        enabledEl.textContent = nemaConfig.enabled ? '✅' : '❌';
+        enabledEl.textContent = nemaConfig.enabled ? 'âœ…' : 'âŒ';
     }
     
     // Update slider without triggering change event
@@ -1259,11 +1259,11 @@ function updateNemaStatus(data) {
     const enableBtn = document.getElementById('nemaEnableBtn');
     if (enableBtn) {
         if (nemaEnabled) {
-            enableBtn.textContent = '🔴 DISABLE';
+            enableBtn.textContent = 'ðŸ”´ DISABLE';
             enableBtn.classList.add('btn-danger');
             enableBtn.classList.remove('btn-success');
         } else {
-            enableBtn.textContent = '⚡ ENABLE';
+            enableBtn.textContent = 'âš¡ ENABLE';
             enableBtn.classList.remove('btn-danger');
             enableBtn.classList.add('btn-success');
         }
@@ -1283,10 +1283,10 @@ function handleNemaSweepStatus(data) {
     
     if (btn) {
         if (nemaSweeping) {
-            btn.textContent = '⏹️ STOP SWEEP';
+            btn.textContent = 'â¹ï¸ STOP SWEEP';
             btn.classList.add('btn-warning-active');
         } else {
-            btn.textContent = '▶️ TEST SWEEP';
+            btn.textContent = 'â–¶ï¸ TEST SWEEP';
             btn.classList.remove('btn-warning-active');
         }
     }

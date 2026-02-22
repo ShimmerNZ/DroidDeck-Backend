@@ -27,7 +27,7 @@
                     class="failsafe-btn failsafe-active mobile-failsafe-btn" 
                     onclick="toggleFailsafe()"
                     title="Toggle Failsafe Mode">
-                <span class="failsafe-icon">🛡️</span>
+                <span class="failsafe-icon">ðŸ›¡ï¸</span>
                 <span class="failsafe-text">FAILSAFE</span>
             </button>
             
@@ -90,8 +90,8 @@
                 
                 <div class="scene-navigation-info">
                     <div class="nav-instruction">
-                        <span class="nav-key">←→</span> Change Category | 
-                        <span class="nav-key">↑↓</span> Select Scene | 
+                        <span class="nav-key">â†â†’</span> Change Category | 
+                        <span class="nav-key">â†‘â†“</span> Select Scene | 
                         <span class="nav-key">Enter</span> Play Scene
                     </div>
                     <div class="scene-counter" id="sceneCounter">0 / 0</div>
@@ -286,8 +286,8 @@
 
                     <!-- Save Configuration -->
                     <div class="action-grid">
-                        <button class="btn" onclick="saveNemaConfig()">💾 Save Config</button>
-                        <button class="btn btn-secondary" onclick="resetNemaConfig()">↺ Reset to Defaults</button>
+                        <button class="btn" onclick="saveNemaConfig()">ðŸ’¾ Save Config</button>
+                        <button class="btn btn-secondary" onclick="resetNemaConfig()">â†º Reset to Defaults</button>
                     </div>
                 </div>
 
@@ -307,11 +307,11 @@
                         </div>
                         <div class="status-item">
                             <span class="status-label">Homed:</span>
-                            <span class="status-indicator" id="nemaHomedIndicator">❌</span>
+                            <span class="status-indicator" id="nemaHomedIndicator">âŒ</span>
                         </div>
                         <div class="status-item">
                             <span class="status-label">Enabled:</span>
-                            <span class="status-indicator" id="nemaEnabledIndicator">❌</span>
+                            <span class="status-indicator" id="nemaEnabledIndicator">âŒ</span>
                         </div>
                     </div>
 
@@ -337,19 +337,19 @@
                     <!-- Control Buttons -->
                     <div class="nema-controls">
                         <button class="btn btn-success" onclick="toggleNemaEnable()" id="nemaEnableBtn">
-                            ⚡ ENABLE
+                            âš¡ ENABLE
                         </button>
                         
                         <button class="btn" onclick="homeNema()">
-                            🏠 HOME
+                            ðŸ  HOME
                         </button>
 
                         <button class="btn" onclick="toggleNemaSweep()" id="nemaSweepBtn">
-                            ▶️ TEST SWEEP
+                            â–¶ï¸ TEST SWEEP
                         </button>
 
                         <button class="btn btn-danger" onclick="stopNema()">
-                            ⏹️ STOP
+                            â¹ï¸ STOP
                         </button>
                     </div>
 
@@ -394,13 +394,13 @@
                         <p>Use your controller's D-pad to test navigation:</p>
                         <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; max-width: 200px; margin: 1rem 0;">
                             <div></div>
-                            <button class="btn btn-small" id="navUp">↑</button>
+                            <button class="btn btn-small" id="navUp">â†‘</button>
                             <div></div>
-                            <button class="btn btn-small" id="navLeft">←</button>
+                            <button class="btn btn-small" id="navLeft">â†</button>
                             <button class="btn btn-small" id="navSelect">SEL</button>
-                            <button class="btn btn-small" id="navRight">→</button>
+                            <button class="btn btn-small" id="navRight">â†’</button>
                             <div></div>
-                            <button class="btn btn-small" id="navDown">↓</button>
+                            <button class="btn btn-small" id="navDown">â†“</button>
                             <div></div>
                         </div>
                         <div id="lastNavigation">Last navigation: None</div>

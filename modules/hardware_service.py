@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Complete Enhanced Hardware Service Layer for WALL-E Robot Control System
 Centralized hardware abstraction and management with batch command optimization

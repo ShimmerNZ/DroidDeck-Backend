@@ -135,7 +135,7 @@ class NEMA23Controller:
     def setup_gpio(self):
         """Initialize GPIO pins for stepper control using compatibility layer"""
         if not is_gpio_available():
-            logger.warning("âš Ã️  GPIO not available - stepper control disabled")
+            logger.warning("⚠️  GPIO not available - stepper control disabled")
             return
         
         try:
@@ -260,13 +260,13 @@ class NEMA23Controller:
         was_disabled = self.intentionally_disabled
         self.intentionally_disabled = False
 
-        logger.info("ðŸ  Starting homing sequence...")
+        logger.info("🏠  Starting homing sequence...")
         self.set_state(MotorState.HOMING)
         self.enable_motor()
         
         try:
             # Phase 1: Move toward home until limit switch triggers
-            logger.info("ðŸ  Phase 1: Moving toward limit switch...")
+            logger.info("🏠  Phase 1: Moving toward limit switch...")
             self.set_direction(MoveDirection.TOWARD_HOME)
             
             steps_moved = 0
@@ -274,7 +274,7 @@ class NEMA23Controller:
             
             while not self.is_limit_switch_triggered() and steps_moved < max_homing_steps:
                 if self.stop_movement.is_set():
-                    logger.warning("ðŸ  Homing interrupted")
+                    logger.warning("🏠  Homing interrupted")
                     return False
                 
                 self.step_pulse()
@@ -282,21 +282,21 @@ class NEMA23Controller:
                 steps_moved += 1
             
             if steps_moved >= max_homing_steps:
-                logger.error("ðŸ  Homing failed - limit switch not found")
+                logger.error("🏠  Homing failed - limit switch not found")
                 self.set_state(MotorState.ERROR)
                 if was_disabled:
                     self.intentionally_disabled = True
                 return False
             
-            logger.info(f"ðŸ  Limit switch triggered after {steps_moved} steps")
+            logger.info(f"🏠  Limit switch triggered after {steps_moved} steps")
             
             # Phase 2: Back off from limit switch to establish zero position
-            logger.info("ðŸ  Phase 2: Backing off from limit switch...")
+            logger.info("🏠  Phase 2: Backing off from limit switch...")
             self.set_direction(MoveDirection.AWAY_FROM_HOME)
             
             for step in range(self.home_offset_steps):
                 if self.stop_movement.is_set():
-                    logger.warning("ðŸ  Homing interrupted during backoff")
+                    logger.warning("🏠  Homing interrupted during backoff")
                     return False
                 
                 self.step_pulse()
@@ -324,7 +324,7 @@ class NEMA23Controller:
 
 
         except Exception as e:
-            logger.error(f"ðŸ  Homing failed: {e}")
+            logger.error(f"🏠  Homing failed: {e}")
             self.set_state(MotorState.ERROR)
             if was_disabled:
                 self.intentionally_disabled = True
@@ -533,7 +533,7 @@ class NEMA23Controller:
             if not self.sweep_active:
                 return True
             
-            logger.info("â¸ï¸ Stopping sweep...")
+            logger.info("⏸️ Stopping sweep...")
             self.sweep_active = False
             
             # Signal movement to stop immediately

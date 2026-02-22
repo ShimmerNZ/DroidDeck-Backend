@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 WALL-E Camera Proxy - Optimized Version with Smart Buffering Prevention
 Performance optimized, low latency, with intelligent frame management

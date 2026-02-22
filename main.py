@@ -1350,9 +1350,9 @@ async def play_startup_track(backend):
     await asyncio.sleep(2)
     success = backend.audio_controller.play_track('00052_WALL-E 3 - Long_0001_00002510.mp3')
     if not success:
-        print("[audio] Could not play track_001.wav after startup")
+        print("[audio] Could not play Wall-e Intro after startup")
     else:
-        print("[audio] Played track_001.wav after startup")
+        print("[audio] Played Wall-e Intro after startup")
 
 
 async def process_bottango_imports_on_startup():

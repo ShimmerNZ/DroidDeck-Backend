@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 WebSocket Message Handler for WALL-E Robot Control System
 Handles all WebSocket message routing and processing
@@ -96,6 +97,7 @@ class WebSocketMessageHandler:
             
             # Mode control
             "failsafe": self._handle_failsafe,
+            "get_failsafe_state": self._handle_get_failsafe_state,
             "mode": self._handle_mode_control
         }
         
@@ -1428,7 +1430,7 @@ class WebSocketMessageHandler:
                 return []
     async def _handle_emergency_stop(self, websocket, data: Dict[str, Any]):
         """Handle emergency stop command"""
-        logger.critical("ÃƒÂ°Ã…Â¸Ã…Â¡Ã‚Â¨ EMERGENCY STOP ACTIVATED via WebSocket")
+        logger.critical("🚨 EMERGENCY STOP ACTIVATED via WebSocket")
         
         # Emergency stop all systems
         await self.hardware_service.emergency_stop_all()
@@ -1571,7 +1573,21 @@ class WebSocketMessageHandler:
         # Update backend state
         if hasattr(self.backend, 'set_failsafe_mode'):
             await self.backend.set_failsafe_mode(state)
-    
+
+        # Broadcast confirmed state to ALL clients so every frontend stays in sync
+        await self.backend.broadcast_message({
+            "type": "failsafe_state",
+            "failsafe_active": state
+        })
+
+    async def _handle_get_failsafe_state(self, websocket, data: Dict[str, Any]):
+        """Send current failsafe state to the requesting client (called on reconnect)"""
+        state = getattr(self.backend, 'failsafe_active', True)  # default safe=True
+        await self._send_websocket_message(websocket, {
+            "type": "failsafe_state",
+            "failsafe_active": state
+        })
+
     async def _handle_mode_control(self, websocket, data: Dict[str, Any]):
         """Handle system mode control (idle, demo, etc.)"""
         try:

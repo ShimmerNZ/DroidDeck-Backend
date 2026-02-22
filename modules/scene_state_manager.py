@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Scene State Manager - Prevents Joystick/Subroutine Command Collisions
 Add this to prevent servo fighting between manual control and animations

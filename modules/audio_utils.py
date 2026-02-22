@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Audio utilities for DroidDeck - get audio file duration without heavy dependencies
 Location: modules/audio_utils.py

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Controller Input Handler for WALL-E Robot Control System
 Processes controller inputs and routes them through behavior-specific handlers

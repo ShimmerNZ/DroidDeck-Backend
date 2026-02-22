@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Audio Controller for WALL-E Robot Control System
 Native Raspberry Pi audio controller using pygame

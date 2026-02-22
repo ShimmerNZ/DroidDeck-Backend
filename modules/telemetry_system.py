@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Telemetry System for WALL-E Robot Control System
 Real-time system monitoring with ADC sensor support and simulation fallback

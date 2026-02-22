@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Configuration Manager for WALL-E Robot Control System
 Centralized configuration loading, validation, and hot-reload support

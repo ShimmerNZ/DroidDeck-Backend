@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 WALL-E Backend - Optimized Bluetooth Controller Service
 Fixed for low-latency D-pad controls and proper calibration streaming
