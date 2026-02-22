@@ -587,11 +587,8 @@ python3 --version  # Should be 3.9.13
 - Hot-reload configuration management
 
 ### In Progress
-- Non-blocking hardware PWM migration for stepper motor
 - Enhanced gesture recognition (left hand, right hand, both hands)
-- WebSocket message batching optimisation
 
 ### Future
 - AI behaviour system
-- Voice recognition
-- Advanced computer vision integration
+

@@ -83,6 +83,7 @@ class EnhancedSceneEngine:
         self.scene_history = []  # Track recently played scenes
         self.current_scene = None
         self.scene_playing = False
+        self.current_scene_is_idle = False  # True when an auto/idle scene is playing
         self.scene_queue = []  # For scene chaining
         
         # Channel locking for legacy scenes (used when motion_mixer is not available)
@@ -206,19 +207,39 @@ class EnhancedSceneEngine:
                 if self.motion_mixer:
                     from modules.motion_system import BlendMode
                     
-                    await self.motion_mixer.play_scene(
+                    # Build a full copy of the scene data including any Bottango file content
+                    full_scene_data = scene_data.copy()
+                    if full_scene_data.get("script_enabled") and full_scene_data.get("bottango_scene"):
+                        bottango_name = full_scene_data["bottango_scene"]
+                        bottango_data = await self._load_bottango_scene(bottango_name)
+                        if bottango_data:
+                            bottango_duration = bottango_data.get("duration", bottango_data.get("duration_ms", 1000) / 1000.0)
+                            full_scene_data.update({
+                                "steps": bottango_data.get("steps", []),
+                                "locked_channels": bottango_data.get("locked_channels", []),
+                                "version": bottango_data.get("version", 1),
+                                "tracks": bottango_data.get("tracks", {}),
+                                "duration": bottango_duration
+                            })
+                        else:
+                            logger.warning(f"Failed to load Bottango scene for idle: {bottango_name}")
+                    
+                    success = await self.motion_mixer.play_scene(
                         scene_name=scene_name,
-                        scene_data=scene_data,
+                        scene_data=full_scene_data,
                         crossfade_in=2.0,
                         crossfade_out=2.0,
                         blend_mode=BlendMode.ADDITIVE,
                         priority=5
                     )
                     
-                    duration = self.calculate_scene_duration(scene_data)
+                    duration = self.calculate_scene_duration(full_scene_data)
                     await asyncio.sleep(duration + 4.0)
                 else:
-                    await self.play_scene(scene_name)
+                    # No mixer available - idle scenes run as legacy but should not block
+                    # user-triggered scenes. Skip if a scene is already playing.
+                    if not self.scene_playing:
+                        await self.play_scene(scene_name, auto_triggered=True)
                 
                 pause = random.uniform(3.0, 8.0)
                 logger.debug(f"Idle pause: {pause:.1f}s before next scene")
@@ -456,8 +477,18 @@ class EnhancedSceneEngine:
             return False
         
         if self.scene_playing:
-            logger.warning(f"Scene already playing ({self.current_scene}), ignoring '{scene_name}'")
-            return False
+            # Allow user-triggered scenes to interrupt idle/auto scenes
+            if not auto_triggered and self.current_scene_is_idle:
+                logger.info(f"User scene '{scene_name}' preempting idle scene '{self.current_scene}'")
+                self.interrupt_requested = True
+                for _ in range(20):
+                    if not self.scene_playing:
+                        break
+                    await asyncio.sleep(0.05)
+            
+            if self.scene_playing:
+                logger.warning(f"Scene already playing ({self.current_scene}), ignoring '{scene_name}'")
+                return False
         
         # Make a copy of the scene to avoid modifying the original
         scene = self.scenes[scene_name].copy()
@@ -494,6 +525,7 @@ class EnhancedSceneEngine:
         
         self.current_scene = scene_name
         self.scene_playing = True
+        self.current_scene_is_idle = auto_triggered
         self.interrupt_requested = False
         self.pause_requested = False
         self.scene_start_time = time.time()
@@ -595,6 +627,7 @@ class EnhancedSceneEngine:
             
             self.scene_playing = False
             self.current_scene = None
+            self.current_scene_is_idle = False
             self.interrupt_requested = False
             self.pause_requested = False
 
@@ -1164,11 +1197,13 @@ class EnhancedSceneEngine:
                     "duration": scene.get("duration", 2.0),
                     "audio_enabled": scene.get("audio_enabled", False),
                     "audio_file": scene.get("audio_file", ""),
+                    "script_enabled": scene.get("script_enabled", False),
+                    "bottango_scene": scene.get("bottango_scene", ""),
                     "script_maestro1": scene.get("script_maestro1"),
                     "script_maestro2": scene.get("script_maestro2"),
                     "delay": scene.get("delay", 0),
                     "servo_count": len(scene.get("servos", {})),
-                    "estimated_setup_time_ms": len(scene.get("servos", {})) * 5  # Batch estimate
+                    "estimated_setup_time_ms": len(scene.get("servos", {})) * 5
                 }
                 scenes_list.append(scene_info)
             
