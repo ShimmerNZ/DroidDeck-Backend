@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DroidDeck Hardware Wiring Diagram</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0f1117;
+    --grid: #161b27;
+    --surface: #1a2035;
+    --surface2: #202840;
+    --border: #2d3a55;
+    --text: #cdd6f4;
+    --text-dim: #6c7a9c;
+    --pi: #89b4fa;
+    --servo: #a6e3a1;
+    --stepper: #fab387;
+    --power: #f38ba8;
+    --sensor: #f9e2af;
+    --comm: #cba6f7;
+    --track: #89dceb;
+    --wire-pi: #89b4fa;
+    --wire-servo: #a6e3a1;
+    --wire-stepper: #fab387;
+    --wire-power: #f38ba8;
+    --wire-sensor: #f9e2af;
+    --wire-comm: #cba6f7;
+    --wire-track: #89dceb;
+    --wire-gnd: #585b70;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 32px 32px;
+    color: var(--text);
+    font-family: 'IBM Plex Sans', sans-serif;
+    padding: 40px 32px 60px;
+    min-height: 100vh;
+  }
+
+  header {
+    margin-bottom: 36px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+
+  h1 {
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    color: var(--pi);
+  }
+
+  h1 span { color: var(--text-dim); font-weight: 400; font-size: 16px; margin-left: 8px; }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+
+  .legend-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .diagram-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+
+  @media (max-width: 900px) {
+    .diagram-grid { grid-template-columns: 1fr; }
+  }
+
+  .diagram-grid.full { grid-column: 1 / -1; }
+
+  /* Component card */
+  .component {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .component-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .component-icon {
+    width: 36px; height: 36px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+
+  .component-title {
+    font-weight: 700;
+    font-size: 15px;
+  }
+
+  .component-sub {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: 'IBM Plex Mono', monospace;
+  }
+
+  .component-body {
+    padding: 14px 16px;
+  }
+
+  /* Connection table */
+  .conn-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+
+  .conn-table th {
+    text-align: left;
+    color: var(--text-dim);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    padding: 4px 8px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .conn-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid rgba(45, 58, 85, 0.5);
+    vertical-align: middle;
+  }
+
+  .conn-table tr:last-child td { border-bottom: none; }
+
+  .pin-from {
+    color: var(--text);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .pin-arrow {
+    color: var(--text-dim);
+    padding: 0 4px;
+    font-size: 11px;
+  }
+
+  .pin-to {
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+
+  .wire {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 5px;
+    flex-shrink: 0;
+    vertical-align: middle;
+  }
+
+  .note {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-style: italic;
+  }
+
+  /* Power flow diagram */
+  .power-flow {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .power-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+
+  .power-source {
+    background: rgba(243, 139, 168, 0.12);
+    border: 1px solid rgba(243, 139, 168, 0.3);
+    border-radius: 6px 0 0 6px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--power);
+    font-family: 'IBM Plex Mono', monospace;
+    white-space: nowrap;
+    min-width: 110px;
+  }
+
+  .power-arrow-line {
+    height: 2px;
+    flex: 1;
+    min-width: 20px;
+    position: relative;
+  }
+
+  .power-arrow-line::after {
+    content: '';
+    position: absolute;
+    right: -6px;
+    top: -4px;
+    width: 0;
+    height: 0;
+    border-left: 7px solid currentColor;
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+  }
+
+  .power-targets {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding-left: 14px;
+  }
+
+  .power-target {
+    border-radius: 4px;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-family: 'IBM Plex Mono', monospace;
+    border: 1px solid;
+    white-space: nowrap;
+  }
+
+  /* Serial bus */
+  .serial-bus {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    margin-top: 12px;
+  }
+
+  .bus-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+
+  .bus-line {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-bottom: 8px;
+  }
+
+  .bus-node {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-family: 'IBM Plex Mono', monospace;
+    white-space: nowrap;
+  }
+
+  .bus-connector {
+    flex: 1;
+    height: 2px;
+    min-width: 12px;
+  }
+
+  .bus-tee {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .section-title {
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    margin: 28px 0 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .section-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  .badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+
+  .badge-green { background: rgba(166, 227, 161, 0.15); color: var(--servo); border: 1px solid rgba(166, 227, 161, 0.3); }
+  .badge-orange { background: rgba(250, 179, 135, 0.15); color: var(--stepper); border: 1px solid rgba(250, 179, 135, 0.3); }
+  .badge-blue { background: rgba(137, 180, 250, 0.15); color: var(--pi); border: 1px solid rgba(137, 180, 250, 0.3); }
+
+  .info-box {
+    background: rgba(137, 180, 250, 0.06);
+    border-left: 3px solid var(--pi);
+    border-radius: 0 6px 6px 0;
+    padding: 10px 14px;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--text-dim);
+    margin-top: 12px;
+  }
+
+  .info-box strong { color: var(--text); }
+
+  code {
+    font-family: 'IBM Plex Mono', monospace;
+    background: rgba(255,255,255,0.06);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 11.5px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>DroidDeck Hardware Wiring <span>Raspberry Pi 5 — WALL-E Robot</span></h1>
+  </div>
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:var(--pi)"></div> Raspberry Pi</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--servo)"></div> Servo control</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--stepper)"></div> Stepper motor</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--power)"></div> Power</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--sensor)"></div> Sensors</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--track)"></div> Tank drive</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--text-dim)"></div> GND</div>
+  </div>
+</header>
+
+<!-- ===== POWER DISTRIBUTION ===== -->
+<div class="section-title">Power Distribution</div>
+
+<div class="component">
+  <div class="component-header">
+    <div class="component-icon" style="background:rgba(243,139,168,0.15)">⚡</div>
+    <div>
+      <div class="component-title" style="color:var(--power)">4S LiPo Battery — Main Power Bus (~14.8V nominal)</div>
+      <div class="component-sub">All UBECs and motor controllers derive from this bus</div>
+    </div>
+  </div>
+  <div class="component-body">
+    <div class="power-flow">
+      <div class="power-row">
+        <div class="power-source">4S LiPo</div>
+        <div class="power-arrow-line" style="background:var(--power);color:var(--power)"></div>
+        <div class="power-targets">
+          <div class="power-target" style="color:var(--pi);border-color:rgba(137,180,250,0.3);background:rgba(137,180,250,0.08)">UBEC 1 → 5V/5A → Raspberry Pi 5</div>
+          <div class="power-target" style="color:var(--servo);border-color:rgba(166,227,161,0.3);background:rgba(166,227,161,0.08)">UBEC 2 → 5V/5A → Maestro 2 + 5V servos</div>
+          <div class="power-target" style="color:var(--stepper);border-color:rgba(250,179,135,0.3);background:rgba(250,179,135,0.08)">UBEC 3 → 7.2V/10A → High-voltage servos (Maestro 1)</div>
+          <div class="power-target" style="color:var(--track);border-color:rgba(137,220,235,0.3);background:rgba(137,220,235,0.08)">Direct → Sabertooth 2×60 (motor drive)</div>
+          <div class="power-target" style="color:var(--stepper);border-color:rgba(250,179,135,0.3);background:rgba(250,179,135,0.08)">Direct → TB6600 stepper driver VCC</div>
+        </div>
+      </div>
+    </div>
+    <div class="info-box" style="margin-top:14px">
+      <strong>Note:</strong> AMCE-5A servos on Maestro 2 are powered by UBEC 2 (5V). High-voltage servos on Maestro 1 are powered by UBEC 3 (7.2V). The Pi's 3.3V GPIO rail is used for logic-level signals (I²C, UART, GPIO inputs — all 3.3V tolerant).
+    </div>
+  </div>
+</div>
+
+<!-- ===== SERIAL BUS ===== -->
+<div class="section-title">Shared Serial Bus — /dev/ttyAMA0 @ 57600 baud</div>
+
+<div class="component">
+  <div class="component-header">
+    <div class="component-icon" style="background:rgba(166,227,161,0.15)">🔗</div>
+    <div>
+      <div class="component-title" style="color:var(--servo)">Maestro Daisy-Chain Serial (Pololu Protocol)</div>
+      <div class="component-sub">Both 24-channel Maestros share a single UART TX line — addressed by device number</div>
+    </div>
+  </div>
+  <div class="component-body">
+    <div class="serial-bus">
+      <div class="bus-label">TX Chain: Pi GPIO14 → Maestro 1 (Device #12) → Maestro 2 (Device #13)</div>
+      <div class="bus-line">
+        <div class="bus-node" style="border-color:var(--pi);color:var(--pi)">Pi GPIO14 (TX)</div>
+        <div class="bus-connector" style="background:var(--servo)"></div>
+        <div class="bus-node" style="border-color:var(--servo);color:var(--servo)">Maestro 1<br><small>Device #12</small></div>
+        <div class="bus-connector" style="background:var(--servo)"></div>
+        <div class="bus-node" style="border-color:var(--servo);color:var(--servo)">Maestro 2<br><small>Device #13</small></div>
+      </div>
+      <div class="bus-label" style="margin-top:10px">RX (optional feedback): Pi GPIO15 (RX) ← Maestro 1 TX</div>
+    </div>
+    <table class="conn-table" style="margin-top:12px">
+      <tr>
+        <th>Raspberry Pi</th>
+        <th></th>
+        <th>Maestro 1 &amp; 2</th>
+        <th>Notes</th>
+      </tr>
+      <tr>
+        <td class="pin-from"><span class="wire" style="background:var(--servo)"></span>GPIO14 (UART TX)</td>
+        <td class="pin-arrow">→</td>
+        <td class="pin-to">RX / TTL-in</td>
+        <td class="note">Shared line, daisy-chained</td>
+      </tr>
+      <tr>
+        <td class="pin-from"><span class="wire" style="background:var(--pi)"></span>GPIO15 (UART RX)</td>
+        <td class="pin-arrow">←</td>
+        <td class="pin-to">TX (Maestro 1 only)</td>
+        <td class="note">Optional — status/position feedback</td>
+      </tr>
+      <tr>
+        <td class="pin-from"><span class="wire" style="background:var(--text-dim)"></span>GND</td>
+        <td class="pin-arrow">→</td>
+        <td class="pin-to">GND</td>
+        <td class="note">Common ground required</td>
+      </tr>
+    </table>
+    <div class="info-box">
+      <strong>Maestro settings (set via Maestro Control Center):</strong> Serial mode: UART, fixed baud 57600. Maestro 1 → Device #12. Maestro 2 → Device #13. CRC disabled. Commands use Pololu protocol (0xAA sync byte + device number).
+    </div>
+  </div>
+</div>
+
+<!-- ===== MAIN GRID ===== -->
+<div class="section-title">Component Wiring</div>
+<div class="diagram-grid">
+
+  <!-- TB6600 STEPPER -->
+  <div class="component">
+    <div class="component-header">
+      <div class="component-icon" style="background:rgba(250,179,135,0.15)">⚙️</div>
+      <div>
+        <div class="component-title" style="color:var(--stepper)">TB6600 Stepper Driver</div>
+        <div class="component-sub">NEMA 23 · 800 pulse/rev (4 microstep) · 2.5A</div>
+      </div>
+    </div>
+    <div class="component-body">
+      <table class="conn-table">
+        <tr>
+          <th>TB6600 Pin</th>
+          <th></th>
+          <th>Raspberry Pi GPIO</th>
+          <th>Notes</th>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--stepper)"></span>PUL+</td>
+          <td class="pin-arrow">←</td>
+          <td class="pin-to">GPIO 16 (Step)</td>
+          <td class="note">Step pulse output</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--text-dim)"></span>PUL−</td>
+          <td class="pin-arrow">←</td>
+          <td class="pin-to">GND</td>
+          <td class="note"></td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--stepper)"></span>DIR+</td>
+          <td class="pin-arrow">←</td>
+          <td class="pin-to">GPIO 12 (Direction)</td>
+          <td class="note">LOW = toward home</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--text-dim)"></span>DIR−</td>
+          <td class="pin-arrow">←</td>
+          <td class="pin-to">GND</td>
+          <td class="note"></td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--stepper)"></span>ENA+</td>
+          <td class="pin-arrow">←</td>
+          <td class="pin-to">GPIO 13 (Enable)</td>
+          <td class="note">LOW = enabled, HIGH = disabled</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--text-dim)"></span>ENA−</td>
+          <td class="pin-arrow">←</td>
+          <td class="pin-to">GND</td>
+          <td class="note"></td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--power)"></span>VCC</td>
+          <td class="pin-arrow">←</td>
+          <td class="pin-to">4S LiPo main bus</td>
+          <td class="note">~14.8V</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--text-dim)"></span>GND</td>
+          <td class="pin-arrow">←</td>
+          <td class="pin-to">Common GND</td>
+          <td class="note"></td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--stepper)"></span>A+</td>
+          <td class="pin-arrow">→</td>
+          <td class="pin-to">NEMA 23 Phase A+</td>
+          <td class="note" rowspan="4">Motor coil wiring</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--stepper)"></span>A−</td>
+          <td class="pin-arrow">→</td>
+          <td class="pin-to">NEMA 23 Phase A−</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--stepper)"></span>B+</td>
+          <td class="pin-arrow">→</td>
+          <td class="pin-to">NEMA 23 Phase B+</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--stepper)"></span>B−</td>
+          <td class="pin-arrow">→</td>
+          <td class="pin-to">NEMA 23 Phase B−</td>
+        </tr>
+      </table>
+      <div class="info-box" style="margin-top:10px">
+        <strong>DIP switches:</strong> SW1 ON, SW2 OFF, SW3 OFF = 800 pulse/rev (4 microstep) · SW4 OFF, SW5 ON, SW6 ON = 2.5A / 2.9A peak
+      </div>
+    </div>
+  </div>
+
+  <!-- LIMIT SWITCH & GPIO SAFETY -->
+  <div class="component">
+    <div class="component-header">
+      <div class="component-icon" style="background:rgba(249,226,175,0.15)">🛡️</div>
+      <div>
+        <div class="component-title" style="color:var(--sensor)">GPIO Safety Inputs</div>
+        <div class="component-sub">Limit switch · Emergency stop · All active-LOW with pull-up</div>
+      </div>
+    </div>
+    <div class="component-body">
+      <table class="conn-table">
+        <tr>
+          <th>Signal</th>
+          <th></th>
+          <th>GPIO Pin</th>
+          <th>Notes</th>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--sensor)"></span>Limit Switch NO</td>
+          <td class="pin-arrow">→</td>
+          <td class="pin-to">GPIO 26</td>
+          <td class="note">Pull-up enabled. Triggered = LOW. Stops homing.</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--text-dim)"></span>Limit Switch COM</td>
+          <td class="pin-arrow">→</td>
+          <td class="pin-to">GND</td>
+          <td class="note"></td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--power)"></span>Emergency Stop NO</td>
+          <td class="pin-arrow">→</td>
+          <td class="pin-to">GPIO 25</td>
+          <td class="note">Pull-up enabled. Triggered = LOW. Kills all motion.</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--text-dim)"></span>Emergency Stop COM</td>
+          <td class="pin-arrow">→</td>
+          <td class="pin-to">GND</td>
+          <td class="note"></td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- ADS1115 + SENSORS -->
+  <div class="component">
+    <div class="component-header">
+      <div class="component-icon" style="background:rgba(249,226,175,0.15)">📊</div>
+      <div>
+        <div class="component-title" style="color:var(--sensor)">ADS1115 ADC + Current Sensors</div>
+        <div class="component-sub">16-bit I²C ADC at 0x48 · ACS758 current sensors</div>
+      </div>
+    </div>
+    <div class="component-body">
+      <table class="conn-table">
+        <tr>
+          <th>ADS1115 Pin</th>
+          <th></th>
+          <th>Raspberry Pi</th>
+          <th>Notes</th>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--sensor)"></span>SDA</td>
+          <td class="pin-arrow">↔</td>
+          <td class="pin-to">GPIO 2 (I²C SDA)</td>
+          <td class="note"></td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--sensor)"></span>SCL</td>
+          <td class="pin-arrow">↔</td>
+          <td class="pin-to">GPIO 3 (I²C SCL)</td>
+          <td class="note"></td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--pi)"></span>VDD</td>
+          <td class="pin-arrow">←</td>
+          <td class="pin-to">3.3V (Pin 1)</td>
+          <td class="note"></td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--text-dim)"></span>GND / ADDR</td>
+          <td class="pin-arrow">←</td>
+          <td class="pin-to">GND → address 0x48</td>
+          <td class="note"></td>
+        </tr>
+      </table>
+      <table class="conn-table" style="margin-top:10px">
+        <tr>
+          <th>ADS1115 Channel</th>
+          <th>Connected To</th>
+          <th>Measures</th>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--sensor)"></span>A0</td>
+          <td class="pin-to">Voltage divider on main bus</td>
+          <td class="note">Battery voltage</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--sensor)"></span>A1</td>
+          <td class="pin-to">ACS758 sensor 1 (VIOUT)</td>
+          <td class="note">Current draw 1</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--sensor)"></span>A2</td>
+          <td class="pin-to">ACS758 sensor 2 (VIOUT)</td>
+          <td class="note">Current draw 2</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- SABERTOOTH -->
+  <div class="component">
+    <div class="component-header">
+      <div class="component-icon" style="background:rgba(137,220,235,0.15)">🚗</div>
+      <div>
+        <div class="component-title" style="color:var(--track)">Sabertooth 2×60 — Tank Drive</div>
+        <div class="component-sub">Controlled via Maestro 1 servo PWM output · No direct Pi serial connection</div>
+      </div>
+    </div>
+    <div class="component-body">
+      <table class="conn-table">
+        <tr>
+          <th>Signal</th>
+          <th></th>
+          <th>Connected To</th>
+          <th>Notes</th>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--track)"></span>S1 (left drive)</td>
+          <td class="pin-arrow">←</td>
+          <td class="pin-to">Maestro 1 — servo channel (left track)</td>
+          <td class="note">PWM servo signal, 1000–2000µs</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--track)"></span>S2 (right drive)</td>
+          <td class="pin-arrow">←</td>
+          <td class="pin-to">Maestro 1 — servo channel (right track)</td>
+          <td class="note">PWM servo signal, 1000–2000µs</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--power)"></span>B+ / B−</td>
+          <td class="pin-arrow">←</td>
+          <td class="pin-to">4S LiPo main bus (direct)</td>
+          <td class="note">~14.8V battery power</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--track)"></span>M1A / M1B</td>
+          <td class="pin-arrow">→</td>
+          <td class="pin-to">Left drive motor</td>
+          <td class="note">Up to 60A continuous</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--track)"></span>M2A / M2B</td>
+          <td class="pin-arrow">→</td>
+          <td class="pin-to">Right drive motor</td>
+          <td class="note">Up to 60A continuous</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--text-dim)"></span>0V (signal GND)</td>
+          <td class="pin-arrow">→</td>
+          <td class="pin-to">Maestro 1 GND (common)</td>
+          <td class="note">Signal ground must be common</td>
+        </tr>
+      </table>
+      <div class="info-box" style="margin-top:10px">
+        <strong>Mode:</strong> R/C servo input mode. The Maestro outputs standard PWM servo signals — the Sabertooth interprets 1000µs as full reverse, 1500µs as stop, 2000µs as full forward, independently per channel.
+      </div>
+    </div>
+  </div>
+
+  <!-- ESP32-CAM -->
+  <div class="component">
+    <div class="component-header">
+      <div class="component-icon" style="background:rgba(203,166,247,0.15)">📷</div>
+      <div>
+        <div class="component-title" style="color:var(--comm)">ESP32-CAM</div>
+        <div class="component-sub">WiFi video streaming · MediaPipe gesture recognition</div>
+      </div>
+    </div>
+    <div class="component-body">
+      <table class="conn-table">
+        <tr>
+          <th>Connection</th>
+          <th>Details</th>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--comm)"></span>Power</td>
+          <td class="pin-to">5V supply (independent) — <strong>not</strong> from Pi GPIO</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--comm)"></span>Network</td>
+          <td class="pin-to">WiFi — same network as Pi. Fixed IP configured in <code>camera_config.json</code></td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--comm)"></span>Stream endpoint</td>
+          <td class="pin-to">HTTP MJPEG stream on port 8081</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--comm)"></span>Pi proxy</td>
+          <td class="pin-to"><code>camera_proxy.py</code> relays stream to multiple web clients</td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- MAESTRO CHANNEL OVERVIEW -->
+  <div class="component">
+    <div class="component-header">
+      <div class="component-icon" style="background:rgba(166,227,161,0.15)">🎚️</div>
+      <div>
+        <div class="component-title" style="color:var(--servo)">Maestro Channel Map Overview</div>
+        <div class="component-sub">24 channels each — 48 total servo channels</div>
+      </div>
+    </div>
+    <div class="component-body">
+      <table class="conn-table">
+        <tr>
+          <th>Controller</th>
+          <th>Channels</th>
+          <th>Voltage</th>
+          <th>Servo Types</th>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--stepper)"></span>Maestro 1 (#12)</td>
+          <td class="pin-to">m1_ch0 → m1_ch23</td>
+          <td class="pin-to" style="color:var(--stepper)">7.2V (UBEC 3)</td>
+          <td class="note">High-voltage servos + Sabertooth PWM</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--servo)"></span>Maestro 2 (#13)</td>
+          <td class="pin-to">m2_ch0 → m2_ch23</td>
+          <td class="pin-to" style="color:var(--servo)">5V (UBEC 2)</td>
+          <td class="note">5V servos, AMCE-5A servos</td>
+        </tr>
+      </table>
+      <div class="info-box" style="margin-top:10px">
+        Specific servo channel assignments are configured in <code>servo_config.json</code>. Bottango channel numbers 0–23 map to Maestro 1 (<code>m1_chN</code>), channels 24–47 map to Maestro 2 (<code>m2_chN</code>).
+      </div>
+    </div>
+  </div>
+
+</div><!-- end diagram-grid -->
+
+<!-- ===== GPIO SUMMARY ===== -->
+<div class="section-title">Raspberry Pi 5 GPIO Summary</div>
+
+<div class="component">
+  <div class="component-header">
+    <div class="component-icon" style="background:rgba(137,180,250,0.15)">🥧</div>
+    <div>
+      <div class="component-title" style="color:var(--pi)">Raspberry Pi 5 — Pin Assignments</div>
+      <div class="component-sub">All GPIO is 3.3V logic. Never connect 5V signals to GPIO pins.</div>
+    </div>
+  </div>
+  <div class="component-body">
+    <table class="conn-table">
+      <tr>
+        <th>GPIO</th>
+        <th>Function</th>
+        <th>Direction</th>
+        <th>Connected To</th>
+      </tr>
+      <tr>
+        <td class="pin-from"><span class="wire" style="background:var(--servo)"></span>GPIO 14</td>
+        <td class="pin-to">UART0 TX</td>
+        <td class="pin-to" style="color:var(--servo)">OUT</td>
+        <td class="note">Maestro 1 RX (daisy-chain to Maestro 2)</td>
+      </tr>
+      <tr>
+        <td class="pin-from"><span class="wire" style="background:var(--servo)"></span>GPIO 15</td>
+        <td class="pin-to">UART0 RX</td>
+        <td class="pin-to" style="color:var(--pi)">IN</td>
+        <td class="note">Maestro 1 TX (optional feedback)</td>
+      </tr>
+      <tr>
+        <td class="pin-from"><span class="wire" style="background:var(--sensor)"></span>GPIO 2</td>
+        <td class="pin-to">I²C SDA</td>
+        <td class="pin-to" style="color:var(--sensor)">BIDIR</td>
+        <td class="note">ADS1115 SDA</td>
+      </tr>
+      <tr>
+        <td class="pin-from"><span class="wire" style="background:var(--sensor)"></span>GPIO 3</td>
+        <td class="pin-to">I²C SCL</td>
+        <td class="pin-to" style="color:var(--sensor)">BIDIR</td>
+        <td class="note">ADS1115 SCL</td>
+      </tr>
+      <tr>
+        <td class="pin-from"><span class="wire" style="background:var(--stepper)"></span>GPIO 16</td>
+        <td class="pin-to">TB6600 Step</td>
+        <td class="pin-to" style="color:var(--servo)">OUT</td>
+        <td class="note">TB6600 PUL+</td>
+      </tr>
+      <tr>
+        <td class="pin-from"><span class="wire" style="background:var(--stepper)"></span>GPIO 12</td>
+        <td class="pin-to">TB6600 Direction</td>
+        <td class="pin-to" style="color:var(--servo)">OUT</td>
+        <td class="note">TB6600 DIR+</td>
+      </tr>
+      <tr>
+        <td class="pin-from"><span class="wire" style="background:var(--stepper)"></span>GPIO 13</td>
+        <td class="pin-to">TB6600 Enable</td>
+        <td class="pin-to" style="color:var(--servo)">OUT</td>
+        <td class="note">TB6600 ENA+ (LOW = enabled)</td>
+      </tr>
+      <tr>
+        <td class="pin-from"><span class="wire" style="background:var(--sensor)"></span>GPIO 26</td>
+        <td class="pin-to">Limit Switch</td>
+        <td class="pin-to" style="color:var(--pi)">IN</td>
+        <td class="note">Active-LOW, internal pull-up. Gantry home sensor.</td>
+      </tr>
+      <tr>
+        <td class="pin-from"><span class="wire" style="background:var(--power)"></span>GPIO 25</td>
+        <td class="pin-to">Emergency Stop</td>
+        <td class="pin-to" style="color:var(--pi)">IN</td>
+        <td class="note">Active-LOW, internal pull-up. Kills all motion.</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+</body>
+</html>

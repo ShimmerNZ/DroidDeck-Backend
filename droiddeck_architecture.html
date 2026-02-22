@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DroidDeck Motion Pipeline</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0c0e14;
+    --surface: #151821;
+    --surface2: #1c2030;
+    --border: #2a2f42;
+    --text: #c8cdd8;
+    --text-dim: #6b7394;
+    --accent-blue: #4e9af5;
+    --accent-green: #3dd68c;
+    --accent-orange: #f59e4e;
+    --accent-red: #f54e6e;
+    --accent-purple: #a86ef5;
+    --accent-cyan: #4edcf5;
+    --joystick: #3dd68c;
+    --scene: #f59e4e;
+    --shared: #a86ef5;
+    --serial: #f54e6e;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Space Grotesk', sans-serif;
+    padding: 32px;
+    min-height: 100vh;
+  }
+
+  h1 {
+    font-size: 28px;
+    font-weight: 700;
+    margin-bottom: 6px;
+    background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    letter-spacing: -0.5px;
+  }
+
+  .subtitle {
+    color: var(--text-dim);
+    font-size: 14px;
+    margin-bottom: 32px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .legend {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 28px;
+    flex-wrap: wrap;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .legend-line {
+    width: 32px;
+    height: 3px;
+    border-radius: 2px;
+  }
+
+  .legend-line.joystick { background: var(--joystick); }
+  .legend-line.scene { background: var(--scene); }
+  .legend-line.shared { background: var(--shared); }
+  .legend-line.serial { background: var(--serial); }
+  .legend-line.joystick-dash {
+    background: repeating-linear-gradient(90deg, var(--joystick), var(--joystick) 4px, transparent 4px, transparent 8px);
+  }
+
+  .diagram-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    margin-bottom: 24px;
+    position: relative;
+  }
+
+  .section-label {
+    position: absolute;
+    top: -10px;
+    left: 20px;
+    background: var(--surface);
+    padding: 0 10px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+
+  .flow-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .flow-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    min-height: 56px;
+  }
+
+  .node {
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    text-align: center;
+    min-width: 120px;
+    position: relative;
+    font-family: 'JetBrains Mono', monospace;
+    flex-shrink: 0;
+  }
+
+  .node-input {
+    background: var(--surface2);
+    border: 2px solid var(--border);
+    color: var(--text);
+  }
+
+  .node-module {
+    background: var(--surface2);
+    border: 2px solid var(--accent-blue);
+    color: var(--accent-blue);
+  }
+
+  .node-mixer {
+    background: var(--surface2);
+    border: 2px solid var(--accent-purple);
+    color: var(--accent-purple);
+  }
+
+  .node-hw {
+    background: var(--surface2);
+    border: 2px solid var(--accent-red);
+    color: var(--accent-red);
+  }
+
+  .node-serial {
+    background: linear-gradient(135deg, #2a1020, #1a0a18);
+    border: 2px solid var(--serial);
+    color: var(--serial);
+  }
+
+  .node-maestro {
+    background: linear-gradient(135deg, #1a2030, #0c1220);
+    border: 2px solid var(--accent-cyan);
+    color: var(--accent-cyan);
+  }
+
+  .method-label {
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-dim);
+    padding: 2px 8px;
+    background: var(--bg);
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+
+  .arrow {
+    display: flex;
+    align-items: center;
+    padding: 0 6px;
+    flex-shrink: 0;
+  }
+
+  .arrow svg {
+    display: block;
+  }
+
+  .path-label {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin: 20px 0 10px 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .path-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  .path-label.joystick { color: var(--joystick); }
+  .path-label.scene { color: var(--scene); }
+
+  .detail-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 8px 0;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .detail-row .step-num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--bg);
+    background: var(--text-dim);
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .detail-row.joystick .step-num { background: var(--joystick); }
+  .detail-row.scene .step-num { background: var(--scene); }
+
+  .detail-text {
+    flex: 1;
+  }
+
+  .detail-text code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    background: var(--bg);
+    padding: 1px 6px;
+    border-radius: 3px;
+    color: var(--accent-cyan);
+  }
+
+  .detail-text .file {
+    color: var(--text-dim);
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .serial-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-top: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    line-height: 1.8;
+  }
+
+  .serial-box .label {
+    color: var(--serial);
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+    text-transform: uppercase;
+  }
+
+  .byte { color: var(--accent-cyan); }
+  .comment { color: var(--text-dim); }
+
+  .note-box {
+    background: rgba(78, 154, 245, 0.06);
+    border-left: 3px solid var(--accent-blue);
+    padding: 12px 16px;
+    margin-top: 16px;
+    border-radius: 0 6px 6px 0;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  .note-box.warning {
+    background: rgba(245, 158, 78, 0.06);
+    border-left-color: var(--accent-orange);
+  }
+
+  .visual-flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    padding: 14px 0;
+  }
+
+  .vf-arrow {
+    color: var(--text-dim);
+    font-size: 16px;
+    padding: 0 2px;
+  }
+
+  .vf-arrow.green { color: var(--joystick); }
+  .vf-arrow.orange { color: var(--scene); }
+  .vf-arrow.red { color: var(--serial); }
+  .vf-arrow.purple { color: var(--accent-purple); }
+
+  .split-cols {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+  }
+
+  @media (max-width: 900px) {
+    .split-cols { grid-template-columns: 1fr; }
+    body { padding: 16px; }
+  }
+
+  .locked-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: rgba(245, 78, 110, 0.15);
+    color: var(--accent-red);
+    border: 1px solid rgba(245, 78, 110, 0.3);
+  }
+
+  .active-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: rgba(61, 214, 140, 0.15);
+    color: var(--joystick);
+    border: 1px solid rgba(61, 214, 140, 0.3);
+  }
+</style>
+</head>
+<body>
+
+<h1>DroidDeck Motion Pipeline Architecture</h1>
+<p class="subtitle">Steam Deck Frontend → Raspberry Pi Backend → Pololu Maestro</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-line joystick"></div> Joystick path</div>
+  <div class="legend-item"><div class="legend-line scene"></div> Scene path</div>
+  <div class="legend-item"><div class="legend-line shared"></div> Shared (mixer)</div>
+  <div class="legend-item"><div class="legend-line serial"></div> Serial to Maestro</div>
+</div>
+
+<!-- ===== JOYSTICK PATH ===== -->
+<div class="diagram-section">
+  <div class="section-label">Path A – Joystick Control (Steam Deck Frontend)</div>
+
+  <div class="path-label joystick">Visual Flow</div>
+  <div class="visual-flow">
+    <div class="node node-input">Steam Deck<br>Gamepad Axes</div>
+    <span class="vf-arrow green">→</span>
+    <div class="node node-module">controller_screen.py<br><small>JoystickPairHandler</small></div>
+    <span class="vf-arrow green">→</span>
+    <div class="node node-module">WebSocket<br><small>{type:"servo"}</small></div>
+    <span class="vf-arrow green">→</span>
+    <div class="node node-module">websocket_handler.py<br><small>_handle_servo_command</small></div>
+    <span class="vf-arrow green">→</span>
+    <div class="node node-hw">hardware_service.py<br><small>set_servo_position()</small></div>
+    <span class="vf-arrow red">→</span>
+    <div class="node node-serial">shared_serial_manager<br><small>send_command()</small></div>
+    <span class="vf-arrow red">→</span>
+    <div class="node node-maestro">Pololu Maestro<br><small>Serial @ 57600</small></div>
+  </div>
+
+  <div class="path-label joystick">Step-by-step detail</div>
+
+  <div class="detail-row joystick">
+    <span class="step-num">1</span>
+    <div class="detail-text">
+      Steam Deck gamepad axes read by PyQt6 input polling in <code>controller_screen.py</code>
+      <br><span class="file">controller_screen.py → JoystickPairHandler.process()</span>
+    </div>
+  </div>
+
+  <div class="detail-row joystick">
+    <span class="step-num">2</span>
+    <div class="detail-text">
+      Handler computes pulse from axis value + center_offset, clamps to servo min/max
+      <br>Sends via WebSocket: <code>send_websocket_message("servo", channel="m1_ch0", pos=1350)</code>
+      <br><span class="file">controller_screen.py line ~318</span>
+    </div>
+  </div>
+
+  <div class="detail-row joystick">
+    <span class="step-num">3</span>
+    <div class="detail-text">
+      Backend receives WebSocket message → routes to <code>_handle_servo_command()</code>
+      <br>Extracts <code>channel_key</code> and <code>position</code> from message data
+      <br><span class="file">websocket_handler.py line 463</span>
+    </div>
+  </div>
+
+  <div class="detail-row joystick">
+    <span class="step-num">4</span>
+    <div class="detail-text">
+      Calls <code>hardware_service.set_servo_position(channel_key, position, "normal")</code>
+      <br>Parses channel key → selects maestro1 or maestro2 → calls <code>maestro.set_target()</code>
+      <br><span class="file">hardware_service.py line 616</span>
+    </div>
+  </div>
+
+  <div class="detail-row joystick">
+    <span class="step-num">5</span>
+    <div class="detail-text">
+      <code>EnhancedMaestroController.set_target()</code> creates a <code>SharedSerialCommand</code>
+      <br>Queued into priority queue in <code>SharedSerialManager</code>
+      <br><span class="file">shared_serial_manager.py line 716</span>
+    </div>
+  </div>
+
+  <div class="detail-row joystick">
+    <span class="step-num">6</span>
+    <div class="detail-text">
+      Serial worker thread dequeues command → <code>"set_target"</code> → writes 6 bytes to serial
+      <br><span class="file">shared_serial_manager.py line 330</span>
+    </div>
+  </div>
+
+  <div class="serial-box">
+    <div class="label">Serial Protocol – Set Target (single servo)</div>
+    <span class="byte">0xAA</span> <span class="comment">// sync</span>
+    <span class="byte">device_num</span> <span class="comment">// 12 or 13</span>
+    <span class="byte">0x04</span> <span class="comment">// command: Set Target</span>
+    <span class="byte">channel</span> <span class="comment">// 0-17</span>
+    <span class="byte">target_low</span> <span class="comment">// (position × 4) & 0x7F</span>
+    <span class="byte">target_high</span> <span class="comment">// (position × 4) >> 7</span>
+  </div>
+
+  <div class="note-box">
+    <strong>Key point:</strong> This path goes <strong>directly to hardware</strong> – it does NOT pass through the MotionMixer, ConstraintPipeline, or CommandDispatcher. The Maestro's own speed/acceleration settings handle smoothing. Channel lock check in <code>controller_input_handler.py</code> prevents joystick from fighting active scenes (on the Bluetooth controller path – the Steam Deck frontend path bypasses this too).
+  </div>
+</div>
+
+<!-- ===== SCENE PATH ===== -->
+<div class="diagram-section">
+  <div class="section-label">Path B – Scene Playback (Bottango Animation)</div>
+
+  <div class="path-label scene">Visual Flow</div>
+  <div class="visual-flow">
+    <div class="node node-input">Home Screen<br><small>Scene Button</small></div>
+    <span class="vf-arrow orange">→</span>
+    <div class="node node-module">WebSocket<br><small>{type:"scene"}</small></div>
+    <span class="vf-arrow orange">→</span>
+    <div class="node node-module">websocket_handler.py<br><small>_handle_scene_command</small></div>
+    <span class="vf-arrow orange">→</span>
+    <div class="node node-module">scene_engine.py<br><small>play_scene()</small></div>
+    <span class="vf-arrow orange">→</span>
+    <div class="node node-mixer">motion_system.py<br><small>MotionMixer</small></div>
+    <span class="vf-arrow purple">→</span>
+    <div class="node node-hw">hardware_service.py<br><small>set_multiple_servo_targets()</small></div>
+    <span class="vf-arrow red">→</span>
+    <div class="node node-serial">shared_serial_manager<br><small>send_batch_command()</small></div>
+    <span class="vf-arrow red">→</span>
+    <div class="node node-maestro">Pololu Maestro<br><small>Serial @ 57600</small></div>
+  </div>
+
+  <div class="path-label scene">Step-by-step detail</div>
+
+  <div class="detail-row scene">
+    <span class="step-num">1</span>
+    <div class="detail-text">
+      User selects scene on Home Screen → <code>send_websocket_message("scene", emotion="Test2")</code>
+      <br><span class="file">home_screen.py line 285</span>
+    </div>
+  </div>
+
+  <div class="detail-row scene">
+    <span class="step-num">2</span>
+    <div class="detail-text">
+      Backend routes to <code>_handle_scene_command()</code> → calls <code>scene_engine.play_scene("Test2")</code>
+      <br><span class="file">websocket_handler.py line 1188</span>
+    </div>
+  </div>
+
+  <div class="detail-row scene">
+    <span class="step-num">3</span>
+    <div class="detail-text">
+      <code>play_scene()</code> finds "Test2" in self.scenes, checks for <code>bottango_scene</code> key
+      <br>If present: loads full step data from <code>scenes/Test2.json</code> (401 steps, 20s)
+      <br>Calls <code>lock_channels(["m1_ch0", "m1_ch1"])</code> <span class="locked-badge">LOCKED</span>
+      <br><span class="file">scene_engine.py line 344</span>
+    </div>
+  </div>
+
+  <div class="detail-row scene">
+    <span class="step-num">4</span>
+    <div class="detail-text">
+      Routes to <code>_execute_scene_via_mixer()</code> → calls <code>motion_mixer.play_scene()</code>
+      <br>Creates a <code>MotionLayer</code> (priority=10, OVERRIDE, auto_remove=True)
+      <br>Creates a <code>SceneTimelinePlayer</code> with all 401 steps
+      <br>Sets <code>layer.channel_mask = {"m1_ch0", "m1_ch1"}</code>
+      <br>Starts <code>player.start()</code> → fade_in over 0.3s
+      <br><span class="file">motion_system.py line 582</span>
+    </div>
+  </div>
+
+  <div class="detail-row scene">
+    <span class="step-num">5</span>
+    <div class="detail-text">
+      <strong>MotionMixer tick loop</strong> runs at 50Hz. Each tick:
+      <br>5a. <code>SceneTimelinePlayer.tick()</code> – interpolates between bracketing keyframes using smoothstep, writes positions to scene layer's <code>channel_values</code>
+      <br>5b. <code>_blend_all_channels()</code> – combines joystick layer (priority 0) + scene layer (priority 10). Scene's <code>channel_mask</code> locks m1_ch0/m1_ch1 from joystick influence
+      <br>5c. <code>ConstraintPipeline.process()</code> – clamps position, applies velocity/acceleration limiting, deadband filter
+      <br>5d. <code>CommandDispatcher.dispatch()</code> – queues channel→position pairs
+      <br><span class="file">motion_system.py line 705</span>
+    </div>
+  </div>
+
+  <div class="detail-row scene">
+    <span class="step-num">6</span>
+    <div class="detail-text">
+      <code>CommandDispatcher.flush()</code> – groups pending commands by Maestro device
+      <br>Calls <code>hardware_service.set_multiple_servo_targets("maestro1", cmds, "realtime")</code>
+      <br><span class="file">motion_system.py line 419</span>
+    </div>
+  </div>
+
+  <div class="detail-row scene">
+    <span class="step-num">7</span>
+    <div class="detail-text">
+      <code>hardware_service</code> calls <code>maestro.set_multiple_targets_with_settings()</code>
+      <br>Builds a <code>BatchCommandBuilder</code> → creates <code>SharedSerialCommand</code> with batch_targets
+      <br><span class="file">hardware_service.py line 352 → shared_serial_manager.py line 681</span>
+    </div>
+  </div>
+
+  <div class="detail-row scene">
+    <span class="step-num">8</span>
+    <div class="detail-text">
+      Serial worker thread dequeues batch command → <code>"set_multiple_targets"</code>
+      <br>Sends speed/accel commands per channel if specified, then single batch write
+      <br><span class="file">shared_serial_manager.py line 299</span>
+    </div>
+  </div>
+
+  <div class="serial-box">
+    <div class="label">Serial Protocol – Set Multiple Targets (batch)</div>
+    <span class="byte">0xAA</span> <span class="comment">// sync</span>
+    <span class="byte">device_num</span> <span class="comment">// 12 or 13</span>
+    <span class="byte">0x1F</span> <span class="comment">// command: Set Multiple Targets</span>
+    <span class="byte">num_targets</span> <span class="comment">// e.g. 2</span>
+    <span class="byte">channel_0</span>
+    <span class="byte">target_0_low</span> <span class="comment">// (pos × 4) & 0x7F</span>
+    <span class="byte">target_0_high</span> <span class="comment">// (pos × 4) >> 7</span>
+    <span class="byte">channel_1</span>
+    <span class="byte">target_1_low</span>
+    <span class="byte">target_1_high</span>
+    <span class="comment">// ... one triplet per servo in batch</span>
+  </div>
+
+  <div class="note-box">
+    <strong>Key point:</strong> Scene playback goes through the full mixer pipeline: interpolation → blending → constraint → batch dispatch. At 50Hz with 2 channels, that's ~100 servo position updates/second via batch commands. Channel locking prevents joystick from interfering with animated channels.
+  </div>
+</div>
+
+<!-- ===== IMPORTANT NOTES ===== -->
+<div class="diagram-section">
+  <div class="section-label">Architecture Notes</div>
+
+  <div class="note-box warning">
+    <strong>⚠ Two independent paths to Maestro:</strong> The Steam Deck frontend joystick sends <code>{type:"servo"}</code> WebSocket messages that go <strong>directly</strong> to <code>hardware_service.set_servo_position()</code> – this bypasses the MotionMixer entirely. It does NOT pass through <code>controller_input_handler.py</code>. The Bluetooth controller path (not shown – backend-only) DOES go through the input handler and mixer. This means:
+    <br><br>
+    • The channel lock check we added to <code>DirectServoHandler</code> / <code>JoystickPairHandler</code> in <code>controller_input_handler.py</code> only protects the <strong>Bluetooth controller</strong> path
+    <br>
+    • The Steam Deck frontend currently has <strong>no channel lock protection</strong> – it can send servo commands to scene-locked channels
+    <br>
+    • During scene playback, if the Steam Deck joystick moves a locked channel, both the mixer (via batch) and the frontend (via individual set_target) send conflicting commands to the same servo
+  </div>
+
+  <div style="margin-top: 20px;">
+    <div class="path-label" style="color: var(--accent-blue);">Mixer internal components (during scene playback)</div>
+    <div class="visual-flow">
+      <div class="node node-mixer" style="min-width:140px">SceneTimeline<br>Player<br><small>interpolate frames</small></div>
+      <span class="vf-arrow purple">→</span>
+      <div class="node node-mixer" style="min-width:100px">Scene Layer<br><small>priority=10<br>OVERRIDE</small></div>
+      <span class="vf-arrow purple">+</span>
+      <div class="node" style="background:var(--surface2);border:2px solid var(--joystick);color:var(--joystick);min-width:100px">Joystick Layer<br><small>priority=0<br>OVERRIDE</small></div>
+      <span class="vf-arrow purple">→</span>
+      <div class="node node-mixer" style="min-width:120px">Blend<br><small>_blend_all_channels()<br>respects channel_mask</small></div>
+      <span class="vf-arrow purple">→</span>
+      <div class="node node-mixer" style="min-width:120px">Constraint<br>Pipeline<br><small>clamp, rate-limit,<br>deadband</small></div>
+      <span class="vf-arrow purple">→</span>
+      <div class="node node-mixer" style="min-width:120px">Command<br>Dispatcher<br><small>batch by Maestro</small></div>
+    </div>
+  </div>
+
+  <div style="margin-top: 20px;">
+    <div class="path-label" style="color: var(--accent-cyan);">Channel locking during scene playback</div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;font-family:'JetBrains Mono',monospace;">
+      <tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:8px;color:var(--text-dim);">Channel</td>
+        <td style="padding:8px;color:var(--text-dim);">Status</td>
+        <td style="padding:8px;color:var(--text-dim);">Controlled by</td>
+        <td style="padding:8px;color:var(--text-dim);">Joystick allowed?</td>
+      </tr>
+      <tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:8px;">m1_ch0</td>
+        <td style="padding:8px;"><span class="locked-badge">LOCKED</span></td>
+        <td style="padding:8px;color:var(--scene);">Scene layer (mixer)</td>
+        <td style="padding:8px;color:var(--accent-red);">❌ Blocked by channel_mask in blending + is_channel_locked() in BT handler</td>
+      </tr>
+      <tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:8px;">m1_ch1</td>
+        <td style="padding:8px;"><span class="locked-badge">LOCKED</span></td>
+        <td style="padding:8px;color:var(--scene);">Scene layer (mixer)</td>
+        <td style="padding:8px;color:var(--accent-red);">❌ Blocked</td>
+      </tr>
+      <tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:8px;">m1_ch2</td>
+        <td style="padding:8px;"><span class="active-badge">FREE</span></td>
+        <td style="padding:8px;color:var(--joystick);">Joystick layer (mixer) / Direct</td>
+        <td style="padding:8px;color:var(--joystick);">✅ Full control</td>
+      </tr>
+      <tr>
+        <td style="padding:8px;">m1_ch3+</td>
+        <td style="padding:8px;"><span class="active-badge">FREE</span></td>
+        <td style="padding:8px;color:var(--joystick);">Joystick layer (mixer) / Direct</td>
+        <td style="padding:8px;color:var(--joystick);">✅ Full control</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+</body>
+</html>
