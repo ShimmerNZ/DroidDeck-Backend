@@ -83,7 +83,6 @@ class EnhancedSceneEngine:
         self.scene_history = []  # Track recently played scenes
         self.current_scene = None
         self.scene_playing = False
-        self.current_scene_is_idle = False  # True when an auto/idle scene is playing
         self.scene_queue = []  # For scene chaining
         
         # Channel locking for legacy scenes (used when motion_mixer is not available)
@@ -207,39 +206,19 @@ class EnhancedSceneEngine:
                 if self.motion_mixer:
                     from modules.motion_system import BlendMode
                     
-                    # Build a full copy of the scene data including any Bottango file content
-                    full_scene_data = scene_data.copy()
-                    if full_scene_data.get("script_enabled") and full_scene_data.get("bottango_scene"):
-                        bottango_name = full_scene_data["bottango_scene"]
-                        bottango_data = await self._load_bottango_scene(bottango_name)
-                        if bottango_data:
-                            bottango_duration = bottango_data.get("duration", bottango_data.get("duration_ms", 1000) / 1000.0)
-                            full_scene_data.update({
-                                "steps": bottango_data.get("steps", []),
-                                "locked_channels": bottango_data.get("locked_channels", []),
-                                "version": bottango_data.get("version", 1),
-                                "tracks": bottango_data.get("tracks", {}),
-                                "duration": bottango_duration
-                            })
-                        else:
-                            logger.warning(f"Failed to load Bottango scene for idle: {bottango_name}")
-                    
-                    success = await self.motion_mixer.play_scene(
+                    await self.motion_mixer.play_scene(
                         scene_name=scene_name,
-                        scene_data=full_scene_data,
+                        scene_data=scene_data,
                         crossfade_in=2.0,
                         crossfade_out=2.0,
                         blend_mode=BlendMode.ADDITIVE,
                         priority=5
                     )
                     
-                    duration = self.calculate_scene_duration(full_scene_data)
+                    duration = self.calculate_scene_duration(scene_data)
                     await asyncio.sleep(duration + 4.0)
                 else:
-                    # No mixer available - idle scenes run as legacy but should not block
-                    # user-triggered scenes. Skip if a scene is already playing.
-                    if not self.scene_playing:
-                        await self.play_scene(scene_name, auto_triggered=True)
+                    await self.play_scene(scene_name)
                 
                 pause = random.uniform(3.0, 8.0)
                 logger.debug(f"Idle pause: {pause:.1f}s before next scene")
@@ -477,18 +456,8 @@ class EnhancedSceneEngine:
             return False
         
         if self.scene_playing:
-            # Allow user-triggered scenes to interrupt idle/auto scenes
-            if not auto_triggered and self.current_scene_is_idle:
-                logger.info(f"User scene '{scene_name}' preempting idle scene '{self.current_scene}'")
-                self.interrupt_requested = True
-                for _ in range(20):
-                    if not self.scene_playing:
-                        break
-                    await asyncio.sleep(0.05)
-            
-            if self.scene_playing:
-                logger.warning(f"Scene already playing ({self.current_scene}), ignoring '{scene_name}'")
-                return False
+            logger.warning(f"Scene already playing ({self.current_scene}), ignoring '{scene_name}'")
+            return False
         
         # Make a copy of the scene to avoid modifying the original
         scene = self.scenes[scene_name].copy()
@@ -525,7 +494,6 @@ class EnhancedSceneEngine:
         
         self.current_scene = scene_name
         self.scene_playing = True
-        self.current_scene_is_idle = auto_triggered
         self.interrupt_requested = False
         self.pause_requested = False
         self.scene_start_time = time.time()
@@ -627,7 +595,6 @@ class EnhancedSceneEngine:
             
             self.scene_playing = False
             self.current_scene = None
-            self.current_scene_is_idle = False
             self.interrupt_requested = False
             self.pause_requested = False
 
@@ -1657,13 +1624,18 @@ class EnhancedSceneEngine:
         
         # Try exact match first
         if not scene_path.exists():
-            # Try case-insensitive search
             scenes_dir = Path("scenes")
             if scenes_dir.exists():
+                # Build sanitised name matching the converter's output format
+                # e.g. "Quick Exhale" -> "quick_exhale"
+                safe_name = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in scene_name)
+                safe_name = safe_name.strip().replace(' ', '_').lower()
+
                 for file in scenes_dir.glob("*.json"):
-                    if file.stem.lower() == scene_name.lower():
+                    stem_lower = file.stem.lower()
+                    if stem_lower == scene_name.lower() or stem_lower == safe_name:
                         scene_path = file
-                        logger.debug(f"📁 Found scene file via case-insensitive match: {scene_path}")
+                        logger.debug(f"Found scene file: {scene_path}")
                         break
         
         if not scene_path.exists():
@@ -1674,7 +1646,7 @@ class EnhancedSceneEngine:
             with open(scene_path, 'r', encoding='utf-8') as f:
                 scene_data = json.load(f)
             
-            logger.debug(f"📥 Loaded Bottango scene from {scene_path}")
+            logger.debug(f"Loaded Bottango scene from {scene_path}")
             return scene_data
             
         except Exception as e:

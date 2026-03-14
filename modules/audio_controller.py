@@ -262,15 +262,17 @@ class NativeAudioController:
             # Notify callback if track was playing
             if self.is_playing and self.track_finished_callback:
                 try:
-                    # Smart callback invocation - detect signature
+                    import asyncio
                     import inspect
                     sig = inspect.signature(self.track_finished_callback)
                     param_count = len(sig.parameters)
+                    args = (self.current_track,) if param_count == 1 else (self.current_track, "stopped")
                     
-                    if param_count == 1:
-                        self.track_finished_callback(self.current_track)
+                    if asyncio.iscoroutinefunction(self.track_finished_callback):
+                        loop = asyncio.get_event_loop()
+                        loop.create_task(self.track_finished_callback(*args))
                     else:
-                        self.track_finished_callback(self.current_track, "stopped")
+                        self.track_finished_callback(*args)
                 except Exception as e:
                     logger.error(f"Track finished callback error: {e}")
             # Reset state

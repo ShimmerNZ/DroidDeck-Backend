@@ -1055,6 +1055,22 @@ class DroidDeckWebServer:
             
             telemetry_data['timestamp'] = time.time()
             
+            # Motion mixer serial performance stats
+            try:
+                mixer = None
+                if self.backend and hasattr(self.backend, 'scene_engine') and self.backend.scene_engine:
+                    mixer = getattr(self.backend.scene_engine, 'motion_mixer', None)
+                if mixer:
+                    s = mixer.stats
+                    ds = mixer.dispatcher.stats
+                    uptime = max(time.monotonic() - getattr(mixer, '_init_time', time.monotonic()), 1.0)
+                    telemetry_data['serial_fps'] = round(s['ticks'] / uptime, 1)
+                    telemetry_data['blend_ms'] = round(s.get('blend_time_ms', 0.0), 2)
+                    telemetry_data['serial_cmds_sec'] = round(ds['commands_sent'] / uptime, 1)
+                    telemetry_data['active_channels'] = s['active_channels']
+            except Exception:
+                pass
+            
             logger.debug(f"Sending telemetry - maestro1 connected: {telemetry_data.get('maestro1', {}).get('connected')}")
             self.socketio.emit('backend_message', telemetry_data, room=client_sid)
                 

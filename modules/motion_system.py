@@ -859,7 +859,12 @@ class MotionMixer:
             "active_channels": 0,
             "blend_time_ms": 0.0,
             "scenes_played": 0,
+            "actual_hz": 0.0,
         }
+        self._init_time: float = time.monotonic()
+        # Rolling window of recent tick timestamps for accurate Hz display
+        from collections import deque as _deque
+        self._tick_times: _deque = _deque(maxlen=60)
 
         logger.info(f"MotionMixer initialized: {self.TICK_RATE}Hz tick rate, "
                      f"{len(self.constraints.constraints)} channel constraints")
@@ -1081,7 +1086,12 @@ class MotionMixer:
         logger.info("MotionMixer tick loop stopped")
 
     async def _tick_loop(self):
-        """Main tick loop running at fixed rate"""
+        """Main tick loop running at fixed rate.
+
+        Uses absolute deadline scheduling to prevent asyncio.sleep()
+        overshoots from compounding into a lower-than-target tick rate.
+        """
+        next_tick = time.monotonic() + self.TICK_INTERVAL
         while self._running:
             tick_start = time.monotonic()
             dt = tick_start - self._last_tick_time
@@ -1095,11 +1105,16 @@ class MotionMixer:
             except Exception as e:
                 logger.error(f"Mixer tick error: {e}")
 
-            # Sleep for remainder of tick interval
-            elapsed = time.monotonic() - tick_start
-            sleep_time = self.TICK_INTERVAL - elapsed
+            # Sleep until the next absolute deadline
+            sleep_time = next_tick - time.monotonic()
             if sleep_time > 0:
                 await asyncio.sleep(sleep_time)
+            else:
+                # Behind — yield to event loop without sleeping, reset deadline
+                await asyncio.sleep(0)
+                next_tick = time.monotonic()
+
+            next_tick += self.TICK_INTERVAL
 
     async def _tick(self, dt: float):
         """Single tick: update layers, blend, constrain, dispatch"""
@@ -1184,6 +1199,14 @@ class MotionMixer:
         )
         self.stats["active_channels"] = active_channels
         self.stats["blend_time_ms"] = blend_time * 0.1 + self.stats["blend_time_ms"] * 0.9
+
+        # Rolling Hz: measure over last 60 ticks
+        now = time.monotonic()
+        self._tick_times.append(now)
+        if len(self._tick_times) >= 2:
+            window = now - self._tick_times[0]
+            if window > 0:
+                self.stats["actual_hz"] = round((len(self._tick_times) - 1) / window, 1)
 
     def _blend_all_channels(self) -> Dict[str, float]:
         """

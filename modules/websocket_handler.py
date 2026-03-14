@@ -769,10 +769,11 @@ class WebSocketMessageHandler:
                         json.dump(controller_config, f, indent=2)
                     logger.info(f"[OK] Updated controller_config.json: {offset_count} center offsets")
                     
-                    # Reload controller config
+                    # Reload controller config and servo config into live components
                     if self.controller_input_processor:
                         self.controller_input_processor.reload_controller_config()
                         self.controller_input_processor.reload_servo_home_positions()
+                        self.controller_input_processor.reload_servo_config()
                         logger.info("[RELOAD] Controller config reloaded")
                         
                         # Force servos to new home positions immediately
@@ -1456,6 +1457,22 @@ class WebSocketMessageHandler:
                     "available_handlers": list(self.handlers.keys())
                 }
             })
+
+            # Motion mixer serial performance stats
+            try:
+                mixer = None
+                if self.scene_engine:
+                    mixer = getattr(self.scene_engine, 'motion_mixer', None)
+                if mixer:
+                    s = mixer.stats
+                    ds = mixer.dispatcher.stats
+                    uptime = max(time.monotonic() - getattr(mixer, '_init_time', time.monotonic()), 1.0)
+                    status['serial_fps'] = s.get('actual_hz', round(s['ticks'] / uptime, 1))
+                    status['blend_ms'] = round(s.get('blend_time_ms', 0.0), 2)
+                    status['serial_cmds_sec'] = round(ds['commands_sent'] / uptime, 1)
+                    status['active_channels'] = s['active_channels']
+            except Exception:
+                pass
             
             await self._send_websocket_message(websocket, status)
             

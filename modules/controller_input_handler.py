@@ -49,22 +49,27 @@ class BehaviorHandler:
     
     def _clamp_pulse(self, value: float, center_offset: int = 0, servo_channel: str = None) -> int:
         """
-        Clamp servo pulse value to safe range
-        center_offset: offset from 1500 center (e.g., -250 means center at 1250)
-        servo_channel: optional channel to look up actual min/max from servo_config
+        Map joystick value (-1.0 to +1.0) to servo pulse range.
+        When servo config is available, maps full joystick travel to the full
+        servo min/max range (centred on home). Falls back to ±500 from center.
+        center_offset: offset from 1500 (e.g. home=1193 gives offset=-307)
         """
         center = 1500 + center_offset
-        pulse = int(center + value * 500)
-        
-        # If we have a servo channel and processor, use actual servo min/max
+
         if servo_channel and self.processor and hasattr(self.processor, 'servo_config'):
             servo_cfg = self.processor.servo_config.get(servo_channel, {})
-            min_pulse = servo_cfg.get('min', 1000)
+            min_pulse = servo_cfg.get('min', 992)
             max_pulse = servo_cfg.get('max', 2000)
+            # Map value to the asymmetric range on each side of center
+            if value >= 0:
+                pulse = int(center + value * (max_pulse - center))
+            else:
+                pulse = int(center + value * (center - min_pulse))
             return max(min_pulse, min(max_pulse, pulse))
-        
-        # Fallback to safe defaults
-        return max(1000, min(2000, pulse))
+
+        # Fallback: fixed ±500 range
+        pulse = int(center + value * 500)
+        return max(992, min(2000, pulse))
 
     def _set_mixer_target(self, channel: str, pulse: float) -> bool:
         """Route a target to the MotionMixer joystick layer if available.
@@ -789,6 +794,9 @@ class ControllerInputProcessor:
         self.backend = backend_ref
         self.motion_mixer = motion_mixer
         
+        # Load servo config for min/max/home lookups
+        self.servo_config = self._load_servo_config()
+        
         # Load servo home positions to use as center offsets
         self.servo_home_positions = self._load_servo_home_positions()
         
@@ -1094,6 +1102,37 @@ class ControllerInputProcessor:
             return True
         except Exception as e:
             logger.error(f"Failed to reload servo home positions: {e}")
+            return False
+
+    def _load_servo_config(self) -> dict:
+        """Load servo config from disk for min/max/home lookups"""
+        try:
+            import json
+            with open('configs/servo_config.json', 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not load servo_config.json: {e}")
+            return {}
+
+    def reload_servo_config(self) -> bool:
+        """Reload servo config and propagate to all live components after a settings save"""
+        try:
+            self.servo_config = self._load_servo_config()
+
+            # Refresh the servo config cache in MultiServoHandler
+            multi_handler = self.handlers.get(BehaviorType.MULTI_SERVO)
+            if multi_handler and hasattr(multi_handler, 'servo_config'):
+                multi_handler.servo_config = self.servo_config
+
+            # Reload constraints in the MotionMixer's smoothing engine
+            if self.motion_mixer and hasattr(self.motion_mixer, 'smoothing_engine'):
+                self.motion_mixer.smoothing_engine.load_constraints(self.servo_config)
+                logger.info("Reloaded servo constraints into smoothing engine")
+
+            logger.info(f"Reloaded servo config: {len(self.servo_config)} channels")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to reload servo config: {e}")
             return False
     
     def reload_controller_config(self) -> bool:

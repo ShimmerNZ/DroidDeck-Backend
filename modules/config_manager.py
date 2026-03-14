@@ -324,22 +324,23 @@ class ConfigurationManager:
         try:
             if config_name not in self.configs:
                 return False
-            
-            # Create timestamped backup filename
+
+            # Use just the filename stem so paths like "resources/configs/scenes_config.json"
+            # produce a clean backup name like "scenes_config_20260314_165428.json"
+            stem = Path(config_name).stem
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-            backup_filename = f"{config_name}_{timestamp}.json"
+            backup_filename = f"{stem}_{timestamp}.json"
             backup_path = self.backup_directory / backup_filename
-            
-            # Save backup
+
             with open(backup_path, 'w') as f:
                 json.dump(self.configs[config_name], f, indent=2)
-            
+
             self.stats["backups_created"] += 1
-            logger.debug(f"💾 Created config backup: {backup_filename}")
+            logger.debug(f"Created config backup: {backup_filename}")
             return True
-            
+
         except Exception as e:
-            logger.error(f"❌ Failed to create backup for {config_name}: {e}")
+            logger.error(f"Failed to create backup for {config_name}: {e}")
             return False
     
     def get_config(self, config_name: str, default: Any = None) -> Any:
