@@ -73,6 +73,8 @@ class WebSocketMessageHandler:
             "emergency_stop": self._handle_emergency_stop,
             "system_status": self._handle_system_status_request,
             "update_camera_config": self._handle_camera_config_update,
+            "update_camera_url": self._handle_camera_url_update,
+            "update_debug_levels": self._handle_debug_levels_update,
             "set_system_volume": self._handle_set_system_volume,
             
             # Gesture detection
@@ -769,11 +771,10 @@ class WebSocketMessageHandler:
                         json.dump(controller_config, f, indent=2)
                     logger.info(f"[OK] Updated controller_config.json: {offset_count} center offsets")
                     
-                    # Reload controller config and servo config into live components
+                    # Reload controller config
                     if self.controller_input_processor:
                         self.controller_input_processor.reload_controller_config()
                         self.controller_input_processor.reload_servo_home_positions()
-                        self.controller_input_processor.reload_servo_config()
                         logger.info("[RELOAD] Controller config reloaded")
                         
                         # Force servos to new home positions immediately
@@ -1457,22 +1458,6 @@ class WebSocketMessageHandler:
                     "available_handlers": list(self.handlers.keys())
                 }
             })
-
-            # Motion mixer serial performance stats
-            try:
-                mixer = None
-                if self.scene_engine:
-                    mixer = getattr(self.scene_engine, 'motion_mixer', None)
-                if mixer:
-                    s = mixer.stats
-                    ds = mixer.dispatcher.stats
-                    uptime = max(time.monotonic() - getattr(mixer, '_init_time', time.monotonic()), 1.0)
-                    status['serial_fps'] = s.get('actual_hz', round(s['ticks'] / uptime, 1))
-                    status['blend_ms'] = round(s.get('blend_time_ms', 0.0), 2)
-                    status['serial_cmds_sec'] = round(ds['commands_sent'] / uptime, 1)
-                    status['active_channels'] = s['active_channels']
-            except Exception:
-                pass
             
             await self._send_websocket_message(websocket, status)
             
@@ -1787,6 +1772,139 @@ class WebSocketMessageHandler:
             }
         }
     
+    async def _handle_camera_url_update(self, websocket, data: Dict[str, Any]):
+        """Update ESP32 camera URL in config file and restart the proxy process"""
+        try:
+            esp32_url = data.get("esp32_url", "").strip()
+            if not esp32_url:
+                await self._send_error_response(websocket, "Missing esp32_url")
+                return
+
+            # Persist to camera_config.json
+            config_path = "configs/camera_config.json"
+            try:
+                if os.path.exists(config_path):
+                    with open(config_path, "r") as f:
+                        cam_config = json.load(f)
+                else:
+                    cam_config = {}
+                cam_config["esp32_url"] = esp32_url
+                cam_config["esp32_base_url"] = esp32_url.replace("/stream", "")
+                with open(config_path, "w") as f:
+                    json.dump(cam_config, f, indent=4)
+                logger.info(f"Camera URL saved to config: {esp32_url}")
+            except Exception as e:
+                logger.warning(f"Could not persist camera URL to config file: {e}")
+
+            # Restart the proxy process so it picks up the new URL
+            proxy_restarted = await self._restart_camera_proxy()
+
+            await self._send_websocket_message(websocket, {
+                "type": "camera_url_updated",
+                "success": True,
+                "esp32_url": esp32_url,
+                "proxy_restarted": proxy_restarted,
+                "timestamp": time.time()
+            })
+
+        except Exception as e:
+            logger.error(f"Camera URL update error: {e}")
+            await self._send_error_response(websocket, f"Camera URL update failed: {str(e)}")
+
+    async def _restart_camera_proxy(self) -> bool:
+        """Kill the running camera proxy process and start a fresh one"""
+        import subprocess
+        import signal as _signal
+
+        pid_file = "camera_proxy.pid"
+        proxy_script = "modules/camera_proxy.py"
+
+        try:
+            # Stop existing proxy if PID file exists
+            if os.path.exists(pid_file):
+                try:
+                    with open(pid_file, "r") as f:
+                        old_pid = int(f.read().strip())
+                    os.kill(old_pid, _signal.SIGTERM)
+                    await asyncio.sleep(1.5)
+                    # Force kill if still running
+                    try:
+                        os.kill(old_pid, _signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass  # Already stopped cleanly
+                    os.remove(pid_file)
+                    logger.info(f"Stopped camera proxy (PID {old_pid})")
+                except (ValueError, ProcessLookupError, OSError) as e:
+                    logger.warning(f"Could not stop old proxy process: {e}")
+                    try:
+                        os.remove(pid_file)
+                    except OSError:
+                        pass
+
+            if not os.path.exists(proxy_script):
+                logger.warning(f"Proxy script not found at {proxy_script}, skipping restart")
+                return False
+
+            # Start fresh proxy process
+            proc = subprocess.Popen(
+                ["python", proxy_script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            await asyncio.sleep(0.5)
+            with open(pid_file, "w") as f:
+                f.write(str(proc.pid))
+            logger.info(f"Camera proxy restarted (PID {proc.pid})")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to restart camera proxy: {e}")
+            return False
+
+    async def _handle_debug_levels_update(self, websocket, data: Dict[str, Any]):
+        """Apply debug log level changes to running loggers without restart"""
+        try:
+            import logging as _logging
+
+            # Module name mapping: settings key -> actual Python logger name(s)
+            module_logger_map = {
+                "camera":   ["camera_proxy", "camera_screen"],
+                "servo":    ["hardware_service", "motion_system", "shared_serial_manager"],
+                "network":  ["websocket_handler", "webapp"],
+            }
+
+            global_level = data.get("debug_level", "").upper()
+            module_debug = data.get("module_debug", {})
+
+            applied = []
+
+            if global_level and hasattr(_logging, global_level):
+                _logging.getLogger().setLevel(getattr(_logging, global_level))
+                applied.append(f"root={global_level}")
+
+            for key, level_str in module_debug.items():
+                level_str = level_str.upper()
+                if not hasattr(_logging, level_str):
+                    continue
+                level = getattr(_logging, level_str)
+                targets = module_logger_map.get(key, [key])
+                for name in targets:
+                    _logging.getLogger(name).setLevel(level)
+                    applied.append(f"{name}={level_str}")
+
+            logger.info(f"Debug levels updated: {', '.join(applied)}")
+            await self._send_websocket_message(websocket, {
+                "type": "debug_levels_updated",
+                "success": True,
+                "applied": applied,
+                "timestamp": time.time()
+            })
+
+        except Exception as e:
+            logger.error(f"Debug levels update error: {e}")
+            await self._send_error_response(websocket, f"Debug levels update failed: {str(e)}")
+
     async def _handle_camera_config_update(self, websocket, data: Dict[str, Any]):
         """Handle camera configuration update with proxy communication"""
         try:

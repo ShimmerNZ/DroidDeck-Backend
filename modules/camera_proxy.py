@@ -590,6 +590,42 @@ class CameraProxy:
                     "settings": self.esp32_settings
                 }), 500
 
+        @app.route('/camera/url', methods=['POST'])
+        def update_camera_url():
+            """Update the ESP32 camera URL at runtime"""
+            try:
+                data = request.json
+                if not data or "esp32_url" not in data:
+                    return jsonify({"error": "Missing esp32_url"}), 400
+
+                new_url = data["esp32_url"].strip()
+                self.esp32_url = new_url
+                self.esp32_base_url = new_url.replace("/stream", "")
+
+                # Persist to camera_config.json
+                try:
+                    config = {}
+                    if os.path.exists(CONFIG_PATH):
+                        with open(CONFIG_PATH, "r") as f:
+                            config = json.load(f)
+                    config["esp32_url"] = new_url
+                    config["esp32_base_url"] = self.esp32_base_url
+                    with open(CONFIG_PATH, "w") as f:
+                        json.dump(config, f, indent=4)
+                    logger.info(f"Camera URL updated and saved: {new_url}")
+                except Exception as e:
+                    logger.warning(f"Could not persist camera URL to config: {e}")
+
+                # Reset connection so the stream reconnects to the new URL
+                self.connected_to_esp32 = False
+                self.connection_errors = 0
+
+                return jsonify({"success": True, "esp32_url": new_url})
+
+            except Exception as e:
+                logger.error(f"Camera URL update error: {e}")
+                return jsonify({"success": False, "error": str(e)}), 500
+
         @app.route('/health')
         def health_check():
             return jsonify({

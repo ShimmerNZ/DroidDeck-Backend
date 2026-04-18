@@ -51,6 +51,7 @@ from modules.config_manager import ConfigurationManager
 from modules.bluetooth_controller import BackendBluetoothController
 from modules.controller_input_handler import ControllerInputProcessor
 from modules.motion_system import MotionMixer, BlendMode
+from modules.gpio_compat import setup_output_pin, set_output, is_gpio_available
 from web.webapp import DroidDeckWebServer
 
 # Import Bottango integration
@@ -86,6 +87,14 @@ class WALLEBackend:
         self.home_screen_ref = None
         self.state = SystemState.FAILSAFE  # Start in failsafe
         self.failsafe_active = True
+
+        # Failsafe indicator output to LCD Arduino Nano (A5)
+        # HIGH = motors active (failsafe off), LOW = motors safe (failsafe on)
+        self.failsafe_indicator_pin = config_dict.get("hardware", {}).get("gpio", {}).get("failsafe_indicator_pin", 24)
+        if is_gpio_available():
+            setup_output_pin(self.failsafe_indicator_pin, initial_state=False)
+            logger.info(f"Failsafe indicator on GPIO {self.failsafe_indicator_pin}")
+
         self.track_channels = self._identify_track_channels()
         self.track_home_position = 1500
         self.track_last_command_time = {}
@@ -247,6 +256,8 @@ class WALLEBackend:
                 
                 self.failsafe_active = True
                 self.state = SystemState.FAILSAFE
+                gpio_ok = set_output(self.failsafe_indicator_pin, False)
+                logger.info(f"Failsafe indicator GPIO {self.failsafe_indicator_pin} → LOW (safe): {'OK' if gpio_ok else 'FAILED'}")
                 
                 return {
                     "success": True,
@@ -287,6 +298,8 @@ class WALLEBackend:
                 
                 self.failsafe_active = False
                 self.state = SystemState.NORMAL
+                gpio_ok = set_output(self.failsafe_indicator_pin, True)
+                logger.info(f"Failsafe indicator GPIO {self.failsafe_indicator_pin} → HIGH (active): {'OK' if gpio_ok else 'FAILED'}")
                 
                 # Start track heartbeat monitor
                 if not self.track_heartbeat_task or self.track_heartbeat_task.done():
@@ -752,39 +765,33 @@ class WALLEBackend:
         telemetry_interval = self.config.get("hardware", {}).get("timing", {}).get("telemetry_interval", 1.0)
         
         logger.info(f"Telemetry running at {telemetry_interval}s intervals (optimized for controller responsiveness)")
-        
-        while self.running:
+
+        async def _do_telemetry_update():
+            """Run one full telemetry cycle entirely in the background.
+            Never awaited by the tick loop - ADC reads and broadcasts
+            happen without blocking servo playback."""
             try:
-                # Get hardware status
                 hardware_status = await self.hardware_service.get_comprehensive_status()
-                
-                # Add camera status
                 hardware_status.update({
                     "camera_proxy": self.get_camera_proxy_status(),
                     "stream_latency": 0.0
                 })
 
-                # Get audio status
                 audio_connected = False
                 if self.audio_controller:
                     try:
                         audio_status = self.audio_controller.get_audio_status()
                         audio_connected = audio_status.get("connected", False)
-                    except Exception as e:
-                        logger.debug(f"Failed to get audio status: {e}")
-                        audio_connected = False
-                
+                    except Exception:
+                        pass
                 hardware_status["audio_system_ready"] = audio_connected
 
-                # Collect telemetry data
                 reading = await self.telemetry_system.update(hardware_status)
-                
-                # Get controller info (now includes optimization status)
+
                 controller_info = {}
                 if hasattr(self, 'bluetooth_controller'):
                     controller_info = self.bluetooth_controller.get_controller_info()
-                
-                # Broadcast telemetry data
+
                 telemetry_message = {
                     "type": "telemetry",
                     "timestamp": reading.timestamp,
@@ -812,12 +819,22 @@ class WALLEBackend:
                         "separated_loops": True
                     }
                 }
-                
                 await self.broadcast_message(telemetry_message)
-                
-                # Wait for next interval
+
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"Telemetry update error: {e}")
+
+        while self.running:
+            try:
+                # Fire telemetry update as background task - never awaited
+                # ADC reads and broadcasts run concurrently with the servo tick loop
+                asyncio.ensure_future(_do_telemetry_update())
+
+                # Only sleep between fires - this is the only await in the loop
                 await asyncio.sleep(telemetry_interval)
-                
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -925,6 +942,15 @@ class WALLEBackend:
             
             # Start motion mixer tick loop (50Hz servo blending)
             self.motion_mixer.start()
+
+            # Pre-warm the thread executor so the first ADC read doesn't
+            # incur thread pool startup latency mid-scene
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, lambda: None)
+                logger.info("Thread executor pre-warmed")
+            except Exception:
+                pass
             
             # Start bluetooth controller
             await self.start_bluetooth_controller()

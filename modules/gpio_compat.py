@@ -37,6 +37,17 @@ class GPIOWrapper:
         try:
             import gpiozero
             from gpiozero import LED, Button, OutputDevice, InputDevice
+
+            # Pi 5 uses the RP1 chip which requires the lgpio pin factory.
+            # Without this, gpiozero silently falls back to MockFactory on Pi 5
+            # and all pin operations succeed but do nothing physically.
+            try:
+                from gpiozero.pins.lgpio import LGPIOFactory
+                gpiozero.Device.pin_factory = LGPIOFactory()
+                logger.info("✅ gpiozero pin factory set to lgpio (Pi 5 RP1 compatible)")
+            except Exception as factory_err:
+                logger.warning(f"⚠️ Could not set lgpio factory: {factory_err} — using default")
+
             self.gpiozero = gpiozero
             self.LED = LED
             self.Button = Button

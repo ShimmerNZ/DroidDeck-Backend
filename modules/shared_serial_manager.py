@@ -227,13 +227,16 @@ class EnhancedSharedSerialPortManager:
         return True
     
     def send_command(self, command: SharedSerialCommand) -> bool:
-        """Send a command through the queue"""
+        """Send a command through the queue (non-blocking).
+        Drops the command if the queue is full rather than blocking the caller.
+        For realtime servo control this is correct — the next tick
+        will send a fresh position within 20ms."""
         if not self.running:
             logger.warning("Cannot send command - manager not running")
             return False
-        
+
         try:
-            self.command_queue.put(command, timeout=0.1)
+            self.command_queue.put_nowait(command)
             return True
         except queue.Full:
             logger.warning("Command queue full - dropping command")
@@ -538,7 +541,7 @@ class EnhancedMaestroControllerShared:
 
     def detect_channel_count_advanced(self) -> int:
         """Auto-detection using device info response"""
-        print(f"=== DEVICE INFO DETECTION: {self.device_id} (device #{self.device_number}) ===")
+        logger.debug(f"Device info detection: {self.device_id} (device #{self.device_number})")
         
         try:
             if not self.connected:
@@ -552,7 +555,7 @@ class EnhancedMaestroControllerShared:
                     
                     # Get device info command (0x21)
                     cmd_bytes = bytes([0xAA, self.device_number, 0x21])
-                    print(f"  Sending command: {cmd_bytes.hex()}")
+                    logger.debug(f"  Sending command: {cmd_bytes.hex()}")
                     self.shared_manager.serial_conn.write(cmd_bytes)
                     
                     # Wait longer for device to respond
@@ -560,15 +563,15 @@ class EnhancedMaestroControllerShared:
                     
                     # Check how many bytes are waiting
                     waiting = self.shared_manager.serial_conn.in_waiting
-                    print(f"  Bytes waiting: {waiting}")
+                    logger.debug(f"  Bytes waiting: {waiting}")
                     
                     response = self.shared_manager.serial_conn.read(16)
-                    print(f"  Response length: {len(response)} bytes")
-                    print(f"  Raw response bytes: {[hex(b) for b in response]}")
+                    logger.debug(f"  Response length: {len(response)} bytes")
+                    logger.debug(f"  Raw response bytes: {[hex(b) for b in response]}")
                     
                     if len(response) >= 2:
                         device_info = response.hex()
-                        print(f"  Device info: {device_info}")
+                        logger.debug(f"  Device info: {device_info}")
                         
                         # Parse the response bytes
                         # The Maestro returns firmware version in first two bytes
@@ -577,7 +580,7 @@ class EnhancedMaestroControllerShared:
                         if len(response) >= 2:
                             minor_fw = response[0]
                             major_fw = response[1]
-                            print(f"  Firmware version: {major_fw}.{minor_fw}")
+                            logger.debug(f"  Firmware version: {major_fw}.{minor_fw}")
                         
                         detected_channels = None
                         
@@ -587,14 +590,14 @@ class EnhancedMaestroControllerShared:
                         # 0100 = 18-channel Maestro
                         if device_info.startswith('1100'):
                             detected_channels = 24
-                            print(f"  Device info indicates 24-channel Maestro")
+                            logger.debug(f"  Device info indicates 24-channel Maestro")
                         elif device_info.startswith('0100'):
                             detected_channels = 18
-                            print(f"  Device info indicates 18-channel Maestro")
+                            logger.debug(f"  Device info indicates 18-channel Maestro")
                         
                         # If device info didn't give us an answer, try alternative detection
                         if detected_channels is None:
-                            print(f"  Unknown device info, trying alternative detection method...")
+                            logger.debug(f"  Unknown device info, trying alternative detection")
                             
                             # Try reading position from a high channel to determine max channels
                             for test_channel in [23, 17, 11]:
@@ -609,7 +612,7 @@ class EnhancedMaestroControllerShared:
                                     
                                     test_response = self.shared_manager.serial_conn.read(2)
                                     if len(test_response) == 2:
-                                        print(f"  âœ… Channel {test_channel} responded - detected {test_channel + 1} channels")
+                                        logger.debug(f"  Channel {test_channel} responded - detected {test_channel + 1} channels")
                                         if test_channel >= 23:
                                             detected_channels = 24
                                         elif test_channel >= 17:
@@ -622,18 +625,18 @@ class EnhancedMaestroControllerShared:
                         
                         # If still no detection, use fallback
                         if detected_channels is None:
-                            print(f"  All detection methods failed, using fallback...")
+                            logger.debug(f"  All detection methods failed, using fallback")
                             detected_channels = self._guess_channel_count()
                     else:
-                        print(f"  No device info response, using fallback...")
+                        logger.debug(f"  No device info response, using fallback")
                         detected_channels = self._guess_channel_count()
                     
                     self.channel_count = detected_channels
-                    print(f"=== FINAL: {self.device_id} = {detected_channels} channels ===")
+                    logger.info(f"Channel detection: {self.device_id} = {detected_channels} channels")
                     return detected_channels
             
         except Exception as e:
-            print(f"=== ERROR: {self.device_id} - {e} ===")
+            logger.error(f"Channel detection error: {self.device_id} - {e}")
             fallback = self._guess_channel_count()
             self.channel_count = fallback
             return fallback

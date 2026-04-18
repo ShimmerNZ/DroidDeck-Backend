@@ -1243,7 +1243,7 @@ class ControllerInputProcessor:
                     return 'scene_1' in config and 'scene_2' in config
                 elif behavior_type == BehaviorType.NEMA_STEPPER:
                     return 'nema_behavior' in config
-                elif behavior_type == BehaviorType.SYSTEM_CONTROL:  # ADD THIS
+                elif behavior_type == BehaviorType.SYSTEM_CONTROL:
                     return 'system_action' in config
                 
                 return True

@@ -294,6 +294,14 @@ class SceneCurvePlayer:
 
         self.on_completed: Optional[Callable] = None
 
+        # FPS diagnostics - tracks actual tick rate during playback
+        self._diag_tick_count: int = 0
+        self._diag_last_tick_time: float = 0.0
+        self._diag_last_report_time: float = 0.0
+        self._diag_min_interval: float = float('inf')
+        self._diag_max_interval: float = 0.0
+        self._diag_scene_name: str = layer.name
+
     def start(self):
         if self.duration <= 0 or not self._seg_lists:
             logger.warning('Scene has no curve tracks to play (missing/empty tracks in v2 scene JSON)')
@@ -303,6 +311,8 @@ class SceneCurvePlayer:
         self.playing = True
         self.completed = False
         self.layer.fade_in(self.crossfade_in)
+        self._diag_last_tick_time = self.start_time
+        self._diag_last_report_time = self.start_time
 
     def stop(self):
         if self.playing:
@@ -377,8 +387,41 @@ class SceneCurvePlayer:
         if not self.playing or self.start_time is None:
             return False
 
-        elapsed = time.monotonic() - self.start_time
+        now = time.monotonic()
+        elapsed = now - self.start_time
+
+        # Track tick interval for FPS diagnostics
+        if self._diag_last_tick_time > 0:
+            interval = now - self._diag_last_tick_time
+            if interval < self._diag_min_interval:
+                self._diag_min_interval = interval
+            if interval > self._diag_max_interval:
+                self._diag_max_interval = interval
+        self._diag_last_tick_time = now
+        self._diag_tick_count += 1
+
+        # Log FPS summary every 2 seconds
+        if now - self._diag_last_report_time >= 2.0:
+            window = now - self._diag_last_report_time
+            fps = self._diag_tick_count / window if window > 0 else 0
+            min_ms = self._diag_min_interval * 1000 if self._diag_min_interval < float('inf') else 0
+            max_ms = self._diag_max_interval * 1000
+            logger.info(
+                f"[SceneFPS] {self._diag_scene_name} | "
+                f"fps={fps:.1f} min={min_ms:.1f}ms max={max_ms:.1f}ms | "
+                f"t={elapsed:.2f}s/{self.duration:.1f}s"
+            )
+            self._diag_tick_count = 0
+            self._diag_last_report_time = now
+            self._diag_min_interval = float('inf')
+            self._diag_max_interval = 0.0
+
         if elapsed >= self.duration:
+            total_ticks = int(self.duration * 50)  # expected ticks at 50Hz
+            logger.info(
+                f"[SceneFPS] {self._diag_scene_name} | COMPLETE | "
+                f"duration={self.duration:.1f}s"
+            )
             self.stop()
             self.completed = True
             if self.on_completed:
@@ -692,6 +735,9 @@ class CommandDispatcher:
             except (IndexError, ValueError):
                 logger.warning(f"Invalid channel ID for restore: {channel_id}")
 
+        # Yield immediately so this doesn't fire mid-tick of a subsequent scene
+        await asyncio.sleep(0.1)
+
         # Send restore commands via individual speed/accel set methods
         for cmd_list, maestro_id in [(restore_cmds_m1, "maestro1"), (restore_cmds_m2, "maestro2")]:
             for cmd in cmd_list:
@@ -699,8 +745,10 @@ class CommandDispatcher:
                 try:
                     if "speed" in cmd:
                         await self.hardware_service.set_servo_speed(ch_key, cmd["speed"])
+                        await asyncio.sleep(0)  # yield between commands
                     if "acceleration" in cmd:
                         await self.hardware_service.set_servo_acceleration(ch_key, cmd["acceleration"])
+                        await asyncio.sleep(0)  # yield between commands
                 except Exception as e:
                     logger.error(f"Failed to restore settings for {ch_key}: {e}")
 
@@ -859,12 +907,7 @@ class MotionMixer:
             "active_channels": 0,
             "blend_time_ms": 0.0,
             "scenes_played": 0,
-            "actual_hz": 0.0,
         }
-        self._init_time: float = time.monotonic()
-        # Rolling window of recent tick timestamps for accurate Hz display
-        from collections import deque as _deque
-        self._tick_times: _deque = _deque(maxlen=60)
 
         logger.info(f"MotionMixer initialized: {self.TICK_RATE}Hz tick rate, "
                      f"{len(self.constraints.constraints)} channel constraints")
@@ -1086,12 +1129,7 @@ class MotionMixer:
         logger.info("MotionMixer tick loop stopped")
 
     async def _tick_loop(self):
-        """Main tick loop running at fixed rate.
-
-        Uses absolute deadline scheduling to prevent asyncio.sleep()
-        overshoots from compounding into a lower-than-target tick rate.
-        """
-        next_tick = time.monotonic() + self.TICK_INTERVAL
+        """Main tick loop running at fixed rate"""
         while self._running:
             tick_start = time.monotonic()
             dt = tick_start - self._last_tick_time
@@ -1105,16 +1143,11 @@ class MotionMixer:
             except Exception as e:
                 logger.error(f"Mixer tick error: {e}")
 
-            # Sleep until the next absolute deadline
-            sleep_time = next_tick - time.monotonic()
+            # Sleep for remainder of tick interval
+            elapsed = time.monotonic() - tick_start
+            sleep_time = self.TICK_INTERVAL - elapsed
             if sleep_time > 0:
                 await asyncio.sleep(sleep_time)
-            else:
-                # Behind — yield to event loop without sleeping, reset deadline
-                await asyncio.sleep(0)
-                next_tick = time.monotonic()
-
-            next_tick += self.TICK_INTERVAL
 
     async def _tick(self, dt: float):
         """Single tick: update layers, blend, constrain, dispatch"""
@@ -1199,14 +1232,6 @@ class MotionMixer:
         )
         self.stats["active_channels"] = active_channels
         self.stats["blend_time_ms"] = blend_time * 0.1 + self.stats["blend_time_ms"] * 0.9
-
-        # Rolling Hz: measure over last 60 ticks
-        now = time.monotonic()
-        self._tick_times.append(now)
-        if len(self._tick_times) >= 2:
-            window = now - self._tick_times[0]
-            if window > 0:
-                self.stats["actual_hz"] = round((len(self._tick_times) - 1) / window, 1)
 
     def _blend_all_channels(self) -> Dict[str, float]:
         """

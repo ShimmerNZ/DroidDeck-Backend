@@ -60,8 +60,9 @@ class HardwareConfig:
     motor_enable_pin: int = 13
     limit_switch_pin: int = 26
     emergency_stop_pin: int = 25
+    failsafe_indicator_pin: int = 24
 
-    # ADD THESE NEW STEPPER MOTOR SETTINGS:
+    # Stepper motor settings
     stepper_steps_per_revolution: int = 800
     stepper_homing_speed: int = 1600
     stepper_normal_speed: int = 4000
@@ -1913,9 +1914,10 @@ def create_hardware_service(config_dict: Dict[str, Any]) -> HardwareService:
             motor_enable_pin=hw_config.get("gpio", {}).get("motor_enable_pin", 13),
             limit_switch_pin=hw_config.get("gpio", {}).get("limit_switch_pin", 26),
             emergency_stop_pin=hw_config.get("gpio", {}).get("emergency_stop_pin", 25),
+            failsafe_indicator_pin=hw_config.get("gpio", {}).get("failsafe_indicator_pin", 24),
             telemetry_interval=hw_config.get("timing", {}).get("telemetry_interval", 0.2),
             servo_update_rate=hw_config.get("timing", {}).get("servo_update_rate", 0.02),
-            # ADD THESE NEW STEPPER MOTOR PARAMETERS:
+            # Stepper motor parameters
             stepper_steps_per_revolution=hw_config.get("stepper_motor", {}).get("steps_per_revolution", 800),
             stepper_homing_speed=hw_config.get("stepper_motor", {}).get("homing_speed", 1600),
             stepper_normal_speed=hw_config.get("stepper_motor", {}).get("normal_speed", 4000),

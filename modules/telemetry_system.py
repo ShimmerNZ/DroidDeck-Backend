@@ -340,9 +340,11 @@ class SafeTelemetrySystem:
             memory = psutil.virtual_memory()
             temperature = self.get_temperature()
             
-            # Get sensor readings (real or simulated)
+            # Get sensor readings in a thread so blocking I2C calls don't stall the event loop
             try:
-                battery_voltage, current_left_track, current_right_track, current_total = self.get_real_adc_readings()
+                loop = asyncio.get_event_loop()
+                battery_voltage, current_left_track, current_right_track, current_total = \
+                    await loop.run_in_executor(None, self.get_real_adc_readings)
             except Exception:
                 battery_voltage, current_left_track, current_right_track, current_total = self.get_simulated_readings()
             
