@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import time
 import random
 from typing import Dict, List, Any, Optional, Callable, Tuple
@@ -498,14 +499,35 @@ class EnhancedSceneEngine:
         self.pause_requested = False
         self.scene_start_time = time.time()
         
+        # Determine if this scene should use the motion mixer
+        has_steps = bool(scene.get('steps'))
+        # v2 curve scenes: presence of tracks/segments should trigger mixer path
+        has_tracks = False
+        try:
+            tracks = scene.get('tracks') or {}
+            if isinstance(tracks, dict):
+                for _ch, t in tracks.items():
+                    if isinstance(t, dict) and t.get('segments'):
+                        if len(t.get('segments', [])) > 0:
+                            has_tracks = True
+                            break
+        except Exception:
+            has_tracks = False
+        use_mixer = (has_tracks or has_steps) and self.motion_mixer is not None
+        
+        # Lock channels for scene animation (both mixer and legacy paths)
         locked_channels = scene.get('locked_channels', [])
         if locked_channels:
             await self.lock_channels(locked_channels)
             logger.info(f"Locked {len(locked_channels)} channel(s) for scene animation")
-
+        
         try:
-            logger.info(f"Playing scene: '{scene_name}' ({scene.get('emoji', '')})")
-
+            mode_tag = ' [mixer]' if use_mixer else ' [legacy]'
+            logger.info(f"Playing scene: '{scene_name}' ({scene.get('emoji', '')}){mode_tag}")
+            
+            if not auto_triggered:
+                0  # Legacy removed = time.time()
+            
             self.scene_history.append({
                 "name": scene_name,
                 "timestamp": time.time(),
@@ -513,15 +535,27 @@ class EnhancedSceneEngine:
             })
             if len(self.scene_history) > 100:
                 self.scene_history = self.scene_history[-50:]
-
+            
             # Notify scene started
             if self.scene_started_callback:
                 try:
                     await self.scene_started_callback(scene_name, scene)
                 except Exception as e:
                     logger.error(f"Scene started callback error: {e}")
-
-            success = await self._execute_scene_via_mixer(scene, scene_name)
+            
+            if use_mixer:
+                # Route through motion mixer for frame-by-frame Bottango playback
+                success = await self._execute_scene_via_mixer(scene, scene_name)
+            else:
+                # Legacy path: check if scene has timesteps (Bottango) or single servo config
+                if has_steps:
+                    # Play timestep-based animation directly
+                    success = await self._execute_timestep_animation(scene, scene_name)
+                else:
+                    # Traditional scene: batch servo commands + wait
+                    success = await self._execute_scene_components(scene)
+                    duration = scene.get("duration", 2.0)
+                    await self._wait_with_interrupt_support(duration)
             
             # Update metrics
             execution_time = time.time() - self.scene_start_time
@@ -588,6 +622,19 @@ class EnhancedSceneEngine:
                 priority = 10
             
             
+            # Start audio if enabled
+            if scene.get("audio_enabled", False):
+                audio_file = scene.get("audio_file")
+                if audio_file and self.audio_controller:
+                    if self.audio_controller.get_audio_info(audio_file):
+                        self.audio_controller.play_track(audio_file)
+                        logger.info(f"Started audio: {audio_file}")
+            
+            # Handle initial delay
+            initial_delay = scene.get("delay", 0)
+            if initial_delay > 0:
+                await asyncio.sleep(initial_delay / 1000.0)
+            
             # Start the scene in the motion mixer
             await self.motion_mixer.play_scene(
                 scene_name=scene_name,
@@ -597,26 +644,7 @@ class EnhancedSceneEngine:
                 blend_mode=blend_mode,
                 priority=10
             )
-
-            # Schedule audio start, with optional delay relative to animation start
-            audio_task = None
-            if scene.get("audio_enabled", False) and not self.interrupt_requested:
-                audio_file = scene.get("audio_file")
-                if audio_file and self.audio_controller:
-                    audio_delay_s = scene.get("delay", 0) / 1000.0
-
-                    async def _start_audio_delayed(file, delay, engine):
-                        if delay > 0:
-                            await asyncio.sleep(delay)
-                        if not engine.interrupt_requested:
-                            if engine.audio_controller.get_audio_info(file):
-                                engine.audio_controller.play_track(file)
-                                logger.info(f"🔊 Started audio: {file}" + (f" (after {delay*1000:.0f}ms delay)" if delay > 0 else ""))
-                            else:
-                                logger.warning(f"⚠️ Audio file not found: {file}")
-
-                    audio_task = asyncio.create_task(_start_audio_delayed(audio_file, audio_delay_s, self))
-
+            
             # Wait for scene to complete, with interrupt support
             duration = scene.get("duration", 2.0)
             total_wait = duration + crossfade_out + 0.1
@@ -624,8 +652,6 @@ class EnhancedSceneEngine:
             
             while time.time() - start_time < total_wait:
                 if self.interrupt_requested:
-                    if audio_task and not audio_task.done():
-                        audio_task.cancel()
                     await self.motion_mixer.stop_scene(scene_name, crossfade_out=0.2)
                     logger.info(f"Scene '{scene_name}' interrupted")
                     break
@@ -650,6 +676,327 @@ class EnhancedSceneEngine:
             traceback.print_exc()
             return False
 
+    async def _execute_timestep_animation(self, scene: Dict[str, Any], scene_name: str) -> bool:
+        """
+        Execute a timestep-based Bottango animation without motion mixer
+        Plays through each timestep in the steps array at the correct time
+        """
+        try:
+            steps = scene.get("steps", [])
+            if not steps:
+                logger.warning("No steps found in scene")
+                return False
+            
+            duration = scene.get("duration", 10.0)
+            locked_channels = scene.get("locked_channels", [])
+            
+            logger.info(f"Playing timestep animation: {len(steps)} steps over {duration:.1f}s")
+            
+            # Start audio if enabled
+            if scene.get("audio_enabled", False):
+                audio_file = scene.get("audio_file")
+                if audio_file and self.audio_controller:
+                    if self.audio_controller.get_audio_info(audio_file):
+                        self.audio_controller.play_track(audio_file)
+                        logger.info(f"Started audio: {audio_file}")
+            
+            # Play through timesteps
+            start_time = time.time()
+            current_step_index = 0
+            
+            while current_step_index < len(steps) and not self.interrupt_requested:
+                elapsed = time.time() - start_time
+                step = steps[current_step_index]
+                step_time = step.get("time", 0.0)
+                
+                # Wait until it's time for this step
+                if elapsed < step_time:
+                    await asyncio.sleep(0.01)  # Small sleep to prevent busy-waiting
+                    continue
+                
+                # Execute this step's servo movements
+                servos = step.get("servos", {})
+                if servos:
+                    # Convert to format expected by batch executor
+                    temp_scene = {"servos": servos}
+                    await self._execute_servo_movements_batch(temp_scene)
+                    logger.debug(f"Step {current_step_index + 1}/{len(steps)}: {len(servos)} servos @ {step_time:.2f}s")
+                
+                current_step_index += 1
+            
+            # Wait for any remaining duration
+            elapsed = time.time() - start_time
+            if elapsed < duration and not self.interrupt_requested:
+                remaining = duration - elapsed
+                logger.debug(f"Waiting {remaining:.2f}s for animation completion")
+                await asyncio.sleep(remaining)
+            
+            logger.info(f"Timestep animation completed in {time.time() - start_time:.2f}s")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Timestep animation execution error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+
+    async def _wait_with_interrupt_support(self, duration: float):
+        """Wait for scene duration with support for interrupts and pauses"""
+        start_time = time.time()
+        logger.debug(f"DEBUG: Starting wait for {duration}s")
+        
+        while time.time() - start_time < duration:
+            if self.interrupt_requested:
+                logger.info("⏹️ Scene interrupted by user")
+                break
+            
+            if self.pause_requested:
+                logger.info("⏸️ Scene paused")
+                while self.pause_requested and not self.interrupt_requested:
+                    await asyncio.sleep(0.1)
+                logger.info("▶️ Scene resumed")
+            
+            # Progress callback
+            if self.scene_progress_callback:
+                progress = min(1.0, (time.time() - start_time) / duration)
+                try:
+                    await self.scene_progress_callback(self.current_scene, progress)
+                except Exception as e:
+                    logger.error(f"Progress callback error: {e}")
+            
+            await asyncio.sleep(0.1)
+        
+        logger.debug(f"DEBUG: Finished waiting after {time.time() - start_time:.2f}s")
+
+    async def _execute_scene_components(self, scene: Dict[str, Any]) -> bool:
+        """Execute all components of a scene with enhanced batch support"""
+        success = True
+        
+        logger.debug("DEBUG: Starting _execute_scene_components")
+
+        # Handle initial delay
+        initial_delay = scene.get("delay", 0)
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay / 1000.0)
+
+        logger.debug("DEBUG: Initial delay complete")
+        
+        # Start audio if enabled
+        audio_started = False
+        if scene.get("audio_enabled", False) and not self.interrupt_requested:
+            logger.debug("DEBUG: Starting audio section")
+            audio_file = scene.get("audio_file")
+            logger.debug(f"DEBUG: Audio file: {audio_file}")
+
+            if audio_file:
+                logger.debug("DEBUG: About to call get_audio_info")
+                audio_info = self.audio_controller.get_audio_info(audio_file)
+                logger.debug(f"DEBUG: get_audio_info returned: {audio_info}")
+                # Quick validation before attempting playback
+                if not self.audio_controller.get_audio_info(audio_file):
+                    logger.warning(f"⚠️ Audio file not found: {audio_file}")
+                    audio_started = False
+                    success = False
+                else:
+                    logger.debug("DEBUG: About to call play_track")
+                    audio_started = self.audio_controller.play_track(audio_file)
+                    logger.debug(f"DEBUG: play_track returned: {audio_started}")
+
+                    if audio_started:
+                        logger.info(f"🔊 Started audio: {audio_file}")
+                    else:
+                        logger.warning(f"⚠️ Failed to start audio: {audio_file}")
+                        success = False
+        logger.debug("DEBUG: Audio section complete")
+        
+        # Execute servo movements using batch commands
+        if not self.interrupt_requested:
+            logger.debug("DEBUG: Starting servo movements")
+            servo_success = await self._execute_servo_movements_batch(scene)
+            logger.debug("DEBUG: Servo movements complete")
+            success = success and servo_success
+        
+        # Execute scripts if enabled
+        if not self.interrupt_requested:
+            script_tasks = []
+            
+            # Check for Maestro 1 script
+            script_maestro1 = scene.get("script_maestro1")
+            if script_maestro1 is not None:
+                logger.debug(f"📜 Queuing script #{script_maestro1} for Maestro 1")
+                script_tasks.append(self._execute_maestro_script("maestro1", script_maestro1))
+            
+            # Check for Maestro 2 script
+            script_maestro2 = scene.get("script_maestro2")
+            if script_maestro2 is not None:
+                logger.debug(f"📜 Queuing script #{script_maestro2} for Maestro 2")
+                script_tasks.append(self._execute_maestro_script("maestro2", script_maestro2))
+            
+            # Execute both scripts concurrently if any exist
+            if script_tasks:
+                script_results = await asyncio.gather(*script_tasks, return_exceptions=True)
+                for i, result in enumerate(script_results):
+                    if isinstance(result, Exception):
+                        logger.error(f"❌ Script execution failed: {result}")
+                        success = False
+        
+        logger.debug("DEBUG: _execute_scene_components complete")
+        return success
+    
+    async def _execute_maestro_script(self, maestro_name: str, script_number: int) -> bool:
+        """Execute a script on a specific Maestro controller"""
+        try:
+            logger.debug(f"📜 Executing script #{script_number} on {maestro_name}")
+            result = await self.hardware_service.restart_maestro_script(maestro_name, script_number)
+            if result:
+                logger.debug(f"✅ Script #{script_number} started on {maestro_name}")
+            else:
+                logger.warning(f"⚠️ Failed to start script #{script_number} on {maestro_name}")
+            return result
+        except Exception as e:
+            logger.error(f"❌ Error executing script on {maestro_name}: {e}")
+            return False
+    
+    async def _execute_servo_movements_batch(self, scene: Dict[str, Any]) -> bool:
+        """Execute servo movements using efficient batch commands"""
+        servos = scene.get("servos", {})
+        if not servos:
+            return True
+        
+        start_time = time.time()
+        
+        # Group servos by Maestro device
+        maestro1_servos = []
+        maestro2_servos = []
+        
+        for servo_id, settings in servos.items():
+            if self.interrupt_requested:
+                break
+                
+            try:
+                maestro_num, channel = self._parse_servo_id(servo_id)
+                
+                servo_config = {
+                    "channel": channel,
+                    "target": settings.get("target", settings.get("position"))
+                }
+                
+                # Add speed and acceleration if specified
+                if "speed" in settings:
+                    servo_config["speed"] = settings["speed"]
+                if "acceleration" in settings:
+                    servo_config["acceleration"] = settings["acceleration"]
+                
+                if maestro_num == 1:
+                    maestro1_servos.append(servo_config)
+                elif maestro_num == 2:
+                    maestro2_servos.append(servo_config)
+                    
+            except Exception as e:
+                logger.error(f"❌ Failed to parse servo {servo_id}: {e}")
+                return False
+        
+        if self.interrupt_requested:
+            return False
+        
+        # Send batch commands to each Maestro
+        success = True
+        batch_commands_sent = 0
+        
+        if maestro1_servos:
+            try:
+                batch_success = await self._send_maestro_batch("maestro1", maestro1_servos)
+                success &= batch_success
+                if batch_success:
+                    batch_commands_sent += 1
+                    self.metrics.batch_commands_used += 1
+                    logger.debug(f"🎯 Sent batch to Maestro 1: {len(maestro1_servos)} servos")
+                
+            except Exception as e:
+                logger.error(f"❌ Maestro 1 batch error: {e}")
+                success = False
+        
+        if maestro2_servos and not self.interrupt_requested:
+            try:
+                batch_success = await self._send_maestro_batch("maestro2", maestro2_servos)
+                success &= batch_success
+                if batch_success:
+                    batch_commands_sent += 1
+                    self.metrics.batch_commands_used += 1
+                    logger.debug(f"🎯 Sent batch to Maestro 2: {len(maestro2_servos)} servos")
+                
+            except Exception as e:
+                logger.error(f"❌ Maestro 2 batch error: {e}")
+                success = False
+        
+        # Update performance statistics
+        setup_time = time.time() - start_time
+        servo_count = len(maestro1_servos) + len(maestro2_servos)
+        
+        if servo_count > 0:
+            self.metrics.total_servos_moved += servo_count
+            
+            # Update average setup time
+            if self.metrics.total_scenes_played == 0:
+                self.metrics.average_setup_time_ms = setup_time * 1000
+            else:
+                self.metrics.average_setup_time_ms = (
+                    self.metrics.average_setup_time_ms * 0.9 + (setup_time * 1000) * 0.1
+                )
+        
+        logger.debug(f"⚠ Scene servo setup: {servo_count} servos in {setup_time*1000:.1f}ms")
+        
+        return success
+    
+    async def _send_maestro_batch(self, maestro_id: str, servo_configs: List[Dict[str, Any]]) -> bool:
+        """Send batch command to specific Maestro with fallback to individual commands"""
+        try:
+            # Try enhanced batch method first
+            if hasattr(self.hardware_service, 'set_multiple_servo_targets'):
+                batch_success = await self.hardware_service.set_multiple_servo_targets(
+                    maestro_id, servo_configs, priority="normal"
+                )
+                
+                if batch_success:
+                    return True
+                else:
+                    logger.warning(f"⚠️ Batch command failed for {maestro_id}, falling back to individual")
+            
+            # Fallback: Send individual commands
+            success = True
+            for config in servo_configs:
+                if self.interrupt_requested:
+                    break
+                    
+                channel_key = f"{maestro_id[:-1]}_ch{config['channel']}"  # m1_ch0, m2_ch5, etc.
+                
+                # Set speed and acceleration first if specified
+                if 'speed' in config:
+                    speed_success = await self.hardware_service.set_servo_speed(
+                        channel_key, config['speed']
+                    )
+                    success &= speed_success
+                
+                if 'acceleration' in config:
+                    accel_success = await self.hardware_service.set_servo_acceleration(
+                        channel_key, config['acceleration'] 
+                    )
+                    success &= accel_success
+                
+                # Set target position
+                pos_success = await self.hardware_service.set_servo_position(
+                    channel_key, config['target'], "normal"
+                )
+                success &= pos_success
+                self.metrics.individual_commands_used += 1
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"❌ Maestro batch send error for {maestro_id}: {e}")
+            return False
+    
     def _parse_servo_id(self, servo_id: str) -> Tuple[int, int]:
         """Parse servo ID like 'm1_ch5' into (maestro_num, channel)"""
         try:
@@ -766,13 +1113,42 @@ class EnhancedSceneEngine:
         return success
     
     async def _return_servos_to_neutral(self):
-        """Stop all active mixer layers — servo wind-down is handled by the motion mixer crossfade"""
+        """Return all servos to neutral positions"""
         try:
-            if self.motion_mixer:
-                await self.motion_mixer.stop_all(crossfade_out=0.2)
-                logger.debug("🎯 Motion mixer stopped on scene interrupt")
+            # Define neutral positions for common servo channels
+            neutral_positions = {
+                "m1_ch0": 1500,  # Head pan
+                "m1_ch1": 1500,  # Head tilt
+                "m1_ch2": 1500,  # Eye movement
+                "m1_ch3": 1500,  # Arm
+                "m2_ch0": 1500,  # Body servo
+                "m2_ch1": 1500,  # Additional servo
+            }
+            
+            # Group by Maestro for batch commands
+            maestro1_neutrals = []
+            maestro2_neutrals = []
+            
+            for servo_id, position in neutral_positions.items():
+                maestro_num, channel = self._parse_servo_id(servo_id)
+                
+                servo_config = {"channel": channel, "target": position, "speed": 30}
+                
+                if maestro_num == 1:
+                    maestro1_neutrals.append(servo_config)
+                elif maestro_num == 2:
+                    maestro2_neutrals.append(servo_config)
+            
+            # Send batch commands
+            if maestro1_neutrals:
+                await self._send_maestro_batch("maestro1", maestro1_neutrals)
+            if maestro2_neutrals:
+                await self._send_maestro_batch("maestro2", maestro2_neutrals)
+            
+            logger.debug("🎯 Returned servos to neutral positions")
+            
         except Exception as e:
-            logger.error(f"❌ Failed to stop motion mixer: {e}")
+            logger.error(f"❌ Failed to return servos to neutral: {e}")
     
     # ==================== SCENE QUERY AND MANAGEMENT ====================
     
@@ -986,7 +1362,34 @@ class EnhancedSceneEngine:
             return {"error": str(e)}
     
     # ==================== SCENE EDITING AND MANAGEMENT ====================
-    
+
+    def _backup_config(self, config_path: str, max_backups: int = 10):
+        """
+        Back up a config file into a backups/ subfolder beside it.
+        Only the most recent max_backups copies are kept; older ones are pruned.
+        """
+        try:
+            src = Path(config_path)
+            backup_dir = src.parent / "backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+
+            timestamp = int(time.time())
+            backup_name = f"{src.stem}.backup.{timestamp}{src.suffix}"
+            backup_path = backup_dir / backup_name
+
+            shutil.copy2(src, backup_path)
+            logger.info(f"💾 Created backup: {backup_path}")
+
+            # Prune old backups — keep only the most recent max_backups
+            pattern = f"{src.stem}.backup.*{src.suffix}"
+            existing = sorted(backup_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
+            for old in existing[:-max_backups]:
+                old.unlink()
+                logger.debug(f"🗑️ Pruned old backup: {old.name}")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Could not create backup of {config_path}: {e}")
+
     async def save_scenes(self, scenes_data: List[Dict[str, Any]]) -> bool:
         """Save scenes configuration to file with validation"""
         try:
@@ -1014,11 +1417,8 @@ class EnhancedSceneEngine:
             
             # Create backup of current config
             if Path(self.config_path).exists():
-                backup_path = f"{self.config_path}.backup.{int(time.time())}"
-                import shutil
-                shutil.copy2(self.config_path, backup_path)
-                logger.info(f"💾 Created backup: {backup_path}")
-            
+                self._backup_config(self.config_path)
+
             # Save to file
             with open(self.config_path, "w", encoding='utf-8') as f:
                 json.dump(scenes_data, f, indent=2, ensure_ascii=False)
@@ -1041,17 +1441,19 @@ class EnhancedSceneEngine:
         try:
             scene_name = scene.get("label", "Test Scene")
             logger.info(f"🧪 Testing scene: {scene_name}")
-
+            
+            # Validate scene first
             validation = self.validate_scene(scene, scene_name)
             if not validation.valid:
                 logger.error(f"❌ Scene validation failed: {validation.errors}")
                 return False
-
-            success = await self._execute_scene_via_mixer(scene, scene_name)
-
+            
+            # Execute scene components
+            success = await self._execute_scene_components(scene)
+            
             logger.info(f"🧪 Scene test {'✅ passed' if success else '❌ failed'}: {scene_name}")
             return success
-
+            
         except Exception as e:
             logger.error(f"❌ Scene test error: {e}")
             return False

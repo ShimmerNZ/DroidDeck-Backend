@@ -1458,9 +1458,11 @@ class WebSocketMessageHandler:
                 }
             })
 
-            # Attach battery run-time estimate if available
+            # Attach battery run-time estimate and voltage if telemetry is available
             if self.telemetry_system and hasattr(self.telemetry_system, "get_battery_estimate"):
                 status["battery_estimate"] = self.telemetry_system.get_battery_estimate()
+            if self.telemetry_system and self.telemetry_system.last_reading:
+                status["battery_voltage"] = self.telemetry_system.last_reading.battery_voltage
 
             await self._send_websocket_message(websocket, status)
             
@@ -1573,7 +1575,7 @@ class WebSocketMessageHandler:
     async def _handle_failsafe(self, websocket, data: Dict[str, Any]):
         """Handle failsafe mode toggle"""
         state = data.get("state", False)
-        logger.info(f" Failsafe mode {'activated' if state else 'deactivated'}")
+        logger.info(f"⚠️ Failsafe mode {'activated' if state else 'deactivated'}")
         
         # Update backend state
         if hasattr(self.backend, 'set_failsafe_mode'):
@@ -1606,7 +1608,7 @@ class WebSocketMessageHandler:
                 # Toggle idle mode in scene engine
                 if hasattr(self.scene_engine, 'set_idle_mode'):
                     self.scene_engine.set_idle_mode(state)
-                    logger.info(f"🌙 Idle mode {'ENABLED' if state else 'DISABLED'} via frontend")
+                    logger.info(f"ðŸŒ™ Idle mode {'ENABLED' if state else 'DISABLED'} via frontend")
                     
                     # Send confirmation back to frontend
                     await self._send_response(websocket, {
