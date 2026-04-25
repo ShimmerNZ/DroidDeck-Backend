@@ -113,9 +113,20 @@ class EnhancedSceneEngine:
         # Load scenes from configuration
         self.load_scenes()
         
+        # Start background tasks
+        self._start_background_tasks()
+        
         logger.info(f"🎭 Enhanced Scene Engine initialized with {len(self.scenes)} scenes")
         logger.info(f"📂 Available categories: {', '.join(self.get_available_categories())}")
         logger.info(f"🔒 Channel locking enabled for Bottango scene priority")
+    
+    def _start_background_tasks(self):
+        """Start background tasks for auto-idle and cleanup"""
+        try:
+            # Auto-idle task
+            pass
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to start background tasks: {e}")
     
     
 
@@ -487,12 +498,11 @@ class EnhancedSceneEngine:
         self.pause_requested = False
         self.scene_start_time = time.time()
         
-        # Lock channels for scene animation
         locked_channels = scene.get('locked_channels', [])
         if locked_channels:
             await self.lock_channels(locked_channels)
             logger.info(f"Locked {len(locked_channels)} channel(s) for scene animation")
-        
+
         try:
             logger.info(f"Playing scene: '{scene_name}' ({scene.get('emoji', '')})")
 
@@ -511,14 +521,7 @@ class EnhancedSceneEngine:
                 except Exception as e:
                     logger.error(f"Scene started callback error: {e}")
 
-            has_animation = bool(scene.get('steps') or scene.get('tracks'))
-            if has_animation and self.motion_mixer is not None:
-                success = await self._execute_scene_via_mixer(scene, scene_name)
-            else:
-                # Audio-only scene: play audio and wait for duration
-                success = await self._execute_scene_components(scene)
-                duration = scene.get("duration", 2.0)
-                await self._wait_with_interrupt_support(duration)
+            success = await self._execute_scene_via_mixer(scene, scene_name)
             
             # Update metrics
             execution_time = time.time() - self.scene_start_time
@@ -585,19 +588,6 @@ class EnhancedSceneEngine:
                 priority = 10
             
             
-            # Start audio if enabled
-            if scene.get("audio_enabled", False):
-                audio_file = scene.get("audio_file")
-                if audio_file and self.audio_controller:
-                    if self.audio_controller.get_audio_info(audio_file):
-                        self.audio_controller.play_track(audio_file)
-                        logger.info(f"Started audio: {audio_file}")
-            
-            # Handle initial delay
-            initial_delay = scene.get("delay", 0)
-            if initial_delay > 0:
-                await asyncio.sleep(initial_delay / 1000.0)
-            
             # Start the scene in the motion mixer
             await self.motion_mixer.play_scene(
                 scene_name=scene_name,
@@ -607,7 +597,26 @@ class EnhancedSceneEngine:
                 blend_mode=blend_mode,
                 priority=10
             )
-            
+
+            # Schedule audio start, with optional delay relative to animation start
+            audio_task = None
+            if scene.get("audio_enabled", False) and not self.interrupt_requested:
+                audio_file = scene.get("audio_file")
+                if audio_file and self.audio_controller:
+                    audio_delay_s = scene.get("delay", 0) / 1000.0
+
+                    async def _start_audio_delayed(file, delay, engine):
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                        if not engine.interrupt_requested:
+                            if engine.audio_controller.get_audio_info(file):
+                                engine.audio_controller.play_track(file)
+                                logger.info(f"🔊 Started audio: {file}" + (f" (after {delay*1000:.0f}ms delay)" if delay > 0 else ""))
+                            else:
+                                logger.warning(f"⚠️ Audio file not found: {file}")
+
+                    audio_task = asyncio.create_task(_start_audio_delayed(audio_file, audio_delay_s, self))
+
             # Wait for scene to complete, with interrupt support
             duration = scene.get("duration", 2.0)
             total_wait = duration + crossfade_out + 0.1
@@ -615,6 +624,8 @@ class EnhancedSceneEngine:
             
             while time.time() - start_time < total_wait:
                 if self.interrupt_requested:
+                    if audio_task and not audio_task.done():
+                        audio_task.cancel()
                     await self.motion_mixer.stop_scene(scene_name, crossfade_out=0.2)
                     logger.info(f"Scene '{scene_name}' interrupted")
                     break
@@ -639,68 +650,6 @@ class EnhancedSceneEngine:
             traceback.print_exc()
             return False
 
-    async def _wait_with_interrupt_support(self, duration: float):
-        """Wait for scene duration with support for interrupts and pauses"""
-        start_time = time.time()
-        while time.time() - start_time < duration:
-            if self.interrupt_requested:
-                logger.info("⏹️ Scene interrupted by user")
-                break
-            
-            if self.pause_requested:
-                logger.info("⏸️ Scene paused")
-                while self.pause_requested and not self.interrupt_requested:
-                    await asyncio.sleep(0.1)
-                logger.info("▶️ Scene resumed")
-            
-            # Progress callback
-            if self.scene_progress_callback:
-                progress = min(1.0, (time.time() - start_time) / duration)
-                try:
-                    await self.scene_progress_callback(self.current_scene, progress)
-                except Exception as e:
-                    logger.error(f"Progress callback error: {e}")
-            
-            await asyncio.sleep(0.1)
-        
-
-    async def _execute_scene_components(self, scene: Dict[str, Any]) -> bool:
-        """Start audio for audio-only scenes (no Bottango animation)"""
-        success = True
-
-        initial_delay = scene.get("delay", 0)
-        if initial_delay > 0:
-            await asyncio.sleep(initial_delay / 1000.0)
-
-        if scene.get("audio_enabled", False) and not self.interrupt_requested:
-            audio_file = scene.get("audio_file")
-            if audio_file:
-                if not self.audio_controller.get_audio_info(audio_file):
-                    logger.warning(f"Audio file not found: {audio_file}")
-                    success = False
-                else:
-                    if not self.audio_controller.play_track(audio_file):
-                        logger.warning(f"Failed to start audio: {audio_file}")
-                        success = False
-                    else:
-                        logger.info(f"Started audio: {audio_file}")
-
-        return success
-    
-    async def _execute_maestro_script(self, maestro_name: str, script_number: int) -> bool:
-        """Execute a script on a specific Maestro controller"""
-        try:
-            logger.debug(f"📜 Executing script #{script_number} on {maestro_name}")
-            result = await self.hardware_service.restart_maestro_script(maestro_name, script_number)
-            if result:
-                logger.debug(f"✅ Script #{script_number} started on {maestro_name}")
-            else:
-                logger.warning(f"⚠️ Failed to start script #{script_number} on {maestro_name}")
-            return result
-        except Exception as e:
-            logger.error(f"❌ Error executing script on {maestro_name}: {e}")
-            return False
-    
     def _parse_servo_id(self, servo_id: str) -> Tuple[int, int]:
         """Parse servo ID like 'm1_ch5' into (maestro_num, channel)"""
         try:
@@ -752,6 +701,9 @@ class EnhancedSceneEngine:
         # Stop audio
         if self.audio_controller:
             self.audio_controller.stop()
+        
+        # Return servos to neutral positions
+        await self._return_servos_to_neutral()
         
         logger.info("✅ Scene stopped successfully")
         return True
@@ -812,6 +764,15 @@ class EnhancedSceneEngine:
                 await asyncio.sleep(delay_between)
         
         return success
+    
+    async def _return_servos_to_neutral(self):
+        """Stop all active mixer layers — servo wind-down is handled by the motion mixer crossfade"""
+        try:
+            if self.motion_mixer:
+                await self.motion_mixer.stop_all(crossfade_out=0.2)
+                logger.debug("🎯 Motion mixer stopped on scene interrupt")
+        except Exception as e:
+            logger.error(f"❌ Failed to stop motion mixer: {e}")
     
     # ==================== SCENE QUERY AND MANAGEMENT ====================
     
@@ -947,6 +908,83 @@ class EnhancedSceneEngine:
             logger.error(f"❌ Failed to get scene info for '{scene_name}': {e}")
             return None
     
+    def _estimate_scene_execution_time(self, scene: Dict[str, Any]) -> float:
+        """Estimate total scene execution time including setup"""
+        try:
+            base_duration = scene.get("duration", 2.0)
+            initial_delay = scene.get("delay", 0) / 1000.0
+            
+            # Estimate servo setup time (batch commands are much faster)
+            servo_count = len(scene.get("servos", {}))
+            if servo_count > 0:
+                # Batch setup is ~5ms per Maestro vs ~15ms per servo individually
+                maestro1_servos = sum(1 for s in scene.get("servos", {}) if s.startswith("m1_"))
+                maestro2_servos = sum(1 for s in scene.get("servos", {}) if s.startswith("m2_"))
+                batch_count = (1 if maestro1_servos > 0 else 0) + (1 if maestro2_servos > 0 else 0)
+                servo_setup_time = batch_count * 0.005  # 5ms per batch
+            else:
+                servo_setup_time = 0
+            
+            # Audio start time
+            audio_setup_time = 0.1 if scene.get("audio_enabled", False) else 0
+            
+            return base_duration + initial_delay + servo_setup_time + audio_setup_time
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to estimate execution time: {e}")
+            return scene.get("duration", 2.0)
+    
+    async def preview_scene_servos(self, scene_name: str) -> Dict[str, Any]:
+        """Preview servo movements for a scene without executing them"""
+        try:
+            if scene_name not in self.scenes:
+                return {"error": f"Scene '{scene_name}' not found"}
+            
+            scene = self.scenes[scene_name]
+            servos = scene.get("servos", {})
+            
+            # Group servos by Maestro
+            maestro1_servos = []
+            maestro2_servos = []
+            
+            for servo_id, settings in servos.items():
+                maestro_num, channel = self._parse_servo_id(servo_id)
+                
+                movement_info = {
+                    "servo": servo_id,
+                    "channel": channel,
+                    "target": settings.get("target"),
+                    "speed": settings.get("speed"),
+                    "acceleration": settings.get("acceleration")
+                }
+                
+                if maestro_num == 1:
+                    maestro1_servos.append(movement_info)
+                elif maestro_num == 2:
+                    maestro2_servos.append(movement_info)
+            
+            preview_info = {
+                "scene_name": scene_name,
+                "total_servos": len(servos),
+                "maestro1_servos": len(maestro1_servos),
+                "maestro2_servos": len(maestro2_servos),
+                "batch_commands": (1 if maestro1_servos else 0) + (1 if maestro2_servos else 0),
+                "movements": {
+                    "maestro1": maestro1_servos,
+                    "maestro2": maestro2_servos
+                },
+                "duration": scene.get("duration", 2.0),
+                "has_audio": scene.get("audio_enabled", False),
+                "estimated_setup_time_ms": len(servos) * 5 if servos else 0,
+                "performance_gain": f"{max(1, len(servos) // 2)}x faster with batch commands"
+            }
+            
+            return preview_info
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to preview scene '{scene_name}': {e}")
+            return {"error": str(e)}
+    
     # ==================== SCENE EDITING AND MANAGEMENT ====================
     
     async def save_scenes(self, scenes_data: List[Dict[str, Any]]) -> bool:
@@ -1003,19 +1041,17 @@ class EnhancedSceneEngine:
         try:
             scene_name = scene.get("label", "Test Scene")
             logger.info(f"🧪 Testing scene: {scene_name}")
-            
-            # Validate scene first
+
             validation = self.validate_scene(scene, scene_name)
             if not validation.valid:
                 logger.error(f"❌ Scene validation failed: {validation.errors}")
                 return False
-            
-            # Execute scene components
-            success = await self._execute_scene_components(scene)
-            
+
+            success = await self._execute_scene_via_mixer(scene, scene_name)
+
             logger.info(f"🧪 Scene test {'✅ passed' if success else '❌ failed'}: {scene_name}")
             return success
-            
+
         except Exception as e:
             logger.error(f"❌ Scene test error: {e}")
             return False
@@ -1108,6 +1144,65 @@ class EnhancedSceneEngine:
             
         except Exception as e:
             logger.error(f"❌ Failed to get engine stats: {e}")
+            return {"error": str(e)}
+    
+    def get_scene_performance_report(self) -> Dict[str, Any]:
+        """Get detailed performance analysis report"""
+        try:
+            total_commands = self.metrics.batch_commands_used + self.metrics.individual_commands_used
+            
+            if total_commands == 0:
+                return {
+                    "status": "No scenes executed yet",
+                    "recommendations": ["Execute some scenes to generate performance data"]
+                }
+            
+            # Calculate performance metrics
+            batch_ratio = self.metrics.batch_commands_used / total_commands
+            time_saved = (self.metrics.individual_commands_used * 15) - (self.metrics.batch_commands_used * 5)
+            efficiency_score = min(100, batch_ratio * 100)
+            
+            # Generate recommendations
+            recommendations = []
+            if batch_ratio < 0.8:
+                recommendations.append("Consider updating hardware service to support batch commands")
+            if self.metrics.average_setup_time_ms > 50:
+                recommendations.append("Scene setup time is high - check servo configurations")
+            if len(self.scene_queue) > 5:
+                recommendations.append("Scene queue is getting long - consider reducing queue size")
+            
+            # Performance grade
+            if efficiency_score >= 90:
+                grade = "A+"
+            elif efficiency_score >= 80:
+                grade = "A"
+            elif efficiency_score >= 70:
+                grade = "B+"
+            elif efficiency_score >= 60:
+                grade = "B"
+            else:
+                grade = "C"
+            
+            return {
+                "performance_grade": grade,
+                "efficiency_score": round(efficiency_score, 1),
+                "batch_optimization_ratio": round(batch_ratio * 100, 1),
+                "total_time_saved_ms": round(time_saved, 1),
+                "average_scene_performance": {
+                    "setup_time_ms": round(self.metrics.average_setup_time_ms, 2),
+                    "servos_per_scene": round(self.metrics.total_servos_moved / max(1, self.metrics.total_scenes_played), 1),
+                    "commands_per_scene": round(total_commands / max(1, self.metrics.total_scenes_played), 1)
+                },
+                "recommendations": recommendations,
+                "optimization_impact": {
+                    "before_optimization": f"{self.metrics.individual_commands_used} individual commands",
+                    "after_optimization": f"{self.metrics.batch_commands_used} batch commands",
+                    "improvement_factor": f"{round(total_commands / max(1, self.metrics.batch_commands_used), 1)}x faster"
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to generate performance report: {e}")
             return {"error": str(e)}
     
     def reset_statistics(self):
@@ -1204,48 +1299,3 @@ class EnhancedSceneEngine:
             
         except Exception as e:
             logger.error(f"❌ Scene engine cleanup error: {e}")
-
-# Example usage and integration functions
-async def demo_enhanced_scene_engine():
-    """Demonstrate the enhanced scene engine capabilities"""
-    from unittest.mock import Mock
-    
-    # Create mock hardware and audio services
-    mock_hardware = Mock()
-    mock_audio = Mock()
-    
-    # Create enhanced scene engine
-    engine = EnhancedSceneEngine(mock_hardware, mock_audio)
-    
-    print("🎭 Enhanced Scene Engine Demo")
-    print("=" * 50)
-    
-    # Show available scenes
-    scenes = await engine.get_scenes_list()
-    print(f"📋 Available scenes: {len(scenes)}")
-    for scene in scenes[:3]:
-        print(f"  • {scene['emoji']} {scene['label']} ({scene['duration']}s)")
-    
-    # Show categories
-    categories = engine.get_available_categories()
-    print(f"\n📚 Categories: {', '.join(categories)}")
-    
-    # Performance preview
-    if scenes:
-        preview = await engine.preview_scene_servos(scenes[0]['label'])
-        print(f"\n🎯 Scene Preview: {preview['scene_name']}")
-        print(f"  • Total servos: {preview['total_servos']}")
-        print(f"  • Batch commands: {preview['batch_commands']}")
-        print(f"  • Performance gain: {preview['performance_gain']}")
-    
-    # Show engine stats
-    stats = engine.get_engine_stats()
-    print(f"\n📂 Engine Statistics:")
-    print(f"  • Total scenes: {stats['scene_library']['total_scenes']}")
-    print(f"  • Categories: {len(stats['scene_library']['categories'])}")
-    print(f"  • Batch optimization: {stats['features']['batch_command_optimization']}")
-    
-    print("\n✅ Demo complete!")
-
-if __name__ == "__main__":
-    asyncio.run(demo_enhanced_scene_engine())

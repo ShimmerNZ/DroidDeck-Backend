@@ -617,7 +617,7 @@ class DroidDeckWebServer:
                     for scene_name, scene_data in self.backend.scene_engine.scenes.items():
                         scenes_data.append({
                             'label': scene_data.get('label', scene_name),
-                            'emoji': scene_data.get('emoji', '🎭'),
+                            'emoji': scene_data.get('emoji', 'ðŸŽ­'),
                             'duration': scene_data.get('duration', 2.0),
                             'categories': scene_data.get('categories', ['Misc']),
                             'audio_enabled': scene_data.get('audio_enabled', False),
@@ -903,7 +903,7 @@ class DroidDeckWebServer:
     def _handle_emergency_stop(self, client_sid):
         """Handle emergency stop command - forward to backend"""
         try:
-            logger.critical("EMERGENCY STOP requested from web UI")
+            logger.critical("ðŸš¨ EMERGENCY STOP requested from web UI")
             
             if self.backend and hasattr(self.backend, 'hardware_service'):
                 import threading
@@ -1054,7 +1054,11 @@ class DroidDeckWebServer:
                     }
             
             telemetry_data['timestamp'] = time.time()
-            
+
+            # Attach battery run-time estimate if available
+            if hasattr(self.backend, 'telemetry_system') and hasattr(self.backend.telemetry_system, 'get_battery_estimate'):
+                telemetry_data['battery_estimate'] = self.backend.telemetry_system.get_battery_estimate()
+
             # Motion mixer serial performance stats
             try:
                 mixer = None
@@ -1097,7 +1101,7 @@ class DroidDeckWebServer:
         return [
             {
                 'label': 'Happy',
-                'emoji': '😊',
+                'emoji': 'ðŸ˜Š',
                 'duration': 2.0,
                 'categories': ['Happy'],
                 'audio_enabled': False,
@@ -1105,7 +1109,7 @@ class DroidDeckWebServer:
             },
             {
                 'label': 'Sad',
-                'emoji': '😢',
+                'emoji': 'ðŸ˜¢',
                 'duration': 3.0,
                 'categories': ['Sad'],
                 'audio_enabled': False,
@@ -1113,7 +1117,7 @@ class DroidDeckWebServer:
             },
             {
                 'label': 'Excited',
-                'emoji': '🤩',
+                'emoji': 'ðŸ¤©',
                 'duration': 4.0,
                 'categories': ['Happy', 'Energetic'],
                 'audio_enabled': True,

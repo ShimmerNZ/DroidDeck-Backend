@@ -6,6 +6,7 @@ Real-time system monitoring with ADC sensor support and simulation fallback
 """
 
 import asyncio
+import json
 import logging
 import time
 import psutil
@@ -78,6 +79,135 @@ class TelemetryAlert:
     last_triggered: float = 0.0
     trigger_count: int = 0
 
+
+# 4S LiPo voltage → state-of-charge lookup table (voltage per cell × 4)
+_SOC_CURVE = [
+    (16.8, 100), (16.4, 95), (16.0, 90), (15.6, 80),
+    (15.2, 70),  (14.8, 60), (14.4, 50), (14.0, 40),
+    (13.6, 30),  (13.2, 20), (12.8, 10), (12.4, 5), (12.0, 0),
+]
+
+class BatteryEstimator:
+    """
+    Coulomb-counting battery run-time estimator with voltage-curve SoC floor.
+
+    Integrates current draw over time to track mAh consumed and projects
+    remaining run-time from a 60-second rolling average current draw.
+    The voltage-based SoC lookup acts as a pessimistic floor so that a
+    partially-discharged pack at session start is handled correctly.
+    """
+
+    ROLLING_WINDOW_SECONDS = 60
+
+    def __init__(self, capacity_mah: float = 12000):
+        self.capacity_mah = capacity_mah
+        self.mah_consumed = 0.0
+        self._last_timestamp: Optional[float] = None
+        self._current_window: deque = deque()  # (timestamp, amps)
+        self.session_start = time.time()
+        self.peak_current = 0.0
+
+    def reset(self):
+        """Reset estimator — call after a pack swap or charge."""
+        self.mah_consumed = 0.0
+        self._last_timestamp = None
+        self._current_window.clear()
+        self.session_start = time.time()
+        self.peak_current = 0.0
+        logger.info("BatteryEstimator reset")
+
+    def update(self, current_amps: float, voltage: float, timestamp: float):
+        """
+        Ingest a new telemetry reading.  Call once per telemetry tick.
+        current_amps: total system current (A)
+        voltage:      battery pack voltage (V)
+        timestamp:    reading timestamp (time.time())
+        """
+        if current_amps < 0:
+            current_amps = 0.0
+
+        # Coulomb integration
+        if self._last_timestamp is not None:
+            elapsed_hours = (timestamp - self._last_timestamp) / 3600.0
+            self.mah_consumed += current_amps * elapsed_hours * 1000.0
+
+        self._last_timestamp = timestamp
+
+        # Rolling window for average current
+        self._current_window.append((timestamp, current_amps))
+        cutoff = timestamp - self.ROLLING_WINDOW_SECONDS
+        while self._current_window and self._current_window[0][0] < cutoff:
+            self._current_window.popleft()
+
+        if current_amps > self.peak_current:
+            self.peak_current = current_amps
+
+    def _voltage_soc_percent(self, voltage: float) -> float:
+        """Interpolate SoC percentage from pack voltage."""
+        if voltage >= _SOC_CURVE[0][0]:
+            return 100.0
+        if voltage <= _SOC_CURVE[-1][0]:
+            return 0.0
+        for i in range(len(_SOC_CURVE) - 1):
+            v_hi, soc_hi = _SOC_CURVE[i]
+            v_lo, soc_lo = _SOC_CURVE[i + 1]
+            if v_lo <= voltage <= v_hi:
+                ratio = (voltage - v_lo) / (v_hi - v_lo)
+                return soc_lo + ratio * (soc_hi - soc_lo)
+        return 0.0
+
+    def get_estimate(self, voltage: float) -> dict:
+        """
+        Return the current estimate dict.  All callers should use this.
+
+        Keys returned:
+          mah_consumed, mah_remaining, soc_percent,
+          estimated_minutes_remaining, average_current_60s,
+          peak_current_session, session_minutes, confidence
+        """
+        # Coulomb-count based SoC
+        coulomb_soc = max(0.0, 100.0 * (1.0 - self.mah_consumed / self.capacity_mah))
+        # Voltage-curve based SoC (pessimistic floor)
+        voltage_soc = self._voltage_soc_percent(voltage)
+
+        # Use whichever is more pessimistic
+        soc_percent = min(coulomb_soc, voltage_soc)
+        mah_remaining = self.capacity_mah * soc_percent / 100.0
+
+        # Rolling average current
+        if self._current_window:
+            avg_current = sum(a for _, a in self._current_window) / len(self._current_window)
+        else:
+            avg_current = 0.0
+
+        # Projected run-time
+        if avg_current > 0.1:
+            est_minutes = (mah_remaining / 1000.0) / avg_current * 60.0
+        else:
+            est_minutes = 0.0
+
+        session_minutes = (time.time() - self.session_start) / 60.0
+
+        # Confidence: low for first 2 minutes while window fills
+        if session_minutes < 2.0:
+            confidence = "warming_up"
+        elif abs(coulomb_soc - voltage_soc) > 20:
+            confidence = "voltage_floor"
+        else:
+            confidence = "good"
+
+        return {
+            "mah_consumed": round(self.mah_consumed, 1),
+            "mah_remaining": round(mah_remaining, 1),
+            "soc_percent": round(soc_percent, 1),
+            "estimated_minutes_remaining": round(est_minutes, 1),
+            "average_current_60s": round(avg_current, 2),
+            "peak_current_session": round(self.peak_current, 2),
+            "session_minutes": round(session_minutes, 1),
+            "confidence": confidence,
+        }
+
+
 class SafeTelemetrySystem:
     """
     Enhanced telemetry system with real hardware readings + fallback simulation.
@@ -126,6 +256,9 @@ class SafeTelemetrySystem:
             "average_update_time": 0.0
         }
         
+        # Battery run-time estimator
+        self._load_battery_config()
+
         # Hardware status callbacks
         self.hardware_status_callbacks: List[Callable] = []
         
@@ -230,6 +363,30 @@ class SafeTelemetrySystem:
         }
         
         logger.info(f"⚠️ Setup {len(self.alerts)} default alerts")
+
+    def _load_battery_config(self):
+        """Load battery capacity from hardware_config.json and create estimator."""
+        capacity_mah = 12000  # Default: 4S 4P × 3000mAh
+        try:
+            config_path = Path("configs/hardware_config.json")
+            if config_path.exists():
+                with open(config_path) as f:
+                    hw = json.load(f)
+                capacity_mah = hw.get("hardware", {}).get("battery", {}).get("capacity_mah", capacity_mah)
+        except Exception as e:
+            logger.warning(f"Could not load battery config, using default {capacity_mah}mAh: {e}")
+        self.battery_estimator = BatteryEstimator(capacity_mah=capacity_mah)
+        logger.info(f"🔋 Battery estimator initialised — capacity: {capacity_mah}mAh")
+
+    def reset_battery_estimator(self):
+        """Reset the estimator after a pack swap or charge."""
+        self.battery_estimator.reset()
+
+    def get_battery_estimate(self) -> dict:
+        """Return the latest battery run-time estimate dict."""
+        voltage = self.last_reading.battery_voltage if self.last_reading else 0.0
+        return self.battery_estimator.get_estimate(voltage)
+
     def voltage_to_current(self, voltage: float) -> float:
         """Convert voltage reading to current using sensor calibration"""
         return (voltage - self.ZERO_CURRENT_VOLTAGE) / self.CURRENT_SENSITIVITY
@@ -377,7 +534,14 @@ class SafeTelemetrySystem:
             # Store reading
             self.reading_history.append(reading)
             self.last_reading = reading
-            
+
+            # Update battery run-time estimator
+            self.battery_estimator.update(
+                current_amps=current_total,
+                voltage=battery_voltage,
+                timestamp=reading.timestamp,
+            )
+
             # Check alerts
             await self.check_alerts(reading)
             

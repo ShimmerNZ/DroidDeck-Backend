@@ -223,28 +223,33 @@ class BottangoConverter:
     def get_channel_position_at_time(self, channel: int, time_ms: int) -> Optional[int]:
         """
         Get the position of a channel at a specific time by evaluating
-        the most recent active bezier curve
+        the most recent active bezier curve, or holding the last known position
         """
         active_curve = None
-        
-        # Find the most recent curve affecting this channel at this time
+        last_ended_curve = None
+
         for curve in self.curves:
             if curve.channel != channel:
                 continue
-            
+
             if curve.start_time_ms <= time_ms <= curve.end_time_ms:
                 active_curve = curve
-                break  # Assuming curves are in time order
-        
+                break  # Curves are in time order
+
+            # Track the most recently ended curve before this time
+            if curve.end_time_ms < time_ms:
+                if last_ended_curve is None or curve.end_time_ms > last_ended_curve.end_time_ms:
+                    last_ended_curve = curve
+
         if active_curve:
             position = active_curve.evaluate_at_time(time_ms)
             if position is not None:
                 return int(round(position))
-        
-        # If no active curve, check if we have a setup (use home position)
-        if channel in self.servo_setups:
-            return self.servo_setups[channel].home_position
-        
+
+        # Hold the end position of the most recently completed curve (raw Bottango scaled int)
+        if last_ended_curve is not None:
+            return last_ended_curve.end_position
+
         return None
     
     def bottango_to_maestro_channel(self, bottango_channel: int) -> str:
@@ -371,8 +376,8 @@ class BottangoConverter:
         
         return scene
     
-    def convert_file(self, input_path: Path, output_dir: Path) -> Optional[Path]:
-        """Convert a Bottango JSON export file to DroidDeck scene format"""
+    def convert_file(self, input_path: Path, output_dir: Path) -> List[Path]:
+        converted_paths = []
         try:
             logger.info(f"📥 Processing: {input_path.name}")
             
@@ -381,7 +386,7 @@ class BottangoConverter:
             
             if not isinstance(bottango_data, list) or len(bottango_data) == 0:
                 logger.error(f"Invalid Bottango export format")
-                return None
+                return []
             
             controller = bottango_data[0]
             controller_name = controller.get("Controller Name", "Unknown")
@@ -390,44 +395,51 @@ class BottangoConverter:
             setup_str = controller.get("Setup", {}).get("Controller Setup Commands", "")
             self.parse_setup_commands(setup_str)
             
-            # Process animations
+            # Process all animations in the file
             animations = controller.get("Animations", [])
             if not animations:
                 logger.warning(f"No animations found")
-                return None
+                return []
             
-            animation = animations[0]
-            animation_name = animation.get("Animation Name", "Unnamed")
-            animation_commands = animation.get("Animation Commands", "")
-            
-            # Parse curves
-            self.parse_animation_commands(animation_commands)
-            
-            # Convert with bezier
-            scene = self.convert_to_scene(animation_name, controller_name)
-            
-            # Save
+            logger.info(f"  Found {len(animations)} animation(s) in {input_path.name}")
             output_dir.mkdir(parents=True, exist_ok=True)
-            safe_filename = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' 
-                                   for c in animation_name)
-            safe_filename = safe_filename.strip().replace(' ', '_').lower()
-            output_path = output_dir / f"{safe_filename}.json"
             
-            with open(output_path, 'w') as f:
-                json.dump(scene, f, indent=2)
-            
-            logger.info(f"✅ Converted to: {output_path.name}")
-            logger.info(f"   Duration: {scene['duration']:.2f}s, "
-                       f"Steps: {len(scene['steps'])}, "
-                       f"Channels: {len(scene['locked_channels'])}")
-            
-            return output_path
+            for animation in animations:
+                try:
+                    animation_name = animation.get("Animation Name", "Unnamed")
+                    animation_commands = animation.get("Animation Commands", "")
+                    
+                    # Parse curves for this animation
+                    self.parse_animation_commands(animation_commands)
+                    
+                    # Convert with bezier
+                    scene = self.convert_to_scene(animation_name, controller_name)
+                    
+                    # Save
+                    safe_filename = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' 
+                                           for c in animation_name)
+                    safe_filename = safe_filename.strip().replace(' ', '_').lower()
+                    output_path = output_dir / f"{safe_filename}.json"
+                    
+                    with open(output_path, 'w') as f:
+                        json.dump(scene, f, indent=2)
+                    
+                    logger.info(f"✅ Converted to: {output_path.name}")
+                    logger.info(f"   Duration: {scene['duration']:.2f}s, "
+                               f"Steps: {len(scene['steps'])}, "
+                               f"Channels: {len(scene['locked_channels'])}")
+                    
+                    converted_paths.append(output_path)
+                    
+                except Exception as e:
+                    logger.error(f"✗ Failed to convert animation '{animation.get('Animation Name', '?')}': {e}")
             
         except Exception as e:
-            logger.error(f"✗ Failed to convert {input_path.name}: {e}")
+            logger.error(f"✗ Failed to process {input_path.name}: {e}")
             import traceback
             traceback.print_exc()
-            return None
+        
+        return converted_paths
 
 
 class BottangoImportWatchdog:
@@ -456,10 +468,10 @@ class BottangoImportWatchdog:
         converted_files = []
         
         for json_file in json_files:
-            output_path = self.converter.convert_file(json_file, self.scenes_dir)
+            output_paths = self.converter.convert_file(json_file, self.scenes_dir)
             
-            if output_path:
-                converted_files.append(output_path)
+            if output_paths:
+                converted_files.extend(output_paths)
                 
                 if self.delete_after_conversion:
                     try:
@@ -498,10 +510,10 @@ def main():
             sys.exit(1)
         
         converter = BottangoConverter()
-        output_path = converter.convert_file(input_path, args.output_dir)
+        output_paths = converter.convert_file(input_path, args.output_dir)
         
-        if output_path:
-            logger.info(f"✨ Success! Bezier-interpolated scene: {output_path}")
+        if output_paths:
+            logger.info(f"✨ Success! Converted {len(output_paths)} scene(s) with bezier curves")
             sys.exit(0)
         else:
             sys.exit(1)
