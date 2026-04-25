@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-WALL-E Backend - Complete Main Entry Point (Fixed for websockets 15.0.1)
+WALL-E Backend - Main Entry Point
 
 BOTTANGO INTEGRATION:
 This backend automatically processes Bottango animation exports on startup.
@@ -54,6 +54,8 @@ from modules.motion_system import MotionMixer, BlendMode
 from modules.gpio_compat import setup_output_pin, set_output, is_gpio_available
 from web.webapp import DroidDeckWebServer
 
+logger = logging.getLogger(__name__)
+
 # Import Bottango integration
 try:
     from bottango_converter import BottangoImportWatchdog
@@ -61,9 +63,6 @@ try:
 except ImportError:
     logger.warning("Bottango converter not available - animations must be manually created")
     BOTTANGO_AVAILABLE = False
-
-
-logger = logging.getLogger(__name__)
 
 class SystemState(Enum):
     NORMAL = "normal"
@@ -77,7 +76,8 @@ class WALLEBackend:
     
     def __init__(self, config_dict: Dict[str, Any]):
         self.config = config_dict
-        self.state = SystemState.NORMAL
+        self.state = SystemState.FAILSAFE
+        self.failsafe_active = True
         self.connected_clients = set()
         self.telemetry_task = None
         self.websocket_server = None
@@ -85,8 +85,6 @@ class WALLEBackend:
         self.running = False
         self.start_time = 0
         self.home_screen_ref = None
-        self.state = SystemState.FAILSAFE  # Start in failsafe
-        self.failsafe_active = True
 
         # Failsafe indicator output to LCD Arduino Nano (A5)
         # HIGH = motors active (failsafe off), LOW = motors safe (failsafe on)
@@ -329,7 +327,7 @@ class WALLEBackend:
 
     async def start_track_heartbeat_monitor(self):
         """Monitor track commands and return to home if no activity"""
-        logger.info("ðŸ”„ Track heartbeat monitor started")
+        logger.info("Track heartbeat monitor started")
         while True:
             try:
                 await asyncio.sleep(0.5)
@@ -409,7 +407,7 @@ class WALLEBackend:
                 logger.error(f"Maestro watchdog error: {e}")
                 await asyncio.sleep(0.5)
         
-        logger.warning("🛑 Maestro watchdog heartbeat stopped")
+        logger.warning("Maestro watchdog heartbeat stopped")
 
     async def broadcast_websocket_message(self, message: dict):
         """Broadcast message to all connected WebSocket clients"""
@@ -443,8 +441,7 @@ class WALLEBackend:
             self.audio_controller.set_track_finished_callback(self.handle_track_finished)
             self.audio_controller.set_volume_changed_callback(self.handle_volume_changed)
             
-            # Stepper motor callback for WebSocket broadcast
-           # Stepper motor callback for WebSocket broadcast
+            # Wire stepper position updates to WebSocket broadcast
             if self.hardware_service.stepper_interface:
                 # Wrap async broadcast_message in a sync function for the callback
                 def sync_broadcast_wrapper(message: dict):
@@ -943,6 +940,20 @@ class WALLEBackend:
             # Start motion mixer tick loop (50Hz servo blending)
             self.motion_mixer.start()
 
+            # Register hot-reload callbacks so config changes apply without restart
+            self.config_manager.register_reload_callback(
+                "servo_config",
+                lambda name, data: self.motion_mixer.reload_servo_config()
+            )
+            self.config_manager.register_reload_callback(
+                "servo_config",
+                lambda name, data: self.controller_input_processor.reload_servo_config()
+            )
+            self.config_manager.register_reload_callback(
+                "controller_config",
+                lambda name, data: self.controller_input_processor.reload_controller_config()
+            )
+
             # Pre-warm the thread executor so the first ADC read doesn't
             # incur thread pool startup latency mid-scene
             try:
@@ -1125,7 +1136,7 @@ class WALLEBackend:
     # ==================== CALLBACK HANDLERS ====================
     
     async def handle_telemetry_alert(self, alert, reading):
-        """Handle telemetry alerts - FIXED for new current naming convention"""
+        """Handle telemetry alerts"""
         # Build reading data safely with proper attribute names
         reading_data = {
             "battery_voltage": reading.battery_voltage,
@@ -1243,8 +1254,8 @@ def load_system_configuration() -> Dict[str, Any]:
         else:
             logger.warning("Hardware config not found, using defaults")
             config["hardware"] = {
-                "maestro1": {"port": "/dev/ttyAMA0", "baud_rate": 9600, "device_number": 12},
-                "maestro2": {"port": "/dev/ttyAMA0", "baud_rate": 9600, "device_number": 13},
+                "maestro1": {"port": "/dev/ttyAMA0", "baud_rate": 57600, "device_number": 12},
+                "maestro2": {"port": "/dev/ttyAMA0", "baud_rate": 57600, "device_number": 13},
                 "gpio": {"motor_step_pin": 16, "motor_dir_pin": 12, "motor_enable_pin": 13},
                 "timing": {"telemetry_interval": 0.2},
                 "audio": {"directory": "audio", "volume": 0.7},

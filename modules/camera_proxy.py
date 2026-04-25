@@ -49,17 +49,25 @@ class CameraProxy:
         # Frame timing tracking
         self.frame_times = deque(maxlen=60)
         self.last_frame_timestamp = 0
+
+        # ESP32 status cache — polled in background every 5 seconds
+        self.esp32_status = {}
+        self.esp32_status_lock = threading.Lock()
+        self._status_poll_thread = threading.Thread(
+            target=self._status_poll_worker, daemon=True
+        )
+        self._status_poll_thread.start()
         
         # ESP32 camera settings with correct parameter names
+        # Defaults match firmware CameraSettings struct for OV3660
         self.esp32_settings = {
-            "resolution": 6,       # SVGA (800x600)
-            "quality": 12,         # JPEG quality (4-63, lower = higher quality)
-            "brightness": 0,       # -2 to 2
-            "contrast": 0,         # -2 to 2  
-            "saturation": 0,       # -2 to 2
-            "h_mirror": False,     # Horizontal mirror
-            "v_flip": False,       # Vertical flip
-            "xclk_freq": 12        # Clock frequency (8-20 MHz)
+            "resolution": 6,       # SVGA (800x600) - FRAMESIZE_SVGA
+            "quality": 10,         # JPEG quality (4-25, lower = higher quality)
+            "brightness": 1,       # OV3660 default
+            "contrast": 0,
+            "saturation": -2,      # OV3660 default
+            "h_mirror": False,
+            "v_flip": True,        # OV3660 default
         }
         
         # Stream control
@@ -161,98 +169,60 @@ class CameraProxy:
         return self.esp32_settings
 
     def update_esp32_settings(self, settings):
-        """Update ESP32 camera settings using correct endpoints"""
-        success_count = 0
-        total_settings = len(settings)
-        failed_settings = []
-        
-        try:
-            esp32_data = {}
-            for frontend_setting, value in settings.items():
-                if frontend_setting in self.esp32_settings:
-                    esp32_data[frontend_setting] = value
-            
-            if esp32_data:
-                endpoint = f"{self.esp32_base_url}/settings"
-                logger.info(f"Sending POST to {endpoint} with data: {esp32_data}")
-                
-                response = requests.post(endpoint, data=esp32_data, timeout=5)
-                
+        """Update ESP32 camera settings via POST /settings (form-encoded).
+        If the ESP32 is streaming (423), the stream is paused, settings applied, then resumed."""
+        esp32_data = {k: v for k, v in settings.items() if k in self.esp32_settings}
+        if not esp32_data:
+            return {
+                "success": False, "updated_count": 0,
+                "total_count": len(settings),
+                "settings": self.esp32_settings.copy(),
+                "message": "No recognised settings to update"
+            }
+
+        was_streaming = self.stream_active
+
+        def _post_settings(data):
+            endpoint = f"{self.esp32_base_url}/settings"
+            logger.info(f"POST {endpoint}: {data}")
+            return requests.post(endpoint, data=data, timeout=5)
+
+        def _apply(data):
+            """POST settings and return (success_count, message)."""
+            try:
+                response = _post_settings(data)
                 if response.status_code == 200:
-                    for key, value in esp32_data.items():
+                    for key, value in data.items():
                         self.esp32_settings[key] = value
-                        success_count += 1
-                    logger.info(f"Successfully updated {success_count} settings via POST")
-                
-                elif response.status_code == 423:
-                    logger.warning("ESP32 is streaming - cannot update settings")
-                    for key in esp32_data.keys():
-                        failed_settings.append(key)
-                
+                    logger.info(f"Updated {len(data)} setting(s)")
+                    return len(data), f"Updated {len(data)} setting(s)"
                 else:
                     logger.warning(f"POST /settings returned HTTP {response.status_code}")
-                    success_count, failed_settings = self._try_individual_updates(settings)
-        
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"POST /settings failed: {e}")
-            success_count, failed_settings = self._try_individual_updates(settings)
-        
-        except Exception as e:
-            logger.error(f"Error in POST settings update: {e}")
-            success_count, failed_settings = self._try_individual_updates(settings)
-        
-        if success_count == 0 and not failed_settings:
-            success_count, failed_settings = self._try_individual_updates(settings)
-        
-        result = {
-            "success": success_count == total_settings,
-            "updated_count": success_count,
-            "total_count": total_settings,
-            "settings": self.esp32_settings.copy(),
-            "failed_settings": failed_settings
-        }
-        
-        if failed_settings:
-            result["message"] = f"Failed to update: {', '.join(failed_settings)}"
-        elif success_count == total_settings:
-            result["message"] = f"Successfully updated {success_count} settings"
-        elif success_count > 0:
-            result["message"] = f"Updated {success_count}/{total_settings} settings"
-        else:
-            result["message"] = "No settings were updated"
-        
-        return result
+                    return 0, f"ESP32 returned HTTP {response.status_code}"
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"POST /settings failed: {e}")
+                return 0, f"Connection error: {e}"
 
-    def _try_individual_updates(self, settings):
-        """Fallback: Try updating settings individually using GET parameters"""
-        success_count = 0
-        failed_settings = []
-        
-        supported_get_params = ['quality', 'brightness', 'contrast']
-        
-        for frontend_setting, value in settings.items():
-            if frontend_setting in supported_get_params:
-                try:
-                    endpoint = f"{self.esp32_base_url}/settings?{frontend_setting}={value}"
-                    logger.info(f"Trying GET: {endpoint}")
-                    
-                    response = requests.get(endpoint, timeout=3)
-                    if response.status_code == 200:
-                        self.esp32_settings[frontend_setting] = value
-                        success_count += 1
-                        logger.info(f"Updated {frontend_setting} via GET")
-                    else:
-                        failed_settings.append(frontend_setting)
-                        logger.warning(f"GET update failed for {frontend_setting}: HTTP {response.status_code}")
-                        
-                except Exception as e:
-                    failed_settings.append(frontend_setting)
-                    logger.error(f"GET update error for {frontend_setting}: {e}")
-            else:
-                failed_settings.append(frontend_setting)
-                logger.warning(f"Parameter {frontend_setting} not supported by ESP32 GET method")
-        
-        return success_count, failed_settings
+        # If streaming, pause→apply→resume
+        if was_streaming:
+            logger.info("Stream active — pausing to apply settings")
+            self.stop_stream()
+            time.sleep(0.5)  # Let ESP32 exit its stream handler
+
+        success_count, message = _apply(esp32_data)
+
+        if was_streaming:
+            logger.info("Resuming stream after settings update")
+            self.start_stream()
+
+        return {
+            "success": success_count == len(esp32_data),
+            "updated_count": success_count,
+            "total_count": len(settings),
+            "settings": self.esp32_settings.copy(),
+            "failed_settings": [] if success_count == len(esp32_data) else list(esp32_data.keys()),
+            "message": message
+        }
 
     def start_stream(self):
         """Start the camera stream manually"""
@@ -482,6 +452,34 @@ class CameraProxy:
         if self.streaming_enabled:
             self.stop_stream()
 
+    def _status_poll_worker(self):
+        """Background thread that polls ESP32 /status every 5 seconds"""
+        while self.running:
+            try:
+                response = requests.get(
+                    f"{self.esp32_base_url}/status", timeout=3
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    with self.esp32_status_lock:
+                        self.esp32_status = {
+                            "rssi":       data.get("rssi", 0),
+                            "free_heap":  data.get("free_heap", 0),
+                            "free_psram": data.get("free_psram", 0),
+                            "frames_sent": data.get("frames_sent", 0),
+                            "cpu_mhz":    data.get("cpu_mhz", 0),
+                            "uptime_ms":  data.get("uptime_ms", 0),
+                            "streaming":  data.get("streaming", False),
+                        }
+            except Exception:
+                pass
+            time.sleep(5)
+
+    def get_esp32_status(self):
+        """Return the most recent cached ESP32 status"""
+        with self.esp32_status_lock:
+            return self.esp32_status.copy()
+
     def create_flask_app(self):
         """Create and configure Flask application"""
         app = Flask(__name__)
@@ -557,6 +555,11 @@ class CameraProxy:
             except Exception as e:
                 logger.error(f"Failed to get camera settings: {e}")
                 return jsonify(self.esp32_settings)
+
+        @app.route('/camera/status', methods=['GET'])
+        def get_camera_status():
+            """Return cached ESP32 hardware status (RSSI, heap, PSRAM, frames)"""
+            return jsonify(self.get_esp32_status())
 
         @app.route('/camera/settings', methods=['POST'])
         def update_camera_settings():

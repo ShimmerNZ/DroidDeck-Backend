@@ -291,7 +291,7 @@ class GPIOWrapper:
                 return True
                 
         except Exception as e:
-            logger.error(f"âŒ Failed to setup PWM on pin {pin}: {e}")
+            logger.error(f"Failed to setup PWM on pin {pin}: {e}")
             return False
     
     def start_pwm(self, pin: int, duty_cycle: float = 50.0) -> bool:
@@ -313,7 +313,7 @@ class GPIOWrapper:
                     return True
                 
         except Exception as e:
-            logger.error(f"âŒ Failed to start PWM on pin {pin}: {e}")
+            logger.error(f"Failed to start PWM on pin {pin}: {e}")
             return False
     
     def stop_pwm(self, pin: int) -> bool:
@@ -335,7 +335,7 @@ class GPIOWrapper:
                     return True
                 
         except Exception as e:
-            logger.error(f"âŒ Failed to stop PWM on pin {pin}: {e}")
+            logger.error(f"Failed to stop PWM on pin {pin}: {e}")
             return False
     
     def change_pwm_frequency(self, pin: int, frequency: float) -> bool:
@@ -357,7 +357,7 @@ class GPIOWrapper:
                     return True
                 
         except Exception as e:
-            logger.error(f"âŒ Failed to change PWM frequency on pin {pin}: {e}")
+            logger.error(f"Failed to change PWM frequency on pin {pin}: {e}")
             return False
     
     def change_pwm_duty_cycle(self, pin: int, duty_cycle: float) -> bool:
@@ -379,7 +379,7 @@ class GPIOWrapper:
                     return True
                 
         except Exception as e:
-            logger.error(f"âŒ Failed to change PWM duty cycle on pin {pin}: {e}")
+            logger.error(f"Failed to change PWM duty cycle on pin {pin}: {e}")
             return False
     
     def setup_button_callback(self, pin: int, callback: Callable, edge: str = "falling") -> bool:

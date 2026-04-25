@@ -52,7 +52,6 @@ class WebSocketMessageHandler:
             # Stepper motor control
             "stepper": self._handle_stepper_command,
 
-            # In websocket_handler.py __init__, add to handlers dict:
             "frontend_controller": self._handle_frontend_controller,
             "steamdeck_controller": self._handle_steamdeck_controller,  
             
@@ -1330,7 +1329,7 @@ class WebSocketMessageHandler:
             }
             
             await self._send_websocket_message(websocket, response)
-            logger.info(f"ðŸ“‹ Sent {len(audio_files)} audio files to client")
+            logger.info(f"Sent {len(audio_files)} audio files to client")
             
         except Exception as e:
             logger.error(f"Failed to get audio files: {e}")
@@ -1353,7 +1352,7 @@ class WebSocketMessageHandler:
             }
             
             await self._send_websocket_message(websocket, response)
-            logger.info(f"ðŸ”„ Sent refresh response: {len(audio_files)} audio files, {len(bottango_scenes)} Bottango scenes")
+            logger.info(f"Sent refresh response: {len(audio_files)} audio files, {len(bottango_scenes)} Bottango scenes")
             
         except Exception as e:
             logger.error(f"âŒ Error handling refresh_backend: {e}")
@@ -1596,14 +1595,14 @@ class WebSocketMessageHandler:
             mode_name = data.get("name")
             state = data.get("state", True)
             
-            logger.info(f"ðŸ”„ Mode '{mode_name}' {'activated' if state else 'deactivated'}")
+            logger.info(f"Mode '{mode_name}' {'activated' if state else 'deactivated'}")
             
             # Handle different modes
             if mode_name == "idle":
                 # Toggle idle mode in scene engine
                 if hasattr(self.scene_engine, 'set_idle_mode'):
                     self.scene_engine.set_idle_mode(state)
-                    logger.info(f"ðŸŒ™ Idle mode {'ENABLED' if state else 'DISABLED'} via frontend")
+                    logger.info(f"Idle mode {'ENABLED' if state else 'DISABLED'} via frontend")
                     
                     # Send confirmation back to frontend
                     await self._send_response(websocket, {
@@ -1617,7 +1616,6 @@ class WebSocketMessageHandler:
                     await self._send_error_response(websocket, "Idle mode not available")
                     
             elif mode_name == "demo":
-                # TODO: Implement demo mode
                 logger.warning("Demo mode not yet implemented")
                 await self._send_response(websocket, {
                     "type": "mode_response",

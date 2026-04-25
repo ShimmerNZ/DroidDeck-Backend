@@ -46,7 +46,7 @@ class HardwareConfig:
     """Hardware configuration data class"""
     # Maestro configuration
     maestro_port: str = "/dev/ttyAMA0"
-    maestro_baud_rate: int = 9600
+    maestro_baud_rate: int = 57600
     maestro1_device_number: int = 12
     maestro2_device_number: int = 13
     
@@ -1904,7 +1904,7 @@ def create_hardware_service(config_dict: Dict[str, Any]) -> HardwareService:
         # Create HardwareConfig object
         config = HardwareConfig(
             maestro_port=hw_config.get("maestro1", {}).get("port", "/dev/ttyAMA0"),
-            maestro_baud_rate=hw_config.get("maestro1", {}).get("baud_rate", 9600),
+            maestro_baud_rate=hw_config.get("maestro1", {}).get("baud_rate", 57600),
             maestro1_device_number=hw_config.get("maestro1", {}).get("device_number", 12),
             maestro2_device_number=hw_config.get("maestro2", {}).get("device_number", 13),
             sabertooth_port=hw_config.get("sabertooth", {}).get("port", "/dev/ttyAMA1"),
@@ -1928,71 +1928,10 @@ def create_hardware_service(config_dict: Dict[str, Any]) -> HardwareService:
         # Create and return enhanced hardware service
         service = HardwareService(config)
         
-        logger.info("Enhanced hardware service created successfully")
-        logger.info("Batch command optimization enabled")
-        logger.info("Ready for high-performance scene execution")
-        
+        logger.info("Hardware service created")
         return service
         
     except Exception as e:
         logger.error(f"Failed to create enhanced hardware service: {e}")
         # Return service with default config
         return HardwareService(HardwareConfig())
-
-
-
-
-# Example usage and demonstration
-async def demo_enhanced_hardware_service():
-    """Demonstrate the enhanced hardware service capabilities"""
-    print("Enhanced Hardware Service Demo")
-    print("=" * 50)
-    
-    # Create mock config
-    config = HardwareConfig()
-    
-    # Create enhanced hardware service
-    service = HardwareService(config)
-    
-    print(f"Service initialized: {service.initialization_complete}")
-    print(f"Connected devices: {service.get_connected_device_count()}")
-    print(f"Total servo channels: {service.get_total_servo_channels()}")
-    
-    # Show batch capabilities
-    capabilities = service.get_batch_command_capabilities()
-    print(f"\nBatch Command Capabilities:")
-    print(f"  Available: {capabilities['batch_commands_available']}")
-    print(f"  Maestro 1: {capabilities['maestro1_support']}")
-    print(f"  Maestro 2: {capabilities['maestro2_support']}")
-    print(f"  Performance: {capabilities['estimated_performance_improvement']}")
-    
-    # Example scene servo configuration
-    example_scene_servos = {
-        "m1_ch0": {"target": 1500, "speed": 50, "acceleration": 30},
-        "m1_ch1": {"target": 1200, "speed": 40, "acceleration": 25},
-        "m1_ch2": {"target": 1800, "speed": 60},
-        "m2_ch0": {"target": 1400, "speed": 55, "acceleration": 35},
-        "m2_ch1": {"target": 1600, "speed": 45}
-    }
-    
-    print(f"\nExample Scene Execution:")
-    print(f"  Total servos: {len(example_scene_servos)}")
-    print(f"  Maestro 1 servos: {len([k for k in example_scene_servos if k.startswith('m1_')])}")
-    print(f"  Maestro 2 servos: {len([k for k in example_scene_servos if k.startswith('m2_')])}")
-    print(f"  Batch commands: 2 (instead of {len(example_scene_servos)} individual)")
-    print(f"  Estimated improvement: 5-10x faster execution")
-    
-    # Show statistics
-    stats = await service.get_batch_command_performance_stats()
-    print(f"\nCurrent Statistics:")
-    print(f"  Batch commands sent: {stats.get('summary', {}).get('total_batch_commands', 0)}")
-    print(f"  Individual commands: {stats.get('summary', {}).get('total_individual_commands', 0)}")
-    print(f"  Time saved: {stats.get('summary', {}).get('estimated_time_saved_ms', 0):.1f}ms")
-    print(f"  Efficiency: {stats.get('summary', {}).get('efficiency_rating', 'No Data')}")
-    
-    print(f"\nEnhanced hardware service ready for optimized scene execution!")
-
-
-if __name__ == "__main__":
-    # Run demo
-    asyncio.run(demo_enhanced_hardware_service())

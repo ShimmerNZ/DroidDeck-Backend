@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from flask import Flask, send_from_directory, jsonify, request  # Added request import
+from flask import Flask, send_from_directory, jsonify, request
 from flask_socketio import SocketIO, emit
 from typing import Dict, Any, Optional
 
@@ -617,7 +617,7 @@ class DroidDeckWebServer:
                     for scene_name, scene_data in self.backend.scene_engine.scenes.items():
                         scenes_data.append({
                             'label': scene_data.get('label', scene_name),
-                            'emoji': scene_data.get('emoji', 'ðŸŽ­'),
+                            'emoji': scene_data.get('emoji', '🎭'),
                             'duration': scene_data.get('duration', 2.0),
                             'categories': scene_data.get('categories', ['Misc']),
                             'audio_enabled': scene_data.get('audio_enabled', False),
@@ -903,7 +903,7 @@ class DroidDeckWebServer:
     def _handle_emergency_stop(self, client_sid):
         """Handle emergency stop command - forward to backend"""
         try:
-            logger.critical("ðŸš¨ EMERGENCY STOP requested from web UI")
+            logger.critical("EMERGENCY STOP requested from web UI")
             
             if self.backend and hasattr(self.backend, 'hardware_service'):
                 import threading
@@ -1097,7 +1097,7 @@ class DroidDeckWebServer:
         return [
             {
                 'label': 'Happy',
-                'emoji': 'ðŸ˜Š',
+                'emoji': '😊',
                 'duration': 2.0,
                 'categories': ['Happy'],
                 'audio_enabled': False,
@@ -1105,7 +1105,7 @@ class DroidDeckWebServer:
             },
             {
                 'label': 'Sad',
-                'emoji': 'ðŸ˜¢',
+                'emoji': '😢',
                 'duration': 3.0,
                 'categories': ['Sad'],
                 'audio_enabled': False,
@@ -1113,7 +1113,7 @@ class DroidDeckWebServer:
             },
             {
                 'label': 'Excited',
-                'emoji': 'ðŸ¤©',
+                'emoji': '🤩',
                 'duration': 4.0,
                 'categories': ['Happy', 'Energetic'],
                 'audio_enabled': True,

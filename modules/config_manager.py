@@ -187,8 +187,10 @@ class ConfigurationManager:
             # Load known config files
             config_files = {
                 "hardware": "hardware_config.json",
-                "camera": "camera_config.json", 
-                "scenes": "scenes_config.json"
+                "camera": "camera_config.json",
+                "scenes": "scenes_config.json",
+                "servo_config": "servo_config.json",
+                "controller_config": "controller_config.json",
             }
             
             for config_name, filename in config_files.items():
@@ -270,7 +272,7 @@ class ConfigurationManager:
             )
             self.observer.start()
             
-            logger.info("🔄 Hot-reload file watching enabled")
+            logger.info("Hot-reload file watching enabled")
             
         except Exception as e:
             logger.error(f"❌ Failed to setup hot-reload: {e}")
@@ -289,7 +291,7 @@ class ConfigurationManager:
                     break
             
             if config_name:
-                logger.info(f"🔄 Reloading config: {config_name}")
+                logger.info(f"Reloading config: {config_name}")
                 
                 # Create backup before reloading
                 self.create_config_backup(config_name)
