@@ -59,6 +59,7 @@ logger = logging.getLogger(__name__)
 # Import Bottango integration
 try:
     from bottango_converter import BottangoImportWatchdog
+    from modules.bottango_watcher import BottangoFolderWatcher
     BOTTANGO_AVAILABLE = True
 except ImportError:
     logger.warning("Bottango converter not available - animations must be manually created")
@@ -196,6 +197,8 @@ class WALLEBackend:
         self.setup_callbacks()
         self.setup_signal_handlers()
         
+        self.bottango_watcher = None
+
         logger.info(f"WALL-E Backend initialized (websockets {WEBSOCKETS_VERSION})")
     
     def _identify_track_channels(self) -> set:
@@ -925,6 +928,19 @@ class WALLEBackend:
         })
 
     # ==================== SYSTEM LIFECYCLE ====================
+    async def _on_bottango_scenes_updated(self):
+        """Called by BottangoFolderWatcher when new scenes have been converted."""
+        try:
+            scenes = await self.websocket_handler._get_bottango_scenes()
+            await self.broadcast_message({
+                "type": "bottango_scenes_updated",
+                "bottango_scenes": scenes,
+                "count": len(scenes),
+            })
+            logger.info(f"Broadcasted Bottango scene update: {len(scenes)} scene(s) available")
+        except Exception as e:
+            logger.error(f"Error broadcasting Bottango scene update: {e}")
+
     async def start(self):
         """Start the WALL-E backend system"""
         self.start_time = time.time()
@@ -933,6 +949,19 @@ class WALLEBackend:
                 
         self.web_server.start()
         logger.info("Web interface available at: http://0.0.0.0:5000")
+
+        # Start live Bottango import watcher
+        if BOTTANGO_AVAILABLE:
+            project_root = Path(__file__).parent
+            self.bottango_watcher = BottangoFolderWatcher(
+                import_dir=project_root / "bottango_imports",
+                scenes_dir=project_root / "scenes",
+                on_scenes_updated=self._on_bottango_scenes_updated,
+                delete_after_conversion=True,
+            )
+            self.bottango_watcher.start(loop=self.loop)
+            self.bottango_watcher.process_existing()
+            logger.info("Bottango folder watcher active")
 
         try:
             logger.info("Starting WALL-E Backend System")
@@ -1028,6 +1057,9 @@ class WALLEBackend:
 
         if hasattr(self, 'web_server'):
             self.web_server.stop()
+
+        if hasattr(self, 'bottango_watcher') and self.bottango_watcher:
+            self.bottango_watcher.stop()
         
         try:
             # 1. First notify clients BEFORE closing connections
@@ -1494,10 +1526,6 @@ async def main():
         
         # Create and start backend
         backend = WALLEBackend(config)
-        
-        # Process Bottango imports BEFORE starting backend
-        logger.info("Processing Bottango animations...")
-        await process_bottango_imports_on_startup()
         
         # Start audio and backend
         asyncio.create_task(play_startup_track(backend))

@@ -1,0 +1,21 @@
+[Unit]
+Description=DroidDeck WALL-E Robot Backend
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wall-e
+WorkingDirectory=/home/wall-e/DroidDeck-Backend
+ExecStart=/home/wall-e/DroidDeck-Backend/venv/bin/python main.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=droiddeck-backend
+
+# Allow time for hardware to settle after boot
+ExecStartPre=/bin/sleep 3
+
+[Install]
+WantedBy=multi-user.target

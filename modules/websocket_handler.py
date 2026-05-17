@@ -99,7 +99,10 @@ class WebSocketMessageHandler:
             # Mode control
             "failsafe": self._handle_failsafe,
             "get_failsafe_state": self._handle_get_failsafe_state,
-            "mode": self._handle_mode_control
+            "mode": self._handle_mode_control,
+
+            # Remote update
+            "server_update": self._handle_server_update,
         }
         
         logger.info(f" WebSocket handler initialized with {len(self.handlers)} message types")
@@ -2034,3 +2037,120 @@ class WebSocketMessageHandler:
         except Exception as e:
             logger.error(f"Failed to apply calibration data: {e}")
             return False
+    async def _handle_server_update(self, websocket, data: Dict[str, Any]):
+        """Download the latest backend release from GitHub and restart the service."""
+        import subprocess
+        import tempfile
+        import zipfile
+        import shutil
+        import requests
+        from pathlib import Path
+
+        branch = data.get("branch", "main")
+        repo   = data.get("repo", "ShimmerNZ/DroidDeck-Backend")
+        zip_url = f"https://github.com/{repo}/archive/refs/heads/{branch}.zip"
+
+        # Paths that must never be overwritten
+        PROTECTED = {
+            "configs/",
+            "configs/hardware_config.json",
+            "configs/camera_config.json",
+            "configs/controller_config.json",
+            "configs/controller_mappings.json",
+            "configs/motion_config.json",
+            "configs/servo_config.json",
+            "configs/scenes_config.json",
+            "configs/voltage_alert_config.json",
+            "audio/",
+            "scenes/",
+            "bottango_imports/",
+            "logs/",
+        }
+
+        def is_protected(rel: Path) -> bool:
+            s = str(rel).replace("\\", "/")
+            return any(s == p or s.startswith(p) for p in PROTECTED)
+
+        async def _send(msg: str):
+            await self._send_websocket_message(websocket, {
+                "type": "server_update_progress",
+                "message": msg,
+            })
+
+        try:
+            await _send(f"Starting update from branch '{branch}'...")
+
+            app_root = Path(__file__).parent.parent
+
+            # Download
+            await _send("Downloading update from GitHub...")
+            loop = asyncio.get_running_loop()
+
+            def download():
+                tmp = Path(tempfile.mkdtemp())
+                zip_path = tmp / "update.zip"
+                r = requests.get(zip_url, stream=True, timeout=60)
+                r.raise_for_status()
+                with open(zip_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                return tmp, zip_path
+
+            tmp_dir, zip_path = await loop.run_in_executor(None, download)
+
+            # Extract
+            await _send("Extracting files...")
+
+            def extract():
+                extract_dir = tmp_dir / "extracted"
+                with zipfile.ZipFile(zip_path, "r") as z:
+                    z.extractall(extract_dir)
+                folders = list(extract_dir.iterdir())
+                if not folders:
+                    raise RuntimeError("Archive is empty")
+                return folders[0]
+
+            source_dir = await loop.run_in_executor(None, extract)
+
+            # Install (skip protected paths)
+            await _send("Installing update...")
+
+            def install():
+                for item in source_dir.rglob("*"):
+                    if not item.is_file():
+                        continue
+                    rel = item.relative_to(source_dir)
+                    if is_protected(rel):
+                        continue
+                    target = app_root / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(item, target)
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            await loop.run_in_executor(None, install)
+
+            await _send("Update installed - restarting service...")
+
+            await self._send_websocket_message(websocket, {
+                "type": "server_update_complete",
+                "success": True,
+                "message": f"Update from '{branch}' complete. Backend restarting.",
+            })
+
+            # Small delay so the response reaches the client before restart
+            await asyncio.sleep(1.5)
+
+            subprocess.Popen(
+                ["sudo", "systemctl", "restart", "droiddeck-backend"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        except Exception as e:
+            logger.error(f"Server update failed: {e}")
+            await self._send_websocket_message(websocket, {
+                "type": "server_update_complete",
+                "success": False,
+                "message": f"Update failed: {e}",
+            })
