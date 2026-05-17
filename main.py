@@ -26,7 +26,9 @@ import logging
 import os
 import sys
 import signal
+import subprocess
 import psutil
+import pygame
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from enum import Enum
@@ -1424,6 +1426,111 @@ async def play_startup_track(backend):
         print("[audio] Played Wall-e Intro after startup")
 
 
+def _get_interface_ip(iface: str) -> Optional[str]:
+    """Return the IPv4 address of a named network interface, or None if unavailable."""
+    try:
+        import socket
+        import struct
+        import fcntl
+        SIOCGIFADDR = 0x8915
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        result = fcntl.ioctl(s.fileno(), SIOCGIFADDR, struct.pack('256s', iface[:15].encode()))
+        return socket.inet_ntoa(result[20:24])
+    except Exception:
+        return None
+
+
+def _get_esp32_ip_from_arp(iface: str = "wlan0ap") -> Optional[str]:
+    """
+    Find the ESP32 IP from the neighbour table on the wlan0ap interface.
+    Filters to the 10.43.x.x subnet (the Walle AP network).
+    """
+    try:
+        result = subprocess.run(
+            ["ip", "neigh", "show", "dev", iface],
+            capture_output=True, text=True, timeout=3
+        )
+        for line in result.stdout.splitlines():
+            # Lines look like: 10.43.0.80 lladdr 1c:db:d4:76:ae:c4 REACHABLE
+            parts = line.split()
+            if parts and parts[0].startswith("10.43."):
+                # Only report reachable/stale entries, not failed ones
+                if len(parts) >= 2 and "FAILED" not in line:
+                    return parts[0]
+    except Exception as e:
+        logger.debug(f"ip neigh lookup failed: {e}")
+    return None
+
+
+def _espeak(text: str, backend) -> None:
+    """
+    Render speech via espeak --stdout and play the wav through pygame,
+    using the same audio path as the rest of the audio system.
+    """
+    try:
+        import tempfile
+        wav_data = subprocess.check_output(
+            ["espeak", "-s", "140", "-a", "150", "--stdout", text],
+            stderr=subprocess.DEVNULL
+        )
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(wav_data)
+            tmp_path = f.name
+
+        # Play through pygame mixer on the audio controller's channel
+        sound = pygame.mixer.Sound(tmp_path)
+        sound.set_volume(backend.audio_controller.current_volume)
+        sound.play()
+
+        # Wait for playback to finish before returning
+        while pygame.mixer.get_busy():
+            pygame.time.wait(100)
+
+        os.unlink(tmp_path)
+    except Exception as e:
+        logger.warning(f"espeak playback failed: {e}")
+
+
+async def announce_network_info(backend):
+    """
+    Speak the Steam Deck-facing IP (wlan1) and the ESP32 camera IP.
+    ESP32 IP is discovered from the neighbour table on wlan0ap.
+    Audio is rendered via espeak --stdout and played through pygame.
+    """
+    await asyncio.sleep(8)
+
+    wlan1_ip = _get_interface_ip("wlan1")
+    esp32_ip = await asyncio.get_running_loop().run_in_executor(
+        None, _get_esp32_ip_from_arp, "wlan0ap"
+    )
+
+    logger.info(f"Network announcement: wlan1={wlan1_ip}, ESP32={esp32_ip}")
+
+    if wlan1_ip:
+        spoken_wlan1 = ", ".join(wlan1_ip.split("."))
+        await asyncio.get_running_loop().run_in_executor(
+            None, _espeak, f"Controller network: {spoken_wlan1}", backend
+        )
+        await asyncio.sleep(1)
+    else:
+        logger.warning("wlan1 IP not available for announcement")
+        await asyncio.get_running_loop().run_in_executor(
+            None, _espeak, "Controller network not available", backend
+        )
+        await asyncio.sleep(1)
+
+    if esp32_ip:
+        spoken_esp32 = ", ".join(esp32_ip.split("."))
+        await asyncio.get_running_loop().run_in_executor(
+            None, _espeak, f"Camera: {spoken_esp32}", backend
+        )
+    else:
+        logger.warning("ESP32 not found on wlan0ap")
+        await asyncio.get_running_loop().run_in_executor(
+            None, _espeak, "Camera not found", backend
+        )
+
+
 async def process_bottango_imports_on_startup():
     """
     Process any Bottango imports in the bottango_imports folder on startup
@@ -1529,6 +1636,7 @@ async def main():
         
         # Start audio and backend
         asyncio.create_task(play_startup_track(backend))
+        asyncio.create_task(announce_network_info(backend))
         await backend.start()
         
     except KeyboardInterrupt:
