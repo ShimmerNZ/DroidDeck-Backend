@@ -9,7 +9,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import time
 import random
 from typing import Dict, List, Any, Optional, Callable, Tuple
@@ -1362,34 +1361,7 @@ class EnhancedSceneEngine:
             return {"error": str(e)}
     
     # ==================== SCENE EDITING AND MANAGEMENT ====================
-
-    def _backup_config(self, config_path: str, max_backups: int = 10):
-        """
-        Back up a config file into a backups/ subfolder beside it.
-        Only the most recent max_backups copies are kept; older ones are pruned.
-        """
-        try:
-            src = Path(config_path)
-            backup_dir = src.parent / "backups"
-            backup_dir.mkdir(parents=True, exist_ok=True)
-
-            timestamp = int(time.time())
-            backup_name = f"{src.stem}.backup.{timestamp}{src.suffix}"
-            backup_path = backup_dir / backup_name
-
-            shutil.copy2(src, backup_path)
-            logger.info(f"💾 Created backup: {backup_path}")
-
-            # Prune old backups — keep only the most recent max_backups
-            pattern = f"{src.stem}.backup.*{src.suffix}"
-            existing = sorted(backup_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
-            for old in existing[:-max_backups]:
-                old.unlink()
-                logger.debug(f"🗑️ Pruned old backup: {old.name}")
-
-        except Exception as e:
-            logger.warning(f"⚠️ Could not create backup of {config_path}: {e}")
-
+    
     async def save_scenes(self, scenes_data: List[Dict[str, Any]]) -> bool:
         """Save scenes configuration to file with validation"""
         try:
@@ -1415,10 +1387,25 @@ class EnhancedSceneEngine:
                 logger.error(f"❌ Cannot save scenes due to validation errors: {validation_errors}")
                 return False
             
-            # Create backup of current config
+            # Create backup of current config in a backups/ subdirectory
             if Path(self.config_path).exists():
-                self._backup_config(self.config_path)
+                import shutil
+                config_dir = Path(self.config_path).parent
+                backup_dir = config_dir / "backups"
+                backup_dir.mkdir(parents=True, exist_ok=True)
 
+                stem = Path(self.config_path).stem
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                backup_path = backup_dir / f"{stem}_{timestamp}.json"
+                shutil.copy2(self.config_path, backup_path)
+                logger.info(f"Created backup: {backup_path}")
+
+                # Rotate: keep only the 10 most recent backups for this config
+                existing = sorted(backup_dir.glob(f"{stem}_*.json"), key=lambda p: p.stat().st_mtime)
+                for old_backup in existing[:-10]:
+                    old_backup.unlink()
+                    logger.debug(f"Removed old backup: {old_backup.name}")
+            
             # Save to file
             with open(self.config_path, "w", encoding='utf-8') as f:
                 json.dump(scenes_data, f, indent=2, ensure_ascii=False)
