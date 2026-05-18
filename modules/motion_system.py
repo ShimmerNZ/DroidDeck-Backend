@@ -901,6 +901,7 @@ class MotionMixer:
         self._load_servo_config(servo_config_path)
 
         # Stats
+        self._init_time = time.monotonic()
         self.stats = {
             "ticks": 0,
             "active_layers": 0,

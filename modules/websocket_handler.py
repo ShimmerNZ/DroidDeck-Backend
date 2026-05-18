@@ -1467,6 +1467,22 @@ class WebSocketMessageHandler:
             if self.telemetry_system and self.telemetry_system.last_reading:
                 status["battery_voltage"] = self.telemetry_system.last_reading.battery_voltage
 
+            # Attach motion mixer performance stats
+            try:
+                mixer = None
+                if self.scene_engine and hasattr(self.scene_engine, 'motion_mixer'):
+                    mixer = self.scene_engine.motion_mixer
+                if mixer:
+                    s = mixer.stats
+                    ds = mixer.dispatcher.stats
+                    uptime = max(time.monotonic() - getattr(mixer, '_init_time', time.monotonic()), 1.0)
+                    status['serial_fps'] = round(s['ticks'] / uptime, 1)
+                    status['blend_ms'] = round(s.get('blend_time_ms', 0.0), 2)
+                    status['serial_cmds_sec'] = round(ds['commands_sent'] / uptime, 1)
+                    status['active_channels'] = s['active_channels']
+            except Exception:
+                pass
+
             await self._send_websocket_message(websocket, status)
             
         except Exception as e:
