@@ -67,6 +67,15 @@ except ImportError:
     logger.warning("Bottango converter not available - animations must be manually created")
     BOTTANGO_AVAILABLE = False
 
+# Import Bottango live network driver
+try:
+    from modules.bottango_live_driver import create_bottango_live_driver, DEFAULT_PORT as BOTTANGO_LIVE_PORT
+    BOTTANGO_LIVE_AVAILABLE = True
+except ImportError:
+    logger.warning("Bottango live driver not available")
+    BOTTANGO_LIVE_AVAILABLE = False
+    BOTTANGO_LIVE_PORT = 59225
+
 class SystemState(Enum):
     NORMAL = "normal"
     FAILSAFE = "failsafe"
@@ -200,6 +209,7 @@ class WALLEBackend:
         self.setup_signal_handlers()
         
         self.bottango_watcher = None
+        self.bottango_live_driver = None
 
         logger.info(f"WALL-E Backend initialized (websockets {WEBSOCKETS_VERSION})")
     
@@ -901,6 +911,11 @@ class WALLEBackend:
                 "websocket_server": {
                     "port": 8766,
                     "active_connections": len(self.connected_clients)
+                },
+                "bottango_live": {
+                    "enabled": self.bottango_live_driver is not None,
+                    "host": self.config.get("bottango", {}).get("host", "10.1.1.5"),
+                    "port": BOTTANGO_LIVE_PORT
                 }
             }
         except Exception as e:
@@ -964,6 +979,17 @@ class WALLEBackend:
             self.bottango_watcher.start(loop=self.loop)
             self.bottango_watcher.process_existing()
             logger.info("Bottango folder watcher active")
+
+        # Start Bottango live network driver
+        if BOTTANGO_LIVE_AVAILABLE:
+            bottango_host = self.config.get("bottango", {}).get("host", "10.1.1.5")
+            self.bottango_live_driver = create_bottango_live_driver(
+                hardware_service=self.hardware_service,
+                host=bottango_host,
+                servo_config_path=Path("configs/servo_config.json"),
+            )
+            self.bottango_live_driver.start()
+            logger.info(f"Bottango live driver connecting to {bottango_host}:{BOTTANGO_LIVE_PORT}")
 
         try:
             logger.info("Starting WALL-E Backend System")
@@ -1033,6 +1059,9 @@ class WALLEBackend:
             logger.info(f"WebSocket: ws://{ip}:8766")
             logger.info(f"Camera: http://{ip}:8081/stream")
             logger.info(f"SMB Share: \\\\{hostname}\\walle")
+            if self.bottango_live_driver:
+                bottango_host = self.config.get("bottango", {}).get("host", "10.1.1.5")
+                logger.info(f"Bottango live driver: connecting to {bottango_host}:{BOTTANGO_LIVE_PORT}")
             
             # Keep running until shutdown - this will exit when running becomes False
             while self.running:
@@ -1062,6 +1091,9 @@ class WALLEBackend:
 
         if hasattr(self, 'bottango_watcher') and self.bottango_watcher:
             self.bottango_watcher.stop()
+
+        if hasattr(self, 'bottango_live_driver') and self.bottango_live_driver:
+            self.bottango_live_driver.stop()
         
         try:
             # 1. First notify clients BEFORE closing connections
