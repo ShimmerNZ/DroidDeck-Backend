@@ -82,19 +82,24 @@ def _solve_t_for_time(target_x: float, cx1: float, cx2: float,
 class _Effector:
     """Tracks a registered servo effector and its active curve queue."""
 
-    def __init__(self, channel_key: str, pw_min: int, pw_max: int,
+    def __init__(self, channel_key: str, pw_start: int, pw_end: int,
                  max_change_per_sec: int, start_pw: int):
         self.channel_key  = channel_key
-        self.pw_min       = pw_min
-        self.pw_max       = pw_max
+        self.pw_start     = pw_start    # maps to scaled=0 (Bottango raw_min)
+        self.pw_end       = pw_end      # maps to scaled=8192 (Bottango raw_max)
         self.max_change   = max_change_per_sec
         self.current_pw   = start_pw
         self.curves: list = []
 
     def scaled_int_to_pw(self, scaled: int) -> int:
-        """Convert Bottango Scaled Int (0-8192) to microseconds."""
+        """
+        Convert Bottango Scaled Int (0-8192) to microseconds.
+        scaled=0 maps to pw_start (Bottango raw_min).
+        scaled=8192 maps to pw_end (Bottango raw_max).
+        Direction is preserved exactly as Bottango configured it — no inversion needed.
+        """
         t = max(0, min(scaled, SCALED_INT_MAX)) / SCALED_INT_MAX
-        return round(self.pw_min + t * (self.pw_max - self.pw_min))
+        return round(self.pw_start + t * (self.pw_end - self.pw_start))
 
     def clear_curves(self):
         self.curves.clear()
@@ -105,16 +110,23 @@ class _Effector:
 
     def get_pw_at(self, now_ms: float) -> Optional[int]:
         """Evaluate the active curve at the given playback time."""
+        last_expired_pw = None
+
+        # Drain expired curves, remembering the last end position
         while self.curves and (self.curves[0]["start_ms"] + self.curves[0]["dur_ms"]) < now_ms:
             c = self.curves.pop(0)
-            self.current_pw = self.scaled_int_to_pw(c["p3"])
+            last_expired_pw = self.scaled_int_to_pw(int(c["p3"]))
+            self.current_pw = last_expired_pw
 
         if not self.curves:
-            return None
+            # Return the final position of the last expired curve so the
+            # tick loop actually sends it to the servo
+            return last_expired_pw
 
         c = self.curves[0]
         if now_ms < c["start_ms"]:
-            return None
+            # Curve hasn't started yet — return expired curve end if we have one
+            return last_expired_pw
 
         elapsed = now_ms - c["start_ms"]
         norm    = min(elapsed / c["dur_ms"], 1.0) if c["dur_ms"] > 0 else 1.0
@@ -231,17 +243,22 @@ class BottangoLiveDriver:
         """Outer loop: keep trying to connect to Bottango with reconnect on failure."""
         while self._running:
             try:
-                logger.info(f"Connecting to Bottango at {self.host}:{self.port}...")
-                reader, writer = await asyncio.open_connection(self.host, self.port)
+                logger.debug(f"Connecting to Bottango at {self.host}:{self.port}...")
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.host, self.port),
+                    timeout=5.0
+                )
                 self._writer = writer
                 logger.info(f"Connected to Bottango at {self.host}:{self.port}")
                 await self._run_session(reader, writer)
+            except asyncio.TimeoutError:
+                logger.debug(f"Bottango connection timed out at {self.host}:{self.port} — retrying in {RECONNECT_DELAY}s")
             except ConnectionRefusedError:
-                logger.warning(f"Bottango not reachable at {self.host}:{self.port} — retrying in {RECONNECT_DELAY}s")
+                logger.debug(f"Bottango not reachable at {self.host}:{self.port} — retrying in {RECONNECT_DELAY}s")
             except OSError as e:
-                logger.warning(f"Connection error: {e} — retrying in {RECONNECT_DELAY}s")
+                logger.debug(f"Connection error: {e} — retrying in {RECONNECT_DELAY}s")
             except Exception as e:
-                logger.error(f"Unexpected connection error: {e} — retrying in {RECONNECT_DELAY}s")
+                logger.debug(f"Unexpected connection error: {e} — retrying in {RECONNECT_DELAY}s")
             finally:
                 self._writer = None
                 if self._tick_task and not self._tick_task.done():
@@ -373,23 +390,30 @@ class BottangoLiveDriver:
             return
 
         eid         = int(clean[1])
-        pw_min      = int(clean[2])
-        pw_max      = int(clean[3])
+        raw_min     = int(clean[2])
+        raw_max     = int(clean[3])
         max_change  = int(clean[4])
-        start_pw    = int(clean[5])
+        raw_start   = int(clean[5])
         channel_key = self._channel_key_from_id(eid)
 
+        logger.debug(f"rSVPin raw: eid={eid} channel={channel_key} "
+                    f"min={raw_min} max={raw_max} max_change={max_change} start={raw_start}")
+
         cfg_min, cfg_max, _ = self._get_servo_limits(channel_key)
-        pw_min   = max(pw_min,  cfg_min)
-        pw_max   = min(pw_max,  cfg_max)
-        start_pw = max(pw_min, min(start_pw, pw_max))
+
+        # Preserve Bottango's direction exactly — raw_min maps to scaled=0,
+        # raw_max maps to scaled=8192. Clamp each endpoint independently so
+        # direction is not changed by the safety backstop.
+        pw_start = max(cfg_min, min(raw_min, cfg_max))
+        pw_end   = max(cfg_min, min(raw_max, cfg_max))
+        start_pw = max(cfg_min, min(raw_start, cfg_max))
 
         self._effectors[channel_key] = _Effector(
-            channel_key, pw_min, pw_max, max_change, start_pw
+            channel_key, pw_start, pw_end, max_change, start_pw
         )
         name = self._servo_config.get(channel_key, {}).get("name", channel_key)
         logger.info(f"Registered effector {eid} -> {channel_key} ({name}) "
-                    f"pw=[{pw_min},{pw_max}] start={start_pw}")
+                    f"pw=[{pw_start},{pw_end}] start={start_pw}")
         await self._send_ready(writer)
 
     async def _handle_update_effector(self, parts: list, writer: asyncio.StreamWriter):
@@ -400,8 +424,10 @@ class BottangoLiveDriver:
         key = self._channel_key_from_id(int(clean[1]))
         if key in self._effectors:
             cfg_min, cfg_max, _ = self._get_servo_limits(key)
-            self._effectors[key].pw_min    = max(int(clean[2]), cfg_min)
-            self._effectors[key].pw_max    = min(int(clean[3]), cfg_max)
+            raw_min = int(clean[2])
+            raw_max = int(clean[3])
+            self._effectors[key].pw_start   = max(cfg_min, min(raw_min, cfg_max))
+            self._effectors[key].pw_end     = max(cfg_min, min(raw_max, cfg_max))
             self._effectors[key].max_change = int(clean[4])
         await self._send_ready(writer)
 
@@ -417,7 +443,14 @@ class BottangoLiveDriver:
             return
 
         start_ms_abs = self._sync_time_ms + float(clean[2])
-        self._effectors[key].add_curve({
+
+        # If the curve start is already in the past (timing jitter or late arrival),
+        # clamp it to now so get_pw_at sees it as active on the next tick
+        wall_now_ms  = time.monotonic() * 1000.0
+        bottango_now = self._sync_time_ms + (wall_now_ms - self._sync_wall_ms)
+        if start_ms_abs < bottango_now:
+            start_ms_abs = bottango_now
+        curve = {
             "start_ms":   start_ms_abs,
             "dur_ms":     float(clean[3]),
             "p0":         float(clean[4]),
@@ -426,7 +459,9 @@ class BottangoLiveDriver:
             "p3":         float(clean[7]),
             "cp_end_x":   float(clean[8]),
             "cp_end_y":   float(clean[9]),
-        })
+        }
+        logger.debug(f"sC: {key} start={start_ms_abs:.0f} dur={clean[3]} p0={clean[4]} p3={clean[7]}")
+        self._effectors[key].add_curve(curve)
         await self._send_ready(writer)
 
     async def _handle_instant_curve(self, parts: list, writer: asyncio.StreamWriter):
@@ -440,11 +475,13 @@ class BottangoLiveDriver:
             await self._send_ready(writer)
             return
 
-        # Instant curves use 0-1000 range
-        scaled_8192 = round(float(clean[2]) / 1000.0 * SCALED_INT_MAX)
+        # Instant curves use the same 0-8192 scaled int range as regular curves
+        scaled_8192 = max(0, min(int(float(clean[2])), SCALED_INT_MAX))
         pw = self._effectors[key].scaled_int_to_pw(scaled_8192)
         self._effectors[key].current_pw = pw
         self._effectors[key].clear_curves()
+
+        logger.debug(f"sCI: {key} scaled={scaled_8192} -> {pw} us")
 
         await self._send_servo(key, pw)
         await self._send_ready(writer)
@@ -471,11 +508,11 @@ class BottangoLiveDriver:
             pass
 
     async def _send_servo(self, channel_key: str, pw: int):
+        logger.debug(f"send_servo: {channel_key} -> {pw} us")
         if self.hardware_service:
             try:
-                # Hardware service expects quarter-microseconds
                 await self.hardware_service.set_servo_position(
-                    channel_key, pw * 4, "realtime"
+                    channel_key, pw, "realtime"
                 )
             except Exception as e:
                 logger.error(f"Servo write error {channel_key}: {e}")
