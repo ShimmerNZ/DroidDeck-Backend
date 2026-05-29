@@ -9,5 +9,16 @@
     "frame_quality": 80,
     "ws_reconnect_delay": 5,
     "http_reconnect_delay": 3,
-    "esp32_url": "http://10.1.1.203:81/stream"
+    "esp32_url": "http://10.43.0.80:81/stream",
+    "esp32_camera_settings": {
+        "resolution": 6,
+        "quality": 4,
+        "brightness": 2,
+        "contrast": 2,
+        "saturation": 2,
+        "h_mirror": false,
+        "v_flip": false,
+        "xclk_freq": 12
+    },
+    "esp32_base_url": "http://10.43.0.80:81"
 }

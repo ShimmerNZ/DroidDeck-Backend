@@ -1,36 +1,44 @@
 {
   "m1_ch0": {
-    "min": 900,
-    "max": 1600,
-    "home": 1000,
+    "min": 848,
+    "max": 1472,
+    "home": 1099,
     "name": "Head Tilt",
-    "speed": 25,
+    "speed": 50,
     "accel": 5,
+    "max_velocity": 1000,
+    "max_acceleration": 3000,
     "deadband": 4
   },
   "m1_ch1": {
     "min": 992,
-    "max": 2000,
-    "home": 1500,
+    "max": 2096,
+    "home": 1544,
     "name": "Head Pan",
-    "speed": 25,
+    "speed": 50,
     "accel": 5,
+    "max_velocity": 500,
+    "max_acceleration": 1500,
     "deadband": 4
   },
   "m1_ch2": {
-    "min": 992,
-    "max": 2000,
-    "home": 1500,
+    "min": 1200,
+    "max": 2200,
+    "home": 1575,
     "name": "Left Eye Tilt",
+    "speed": 50,
+    "accel": 15,
     "max_velocity": 1000,
     "max_acceleration": 3000,
     "deadband": 4
   },
   "m1_ch3": {
-    "min": 992,
-    "max": 2000,
-    "home": 1500,
+    "min": 912,
+    "max": 1792,
+    "home": 1326,
     "name": "Right Eye Tilt",
+    "speed": 50,
+    "accel": 15,
     "max_velocity": 1000,
     "max_acceleration": 3000,
     "deadband": 4
@@ -162,28 +170,28 @@
     "deadband": 4
   },
   "m2_ch0": {
-    "min": 992,
+    "min": 800,
     "max": 2000,
-    "home": 1500,
-    "name": "",
+    "home": 1400,
+    "name": "L Arm Raise",
     "max_velocity": 1000,
     "max_acceleration": 3000,
     "deadband": 4
   },
   "m2_ch1": {
-    "min": 992,
+    "min": 800,
     "max": 2000,
-    "home": 1500,
-    "name": "",
+    "home": 1400,
+    "name": "R Arm Raise",
     "max_velocity": 1000,
     "max_acceleration": 3000,
     "deadband": 4
   },
   "m2_ch2": {
-    "min": 992,
-    "max": 2000,
-    "home": 1184,
-    "name": "",
+    "min": 1104,
+    "max": 1424,
+    "home": 1200,
+    "name": "Neck Raise",
     "max_velocity": 1000,
     "max_acceleration": 3000,
     "deadband": 4
@@ -216,19 +224,19 @@
     "deadband": 4
   },
   "m2_ch6": {
-    "min": 800,
+    "min": 1408,
     "max": 2200,
-    "home": 1500,
-    "name": "",
+    "home": 2200,
+    "name": "Left Eyelid",
     "max_velocity": 1000,
     "max_acceleration": 3000,
     "deadband": 4
   },
   "m2_ch7": {
     "min": 800,
-    "max": 2200,
-    "home": 1500,
-    "name": "",
+    "max": 1599,
+    "home": 800,
+    "name": "Right Eyelid",
     "max_velocity": 1000,
     "max_acceleration": 3000,
     "deadband": 4
@@ -236,8 +244,8 @@
   "m2_ch8": {
     "min": 992,
     "max": 2000,
-    "home": 992,
-    "name": "",
+    "home": 2000,
+    "name": "Left Focus",
     "max_velocity": 1000,
     "max_acceleration": 3000,
     "deadband": 4
@@ -245,8 +253,8 @@
   "m2_ch9": {
     "min": 992,
     "max": 2000,
-    "home": 992,
-    "name": "",
+    "home": 2000,
+    "name": "Right Focus",
     "max_velocity": 1000,
     "max_acceleration": 3000,
     "deadband": 4
@@ -273,7 +281,7 @@
     "min": 992,
     "max": 2000,
     "home": 992,
-    "name": "",
+    "name": "Left Track",
     "max_velocity": 1000,
     "max_acceleration": 3000,
     "deadband": 4
@@ -282,7 +290,7 @@
     "min": 992,
     "max": 2000,
     "home": 992,
-    "name": "",
+    "name": "Right Track",
     "max_velocity": 1000,
     "max_acceleration": 3000,
     "deadband": 4

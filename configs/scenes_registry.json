@@ -1,17 +1,250 @@
 {
-  "quick": {
-    "file": "scenes/quick.json",
-    "name": "quick",
+  "Breathing": {
+    "file": "scenes/breathing.json",
+    "name": "Breathing",
     "category": "Bottango",
     "description": "Imported from Bottango controller: DroidDeck Driver",
-    "duration": 10.567,
+    "duration": 30.0,
     "locked_channels": [
-      "m1_ch1"
+      "m1_ch0",
+      "m2_ch2"
     ],
     "metadata": {
       "source": "bottango",
       "controller": "DroidDeck Driver",
-      "converted_at": "2026-02-18 21:15:47",
+      "converted_at": "2026-05-01 16:01:04",
+      "sample_rate_ms": 50,
+      "interpolation": "cubic_bezier"
+    }
+  },
+  "Enthusiastic Yell": {
+    "file": "scenes/enthusiastic_yell.json",
+    "name": "Enthusiastic Yell",
+    "category": "Bottango",
+    "description": "Imported from Bottango controller: DroidDeck Driver",
+    "duration": 5.0,
+    "locked_channels": [
+      "m1_ch6",
+      "m1_ch8",
+      "m1_ch9",
+      "m1_ch12",
+      "m2_ch0",
+      "m2_ch2"
+    ],
+    "metadata": {
+      "source": "bottango",
+      "controller": "DroidDeck Driver",
+      "converted_at": "2026-05-01 16:01:04",
+      "sample_rate_ms": 50,
+      "interpolation": "cubic_bezier"
+    }
+  },
+  "Cover eyes": {
+    "file": "scenes/cover_eyes.json",
+    "name": "Cover eyes",
+    "category": "Bottango",
+    "description": "Imported from Bottango controller: DroidDeck Driver",
+    "duration": 3.0,
+    "locked_channels": [
+      "m1_ch0",
+      "m1_ch2",
+      "m1_ch3",
+      "m1_ch6",
+      "m1_ch7",
+      "m1_ch8",
+      "m1_ch9",
+      "m1_ch12",
+      "m2_ch0",
+      "m2_ch2"
+    ],
+    "metadata": {
+      "source": "bottango",
+      "controller": "DroidDeck Driver",
+      "converted_at": "2026-05-01 16:01:04",
+      "sample_rate_ms": 50,
+      "interpolation": "cubic_bezier"
+    }
+  },
+  "Quick Whoa": {
+    "file": "scenes/quick_whoa.json",
+    "name": "Quick Whoa",
+    "category": "Bottango",
+    "description": "Imported from Bottango controller: DroidDeck Driver",
+    "duration": 3.5,
+    "locked_channels": [
+      "m1_ch6",
+      "m1_ch7",
+      "m1_ch8",
+      "m1_ch9",
+      "m1_ch12",
+      "m2_ch0"
+    ],
+    "metadata": {
+      "source": "bottango",
+      "controller": "DroidDeck Driver",
+      "converted_at": "2026-05-01 16:01:04",
+      "sample_rate_ms": 50,
+      "interpolation": "cubic_bezier"
+    }
+  },
+  "Right Wave": {
+    "file": "scenes/right_wave.json",
+    "name": "Right Wave",
+    "category": "Bottango",
+    "description": "Imported from Bottango controller: DroidDeck Driver",
+    "duration": 3.833,
+    "locked_channels": [
+      "m1_ch12"
+    ],
+    "metadata": {
+      "source": "bottango",
+      "controller": "DroidDeck Driver",
+      "converted_at": "2026-05-01 16:01:04",
+      "sample_rate_ms": 50,
+      "interpolation": "cubic_bezier"
+    }
+  },
+  "Dissmisive Nah": {
+    "file": "scenes/dissmisive_nah.json",
+    "name": "Dissmisive Nah",
+    "category": "Bottango",
+    "description": "Imported from Bottango controller: DroidDeck Driver",
+    "duration": 4.0,
+    "locked_channels": [
+      "m1_ch0",
+      "m1_ch1",
+      "m2_ch2"
+    ],
+    "metadata": {
+      "source": "bottango",
+      "controller": "DroidDeck Driver",
+      "converted_at": "2026-05-01 16:01:04",
+      "sample_rate_ms": 50,
+      "interpolation": "cubic_bezier"
+    }
+  },
+  "Amazed Wow": {
+    "file": "scenes/amazed_wow.json",
+    "name": "Amazed Wow",
+    "category": "Bottango",
+    "description": "Imported from Bottango controller: DroidDeck Driver",
+    "duration": 0.967,
+    "locked_channels": [
+      "m1_ch2",
+      "m1_ch3",
+      "m2_ch6",
+      "m2_ch7",
+      "m2_ch8",
+      "m2_ch9"
+    ],
+    "metadata": {
+      "source": "bottango",
+      "controller": "DroidDeck Driver",
+      "converted_at": "2026-05-01 16:01:04",
+      "sample_rate_ms": 50,
+      "interpolation": "cubic_bezier"
+    }
+  },
+  "WALL-E Name": {
+    "file": "scenes/wall-e_name.json",
+    "name": "WALL-E Name",
+    "category": "Bottango",
+    "description": "Imported from Bottango controller: DroidDeck Driver",
+    "duration": 4.0,
+    "locked_channels": [
+      "m1_ch0",
+      "m2_ch2",
+      "m2_ch6",
+      "m2_ch7",
+      "m2_ch8",
+      "m2_ch9"
+    ],
+    "metadata": {
+      "source": "bottango",
+      "controller": "DroidDeck Driver",
+      "converted_at": "2026-05-01 16:01:04",
+      "sample_rate_ms": 50,
+      "interpolation": "cubic_bezier"
+    }
+  },
+  "Left Wave": {
+    "file": "scenes/left_wave.json",
+    "name": "Left Wave",
+    "category": "Bottango",
+    "description": "Imported from Bottango controller: DroidDeck Driver",
+    "duration": 3.833,
+    "locked_channels": [
+      "m1_ch6",
+      "m1_ch7",
+      "m1_ch8",
+      "m1_ch9",
+      "m2_ch0"
+    ],
+    "metadata": {
+      "source": "bottango",
+      "controller": "DroidDeck Driver",
+      "converted_at": "2026-05-01 16:01:04",
+      "sample_rate_ms": 50,
+      "interpolation": "cubic_bezier"
+    }
+  },
+  "Quick Exhale": {
+    "file": "scenes/quick_exhale.json",
+    "name": "Quick Exhale",
+    "category": "Bottango",
+    "description": "Imported from Bottango controller: DroidDeck Driver",
+    "duration": 4.0,
+    "locked_channels": [
+      "m1_ch0",
+      "m1_ch2",
+      "m1_ch3",
+      "m2_ch2"
+    ],
+    "metadata": {
+      "source": "bottango",
+      "controller": "DroidDeck Driver",
+      "converted_at": "2026-05-01 16:01:04",
+      "sample_rate_ms": 50,
+      "interpolation": "cubic_bezier"
+    }
+  },
+  "Struggling": {
+    "file": "scenes/struggling.json",
+    "name": "Struggling",
+    "category": "Bottango",
+    "description": "Imported from Bottango controller: DroidDeck Driver",
+    "duration": 3.833,
+    "locked_channels": [
+      "m1_ch0",
+      "m1_ch1",
+      "m2_ch2"
+    ],
+    "metadata": {
+      "source": "bottango",
+      "controller": "DroidDeck Driver",
+      "converted_at": "2026-05-01 16:01:04",
+      "sample_rate_ms": 50,
+      "interpolation": "cubic_bezier"
+    }
+  },
+  "Hands Up": {
+    "file": "scenes/hands_up.json",
+    "name": "Hands Up",
+    "category": "Bottango",
+    "description": "Imported from Bottango controller: DroidDeck Driver",
+    "duration": 3.833,
+    "locked_channels": [
+      "m1_ch1",
+      "m1_ch6",
+      "m1_ch8",
+      "m1_ch9",
+      "m1_ch12",
+      "m2_ch0"
+    ],
+    "metadata": {
+      "source": "bottango",
+      "controller": "DroidDeck Driver",
+      "converted_at": "2026-05-01 16:01:04",
       "sample_rate_ms": 50,
       "interpolation": "cubic_bezier"
     }
