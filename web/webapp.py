@@ -39,6 +39,55 @@ class DroidDeckWebServer:
         
         self.load_web_config()
         self.setup_flask_app()
+
+        if backend_ref:
+            self._wire_scene_callbacks()
+
+    def set_backend(self, backend_ref):
+        """Set or replace the backend reference and re-wire scene callbacks"""
+        self.backend = backend_ref
+        self._wire_scene_callbacks()
+
+    def _wire_scene_callbacks(self):
+        """Register scene engine callbacks to broadcast events to web clients"""
+        try:
+            if not self.backend or not hasattr(self.backend, 'scene_engine'):
+                return
+
+            scene_engine = self.backend.scene_engine
+
+            def on_scene_started(scene_name, scene_data):
+                self.broadcast_message({
+                    'type': 'scene_started',
+                    'scene_name': scene_name,
+                    'duration': scene_data.get('duration', 0),
+                    'timestamp': time.time()
+                })
+
+            def on_scene_completed(scene_name, scene_data, success):
+                self.broadcast_message({
+                    'type': 'scene_completed',
+                    'scene_name': scene_name,
+                    'success': success,
+                    'timestamp': time.time()
+                })
+
+            def on_scene_error(scene_name, scene_data, error):
+                self.broadcast_message({
+                    'type': 'scene_error',
+                    'scene_name': scene_name,
+                    'error': error,
+                    'timestamp': time.time()
+                })
+
+            scene_engine.scene_started_callback = on_scene_started
+            scene_engine.scene_completed_callback = on_scene_completed
+            scene_engine.scene_error_callback = on_scene_error
+
+            logger.info("Scene engine callbacks wired to web server broadcast")
+
+        except Exception as e:
+            logger.error(f"Failed to wire scene callbacks: {e}")
     
     def load_web_config(self):
         """Load web-specific configuration"""
@@ -97,25 +146,179 @@ class DroidDeckWebServer:
         self.setup_routes()
         self.setup_socketio_events()
         
-    def _handle_get_audio_files(self, client_sid):
-        """Get list of available audio files"""
+    def _handle_scene_stop(self, client_sid):
+        """Stop the currently playing scene"""
         try:
-            audio_dir = Path("audio")
-            audio_files = []
-            
-            if audio_dir.exists():
-                for ext in ['*.mp3', '*.wav', '*.ogg']:
-                    audio_files.extend([f.name for f in audio_dir.glob(ext)])
-            
+            if self.backend and hasattr(self.backend, 'scene_engine'):
+                import threading
+
+                def stop_scene_thread():
+                    import asyncio
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(self.backend.scene_engine.stop_current_scene())
+                        loop.close()
+                    except Exception as e:
+                        logger.error(f"Error stopping scene: {e}")
+
+                thread = threading.Thread(target=stop_scene_thread, daemon=True)
+                thread.start()
+            else:
+                logger.warning("Scene engine not available for scene_stop")
+        except Exception as e:
+            logger.error(f"Scene stop handler error: {e}")
+
+    def _handle_audio_command(self, client_sid, data):
+        """Handle audio play/stop/volume commands"""
+        try:
+            command = data.get('command')
+            if not self.backend or not hasattr(self.backend, 'audio_controller'):
+                self.socketio.emit('error', {'message': 'Audio controller not available'}, room=client_sid)
+                return
+
+            audio = self.backend.audio_controller
+
+            if command == 'play':
+                track = data.get('track')
+                if track:
+                    audio.play_track(track)
+                    logger.info(f"Web UI audio play: {track}")
+            elif command == 'stop':
+                audio.stop()
+                logger.info("Web UI audio stop")
+            elif command == 'volume':
+                volume = float(data.get('volume', 0.3))
+                audio.set_volume(volume)
+                logger.info(f"Web UI audio volume: {volume}")
+            else:
+                logger.warning(f"Unknown audio command: {command}")
+
+        except Exception as e:
+            logger.error(f"Audio command handler error: {e}")
+            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
+    def _handle_mode_command(self, client_sid, data):
+        """Handle mode toggle commands (idle, demo, etc.)"""
+        try:
+            mode_name = data.get('name')
+            state = data.get('state', True)
+
+            if mode_name == 'idle':
+                if self.backend and hasattr(self.backend, 'scene_engine'):
+                    import threading
+
+                    def idle_mode_thread():
+                        import asyncio
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            self.backend.scene_engine.set_idle_mode(state)
+                            loop.close()
+                        except Exception as e:
+                            logger.error(f"Error setting idle mode: {e}")
+
+                    thread = threading.Thread(target=idle_mode_thread, daemon=True)
+                    thread.start()
+
+                    self.socketio.emit('backend_message', {
+                        'type': 'mode_response',
+                        'mode': 'idle',
+                        'state': state,
+                        'success': True,
+                        'timestamp': time.time()
+                    }, room=client_sid)
+                    logger.info(f"Idle mode {'enabled' if state else 'disabled'} from web UI")
+                else:
+                    self.socketio.emit('error', {'message': 'Scene engine not available'}, room=client_sid)
+            else:
+                logger.warning(f"Unknown mode command: {mode_name}")
+
+        except Exception as e:
+            logger.error(f"Mode command handler error: {e}")
+            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
+    def _handle_save_controller_config(self, client_sid, data):
+        """Save controller configuration to disk"""
+        try:
+            config = data.get('config', {})
+            config_path = Path("configs/controller_config.json")
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+
+            logger.info(f"Controller config saved: {len(config)} mappings")
+
             self.socketio.emit('backend_message', {
-                'type': 'audio_files',
-                'files': sorted(audio_files),
-                'count': len(audio_files),
+                'type': 'controller_config_saved',
+                'count': len(config),
                 'timestamp': time.time()
             }, room=client_sid)
-            
+
         except Exception as e:
-            logger.error(f"Error getting audio files: {e}")
+            logger.error(f"Save controller config error: {e}")
+            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
+    def _handle_reset_controller_calibration(self, client_sid):
+        """Reset controller calibration"""
+        try:
+            calibration_path = Path("configs/controller_calibration.json")
+            if calibration_path.exists():
+                calibration_path.unlink()
+
+            self.socketio.emit('backend_message', {
+                'type': 'calibration_reset',
+                'success': True,
+                'timestamp': time.time()
+            }, room=client_sid)
+            logger.info("Controller calibration reset from web UI")
+
+        except Exception as e:
+            logger.error(f"Reset calibration error: {e}")
+            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
+    def _handle_calibration_mode(self, client_sid, start: bool):
+        """Start or stop controller calibration mode"""
+        try:
+            msg_type = 'calibration_mode_started' if start else 'calibration_mode_stopped'
+            self.socketio.emit('backend_message', {
+                'type': msg_type,
+                'timestamp': time.time()
+            }, room=client_sid)
+            logger.info(f"Calibration mode {'started' if start else 'stopped'} from web UI")
+        except Exception as e:
+            logger.error(f"Calibration mode error: {e}")
+
+    def _handle_stepper_command(self, client_sid, data):
+        """Handle stepper enable/disable commands (type=stepper)"""
+        try:
+            command = data.get('command')
+            if not self.backend or not hasattr(self.backend, 'hardware_service'):
+                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
+                return
+
+            import threading
+
+            def stepper_thread():
+                import asyncio
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(
+                        self.backend.hardware_service.handle_stepper_command({'command': command})
+                    )
+                    loop.close()
+                except Exception as e:
+                    logger.error(f"Stepper command error: {e}")
+
+            thread = threading.Thread(target=stepper_thread, daemon=True)
+            thread.start()
+            logger.info(f"Stepper command from web UI: {command}")
+
+        except Exception as e:
+            logger.error(f"Stepper command handler error: {e}")
+            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
 
     def _handle_save_scene(self, client_sid, data):
         """Save a scene configuration"""
@@ -124,43 +327,59 @@ class DroidDeckWebServer:
             if not scene_data:
                 self.socketio.emit('error', {'message': 'No scene data provided'}, room=client_sid)
                 return
-            
-            # Send to backend to save
+
             if self.backend and hasattr(self.backend, 'scene_engine'):
-                # Add logic to save scene via backend
-                pass
-            
-            self.socketio.emit('backend_message', {
-                'type': 'scene_saved',
-                'scene_name': scene_data.get('label'),
-                'timestamp': time.time()
-            }, room=client_sid)
-            
+                import threading
+
+                def save_scene_thread():
+                    import asyncio
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(self.backend.scene_engine.save_scenes([scene_data]))
+                        loop.close()
+                        self.socketio.emit('backend_message', {
+                            'type': 'scene_saved',
+                            'scene_name': scene_data.get('label'),
+                            'timestamp': time.time()
+                        })
+                    except Exception as e:
+                        logger.error(f"Error saving scene: {e}")
+                        self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
+                thread = threading.Thread(target=save_scene_thread, daemon=True)
+                thread.start()
+            else:
+                self.socketio.emit('error', {'message': 'Scene engine not available'}, room=client_sid)
+
         except Exception as e:
-            logger.error(f"Error saving scene: {e}")
+            logger.error(f"Save scene handler error: {e}")
             self.socketio.emit('error', {'message': str(e)}, room=client_sid)
 
     def _handle_delete_scene(self, client_sid, data):
-        """Delete a scene"""
+        """Delete a scene from the config"""
         try:
             scene_name = data.get('scene_name')
             if not scene_name:
                 self.socketio.emit('error', {'message': 'No scene name provided'}, room=client_sid)
                 return
-            
-            # Send to backend to delete
+
             if self.backend and hasattr(self.backend, 'scene_engine'):
-                # Add logic to delete scene via backend
-                pass
-            
-            self.socketio.emit('backend_message', {
-                'type': 'scene_deleted',
-                'scene_name': scene_name,
-                'timestamp': time.time()
-            }, room=client_sid)
-            
+                scene_engine = self.backend.scene_engine
+                if hasattr(scene_engine, 'scenes') and scene_name in scene_engine.scenes:
+                    del scene_engine.scenes[scene_name]
+
+                self.socketio.emit('backend_message', {
+                    'type': 'scene_deleted',
+                    'scene_name': scene_name,
+                    'timestamp': time.time()
+                }, room=client_sid)
+                logger.info(f"Scene deleted from web UI: {scene_name}")
+            else:
+                self.socketio.emit('error', {'message': 'Scene engine not available'}, room=client_sid)
+
         except Exception as e:
-            logger.error(f"Error deleting scene: {e}")
+            logger.error(f"Delete scene handler error: {e}")
             self.socketio.emit('error', {'message': str(e)}, room=client_sid)
 
     def setup_routes(self):
@@ -301,7 +520,29 @@ class DroidDeckWebServer:
                     self._handle_toggle_failsafe(client_sid, data)
                 elif cmd_type == 'get_failsafe_status':
                     self._handle_get_failsafe_status(client_sid)
-                
+                elif cmd_type == 'scene_stop':
+                    self._handle_scene_stop(client_sid)
+                elif cmd_type == 'import_scenes':
+                    self._handle_get_scenes(client_sid)
+                elif cmd_type == 'audio':
+                    self._handle_audio_command(client_sid, data)
+                elif cmd_type == 'mode':
+                    self._handle_mode_command(client_sid, data)
+                elif cmd_type == 'save_controller_config':
+                    self._handle_save_controller_config(client_sid, data)
+                elif cmd_type == 'reset_controller_calibration':
+                    self._handle_reset_controller_calibration(client_sid)
+                elif cmd_type == 'start_calibration_mode':
+                    self._handle_calibration_mode(client_sid, True)
+                elif cmd_type == 'stop_calibration_mode':
+                    self._handle_calibration_mode(client_sid, False)
+                elif cmd_type == 'stepper':
+                    self._handle_stepper_command(client_sid, data)
+                elif cmd_type == 'save_scene':
+                    self._handle_save_scene(client_sid, data)
+                elif cmd_type == 'delete_scene':
+                    self._handle_delete_scene(client_sid, data)
+
             except Exception as e:
                 logger.error(f"Failed to handle command: {e}")
                 emit('error', {'message': str(e)})
@@ -617,7 +858,7 @@ class DroidDeckWebServer:
                     for scene_name, scene_data in self.backend.scene_engine.scenes.items():
                         scenes_data.append({
                             'label': scene_data.get('label', scene_name),
-                            'emoji': scene_data.get('emoji', '🎭'),
+                            'emoji': scene_data.get('emoji', 'ðŸŽ­'),
                             'duration': scene_data.get('duration', 2.0),
                             'categories': scene_data.get('categories', ['Misc']),
                             'audio_enabled': scene_data.get('audio_enabled', False),
@@ -903,7 +1144,7 @@ class DroidDeckWebServer:
     def _handle_emergency_stop(self, client_sid):
         """Handle emergency stop command - forward to backend"""
         try:
-            logger.critical("🚨 EMERGENCY STOP requested from web UI")
+            logger.critical("EMERGENCY STOP requested from web UI")
             
             if self.backend and hasattr(self.backend, 'hardware_service'):
                 import threading
@@ -1054,11 +1295,7 @@ class DroidDeckWebServer:
                     }
             
             telemetry_data['timestamp'] = time.time()
-
-            # Attach battery run-time estimate if available
-            if hasattr(self.backend, 'telemetry_system') and hasattr(self.backend.telemetry_system, 'get_battery_estimate'):
-                telemetry_data['battery_estimate'] = self.backend.telemetry_system.get_battery_estimate()
-
+            
             # Motion mixer serial performance stats
             try:
                 mixer = None

@@ -1,6 +1,6 @@
 # 🤖 DroidDeck — WALL-E Robot Control System
 
-**Updated: February 2026**
+**Updated: May 2026**
 
 ## 📋 Table of Contents
 
@@ -11,6 +11,8 @@
 5. [Pololu Maestro Configuration](#pololu-maestro-configuration)
 6. [Software Architecture](#software-architecture)
 7. [Bottango Animation Integration](#bottango-animation-integration)
+   - [Import Workflow](#import-workflow)
+   - [Bottango Live Driver](#bottango-live-driver)
 8. [Configuration Files](#configuration-files)
 9. [Installation & Setup](#installation--setup)
 10. [Bluetooth Controller Setup](#bluetooth-controller-setup)
@@ -29,6 +31,7 @@ DroidDeck is a production-grade robotics control platform for WALL-E animatronic
 - **Camera System**: ESP32-CAM with HTTP proxy for multi-client streaming and gesture recognition
 - **Hardware Control**: Dual Pololu Maestro 24-channel servo controllers, NEMA 23 stepper motor with TB6600 driver, Sabertooth 2×60 brushed motor controller for tank drive
 - **Scene Management**: Bottango-imported animations with cubic bezier interpolation, audio-synchronized servo movements, and layered motion mixing
+- **Bottango Live Driver**: Real-time servo control directly from the Bottango timeline over TCP — for testing animations before export
 - **Safety Systems**: Emergency stop, limit switches, hardware watchdog, voltage/current monitoring, and graceful failsafe defaults
 
 ---
@@ -176,7 +179,7 @@ Two reference diagrams are provided alongside this README:
 
 **[droiddeck_wiring.html](droiddeck_wiring.html)** — Hardware wiring reference covering power distribution, the shared serial bus, all GPIO pin assignments, TB6600 stepper connections, ADS1115 sensor wiring, Sabertooth tank drive connections, ESP32-CAM setup, and the Maestro channel map overview.
 
-**[droiddeck_architecture.html](droiddeck_architecture.html)** — Motion pipeline architecture showing the complete data flow for both control paths: Path A (Steam Deck joystick → WebSocket → hardware_service → Maestro, bypassing the mixer) and Path B (scene trigger → scene engine → MotionMixer → ConstraintPipeline → CommandDispatcher → Maestro batch serial). Includes the serial protocol byte format for both single and batch target commands, and the channel locking table during scene playback.
+**[droiddeck_architecture.html](droiddeck_architecture.html)** — Motion pipeline architecture showing the complete data flow for all three control paths: Path A (Steam Deck joystick → WebSocket → hardware_service → Maestro, bypassing the mixer), Path B (scene trigger → scene engine → MotionMixer → ConstraintPipeline → CommandDispatcher → Maestro batch serial), and Path C (Bottango live driver → TCP → 50Hz bezier tick → hardware_service → Maestro). Includes the serial protocol byte format for both single and batch target commands, and the channel locking table during scene playback.
 
 ---
 
@@ -195,6 +198,8 @@ DroidDeck Backend (main.py)
 ├── ConstraintPipeline          — Velocity limiting, deadband, position clamping
 ├── CommandDispatcher           — Batches channel commands per Maestro device
 ├── EnhancedSceneEngine         — Scene loading, playback, and audio sync
+├── BottangoFolderWatcher       — Auto-converts dropped Bottango JSON exports to scenes
+├── BottangoLiveDriver          — TCP client for real-time Bottango timeline control
 ├── NEMA23Controller            — TB6600 stepper motor positioning
 ├── BluetoothController         — PS4/Xbox/generic gamepad input
 ├── TelemetrySystem             — Voltage, current, and temperature monitoring
@@ -215,7 +220,7 @@ The motion system uses a layered blending approach to prevent conflicts between 
 - The scene layer sets a `channel_mask` that locks specific channels from joystick influence during playback
 - All layers converge through the ConstraintPipeline before dispatch to prevent runaway servo movement
 
-> **Note**: The Steam Deck frontend joystick sends `{type: "servo"}` WebSocket messages that bypass the MotionMixer entirely via `hardware_service.set_servo_position()`. This is intentional for low-latency direct control but means the Steam Deck joystick path does not pass through channel locking. The Bluetooth controller path goes through the full mixer pipeline.
+> **Note**: There are three direct-to-hardware paths that bypass the MotionMixer: the Steam Deck frontend joystick sends `{type: "servo"}` WebSocket messages via `hardware_service.set_servo_position()`, and the Bottango live driver sends positions from its 50Hz tick via the same method. Both are intentional — the joystick for low-latency direct control, the live driver for isolated animation testing. Neither path passes through channel locking. The Bluetooth controller path goes through the full mixer pipeline.
 
 ### Key Design Patterns
 
@@ -283,6 +288,35 @@ The `bottango_converter.py` module:
 
 The cubic bezier implementation preserves the exact motion curves authored in Bottango, including easing in/out, so animations play back with the same feel as they were designed.
 
+### Bottango Live Driver
+
+The live driver allows you to control servos in real time directly from the Bottango timeline — scrub, play, and test movements without exporting any files.
+
+**How it works:** The Pi connects outbound to Bottango as a TCP client on port 59225. Bottango streams bezier curve commands as you play or scrub the timeline. A 50Hz tick loop on the Pi evaluates the curves and sends servo positions directly to the Maestros via `hardware_service`. This bypasses the MotionMixer entirely — it's designed for isolated per-servo testing, not simultaneous use with scene playback.
+
+**Bottango setup:**
+1. In Bottango, go to **Drivers** and add a new driver
+2. Set **Driver Type** to **Network (Advanced)**
+3. Set **Network Port** to `59225`
+4. Set **Server IP Address** to the Pi's IP address on the Walle network
+5. Enable **Set Driver live on program launch** to auto-connect on startup
+6. Toggle **Driver Live** to go green — the Pi will connect within 5 seconds
+
+**Pi configuration** — set the Bottango host IP in `hardware_config.json`:
+```json
+{
+  "bottango": {
+    "host": "10.1.1.5"
+  }
+}
+```
+
+**Channel mapping** is the same as exports: Bottango effector ID 0–23 → Maestro 1, ID 24–47 → Maestro 2. Set the effector's pin number in Bottango to the channel number you want to control.
+
+**Servo direction** is preserved exactly as configured in Bottango — if an effector has min > max (inverted direction), the live driver honours that. Positions are clamped to the limits in `servo_config.json` as a hardware safety backstop.
+
+The Pi auto-reconnects every 5 seconds if Bottango is not running — it's safe to start the backend before launching Bottango.
+
 ---
 
 ## Configuration Files
@@ -322,6 +356,9 @@ The cubic bezier implementation preserves the exact motion curves authored in Bo
         "acceleration": 800
       }
     }
+  },
+  "bottango": {
+    "host": "10.1.1.5"
   }
 }
 ```
@@ -355,8 +392,8 @@ git clone <repo-url> ~/droiddeck
 cd ~/droiddeck
 
 # Run the install script
-chmod +x DD_Install.sh
-./DD_Install.sh
+chmod +x install.sh
+./install.sh
 ```
 
 The install script handles pyenv, Python 3.9.13, all pip dependencies, systemd service registration, and SMB share configuration.
@@ -547,6 +584,24 @@ screen /dev/ttyAMA0 57600
 - Confirm Custom Motor Signal Range is **16 Bit**
 - Verify channel numbers in Bottango match the intended Maestro channels
 
+### Bottango Live Driver Issues
+
+**Driver not connecting (stays red in Bottango):**
+- Confirm `bottango.host` in `hardware_config.json` matches the Windows PC's IP address
+- Confirm the **Driver Live** toggle is enabled in Bottango
+- Confirm the Network Port in Bottango is set to `59225`
+- Check the Pi can reach the Windows PC: `ping 10.1.1.5`
+- Check the backend log: `journalctl -u droiddeck-backend -f` — connection attempts are at DEBUG level, successful connections at INFO
+
+**Driver connects but servos don't move:**
+- Confirm the effector's **pin number** in Bottango matches the Maestro channel number (0–23 for M1, 24–47 for M2)
+- Confirm the servo is registered in `servo_config.json` and the Maestro channel is enabled
+- Confirm motors are enabled in the DroidDeck UI (system starts in failsafe)
+
+**Servo moves to wrong position:**
+- Check that the effector min/max values in Bottango match the servo's actual PWM range
+- The live driver uses Bottango's min/max directly — if they are wrong in Bottango, the physical range will be wrong
+
 ### System Diagnostics
 
 ```bash
@@ -577,6 +632,7 @@ python3 --version  # Should be 3.9.13
 - Dual Pololu Maestro 24-channel controllers (devices #12 and #13)
 - Sabertooth 2×60 tank drive via Maestro servo signal
 - Bottango animation import with cubic bezier interpolation
+- Bottango live driver for real-time animation testing (TCP, auto-reconnect)
 - Layered motion mixer with joystick, idle, and scene layers
 - Scene playback at 20 FPS with channel locking
 - Audio-synchronized scene support
@@ -591,4 +647,3 @@ python3 --version  # Should be 3.9.13
 
 ### Future
 - AI behaviour system
-

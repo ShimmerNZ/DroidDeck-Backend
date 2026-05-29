@@ -21,6 +21,7 @@
     --accent-cyan: #4edcf5;
     --joystick: #3dd68c;
     --scene: #f59e4e;
+    --bottango: #4edcf5;
     --shared: #a86ef5;
     --serial: #f54e6e;
   }
@@ -75,6 +76,7 @@
 
   .legend-line.joystick { background: var(--joystick); }
   .legend-line.scene { background: var(--scene); }
+  .legend-line.bottango { background: var(--bottango); }
   .legend-line.shared { background: var(--shared); }
   .legend-line.serial { background: var(--serial); }
   .legend-line.joystick-dash {
@@ -206,6 +208,7 @@
 
   .path-label.joystick { color: var(--joystick); }
   .path-label.scene { color: var(--scene); }
+  .path-label.bottango { color: var(--bottango); }
 
   .detail-row {
     display: flex;
@@ -234,6 +237,7 @@
 
   .detail-row.joystick .step-num { background: var(--joystick); }
   .detail-row.scene .step-num { background: var(--scene); }
+  .detail-row.bottango .step-num { background: var(--bottango); }
 
   .detail-text {
     flex: 1;
@@ -354,6 +358,7 @@
 <div class="legend">
   <div class="legend-item"><div class="legend-line joystick"></div> Joystick path</div>
   <div class="legend-item"><div class="legend-line scene"></div> Scene path</div>
+  <div class="legend-item"><div class="legend-line bottango"></div> Bottango live path</div>
   <div class="legend-item"><div class="legend-line shared"></div> Shared (mixer)</div>
   <div class="legend-item"><div class="legend-line serial"></div> Serial to Maestro</div>
 </div>
@@ -570,18 +575,107 @@
   </div>
 </div>
 
+<!-- ===== BOTTANGO LIVE PATH ===== -->
+<div class="diagram-section">
+  <div class="section-label">Path C – Bottango Live Driver (Real-time Animation Testing)</div>
+
+  <div class="path-label bottango">Visual Flow</div>
+  <div class="visual-flow">
+    <div class="node node-input">Bottango<br><small>Windows PC</small></div>
+    <span class="vf-arrow" style="color:var(--bottango)">→</span>
+    <div class="node" style="background:var(--surface2);border:2px solid var(--bottango);color:var(--bottango)">TCP :59225<br><small>Driver API v8</small></div>
+    <span class="vf-arrow" style="color:var(--bottango)">→</span>
+    <div class="node" style="background:var(--surface2);border:2px solid var(--bottango);color:var(--bottango)">bottango_live_driver.py<br><small>_connect_loop()</small></div>
+    <span class="vf-arrow" style="color:var(--bottango)">→</span>
+    <div class="node" style="background:var(--surface2);border:2px solid var(--bottango);color:var(--bottango)">50Hz tick<br><small>bezier eval</small></div>
+    <span class="vf-arrow" style="color:var(--bottango)">→</span>
+    <div class="node node-hw">hardware_service.py<br><small>set_servo_position()</small></div>
+    <span class="vf-arrow red">→</span>
+    <div class="node node-serial">shared_serial_manager<br><small>send_command()</small></div>
+    <span class="vf-arrow red">→</span>
+    <div class="node node-maestro">Pololu Maestro<br><small>Serial @ 57600</small></div>
+  </div>
+
+  <div class="path-label bottango">Step-by-step detail</div>
+
+  <div class="detail-row bottango">
+    <span class="step-num">1</span>
+    <div class="detail-text">
+      Backend starts <code>BottangoLiveDriver</code> at startup, connecting outbound to Bottango on the Windows PC at <code>host:59225</code> (configured in <code>hardware_config.json → bottango.host</code>). Auto-reconnects every 5s if not available.
+      <br><span class="file">main.py → bottango_live_driver.py _connect_loop()</span>
+    </div>
+  </div>
+
+  <div class="detail-row bottango">
+    <span class="step-num">2</span>
+    <div class="detail-text">
+      On connect, sends <code>BOOT\n</code> → Bottango responds with <code>hRQ,&lt;code&gt;</code> handshake request. Driver replies <code>btngoHSK,CUSTOM8,&lt;code&gt;,1</code> → Bottango goes green (live).
+      <br><span class="file">bottango_live_driver.py _handle_handshake()</span>
+    </div>
+  </div>
+
+  <div class="detail-row bottango">
+    <span class="step-num">3</span>
+    <div class="detail-text">
+      Bottango sends <code>rSVPin,&lt;id&gt;,&lt;min_us&gt;,&lt;max_us&gt;,&lt;max_change&gt;,&lt;start_us&gt;</code> for each enabled effector. Driver registers an <code>_Effector</code> with the PWM range. When <code>min &gt; max</code>, direction is inverted — preserved exactly as configured in Bottango.
+      <br>Limits clamped independently against <code>servo_config.json</code> as a hardware safety backstop.
+      <br><span class="file">bottango_live_driver.py _handle_register_servo()</span>
+    </div>
+  </div>
+
+  <div class="detail-row bottango">
+    <span class="step-num">4</span>
+    <div class="detail-text">
+      Bottango sends <code>tSYN,&lt;timeline_ms&gt;</code> time sync packets as you play or scrub. Driver records the Bottango timeline time and local wall clock at sync point to track elapsed time.
+      <br><span class="file">bottango_live_driver.py _handle_time_sync()</span>
+    </div>
+  </div>
+
+  <div class="detail-row bottango">
+    <span class="step-num">5</span>
+    <div class="detail-text">
+      Bottango sends <code>sC,&lt;id&gt;,&lt;start_ms&gt;,&lt;dur_ms&gt;,&lt;p0&gt;,&lt;cpStartX&gt;,&lt;cpStartY&gt;,&lt;p3&gt;,&lt;cpEndX&gt;,&lt;cpEndY&gt;</code> bezier curve commands. Curves are queued per effector sorted by start time. Start time is clamped to now if already in the past (late network arrival).
+      <br>For instant position commands (<code>sCI</code>), position is applied immediately and any queued curves are cleared.
+      <br><span class="file">bottango_live_driver.py _handle_set_curve() / _handle_instant_curve()</span>
+    </div>
+  </div>
+
+  <div class="detail-row bottango">
+    <span class="step-num">6</span>
+    <div class="detail-text">
+      A <strong>50Hz tick loop</strong> runs continuously. Each tick computes the current Bottango timeline time from the last <code>tSYN</code> + elapsed wall clock. For each registered effector, evaluates the active bezier curve using cubic bezier sampling (mirrors Bottango's <code>BezierCurve.cpp</code>). When a curve expires, the final endpoint position is dispatched so the servo always lands correctly.
+      <br><span class="file">bottango_live_driver.py _playback_tick() → get_pw_at()</span>
+    </div>
+  </div>
+
+  <div class="detail-row bottango">
+    <span class="step-num">7</span>
+    <div class="detail-text">
+      Resolved PWM value (µs) passed to <code>hardware_service.set_servo_position(channel_key, pw, "realtime")</code>. Same path as joystick from this point — bypasses MotionMixer entirely.
+      <br><span class="file">bottango_live_driver.py _send_servo() → hardware_service.py</span>
+    </div>
+  </div>
+
+  <div class="note-box" style="border-left-color:var(--bottango);background:rgba(78,220,245,0.05)">
+    <strong>Channel mapping:</strong> Bottango effector ID 0–23 → <code>m1_ch0</code>–<code>m1_ch23</code> (Maestro 1). ID 24–47 → <code>m2_ch0</code>–<code>m2_ch23</code> (Maestro 2). Matches the export/import convention in <code>bottango_converter.py</code>.<br><br>
+    <strong>Bypass note:</strong> Like the joystick path, the live driver goes directly to <code>hardware_service</code> — it does NOT pass through MotionMixer. No channel locking, constraint pipeline, or scene blending. Designed for isolated testing of individual servos from the Bottango timeline before exporting animations.
+  </div>
+</div>
+
 <!-- ===== IMPORTANT NOTES ===== -->
 <div class="diagram-section">
   <div class="section-label">Architecture Notes</div>
 
   <div class="note-box warning">
-    <strong>⚠ Two independent paths to Maestro:</strong> The Steam Deck frontend joystick sends <code>{type:"servo"}</code> WebSocket messages that go <strong>directly</strong> to <code>hardware_service.set_servo_position()</code> – this bypasses the MotionMixer entirely. It does NOT pass through <code>controller_input_handler.py</code>. The Bluetooth controller path (not shown – backend-only) DOES go through the input handler and mixer. This means:
+    <strong>⚠ Three independent paths to Maestro:</strong> The Steam Deck frontend joystick (Path A) sends <code>{type:"servo"}</code> WebSocket messages directly to <code>hardware_service.set_servo_position()</code>. The Bottango live driver (Path C) also calls <code>hardware_service</code> directly from its 50Hz tick. Neither passes through the MotionMixer, ConstraintPipeline, or CommandDispatcher. Only the Bluetooth controller backend path goes through the full mixer. This means:
     <br><br>
-    • The channel lock check we added to <code>DirectServoHandler</code> / <code>JoystickPairHandler</code> in <code>controller_input_handler.py</code> only protects the <strong>Bluetooth controller</strong> path
+    • The channel lock check in <code>controller_input_handler.py</code> only protects the <strong>Bluetooth controller</strong> path
     <br>
-    • The Steam Deck frontend currently has <strong>no channel lock protection</strong> – it can send servo commands to scene-locked channels
+    • The Steam Deck frontend has <strong>no channel lock protection</strong> — it can send servo commands to scene-locked channels
     <br>
-    • During scene playback, if the Steam Deck joystick moves a locked channel, both the mixer (via batch) and the frontend (via individual set_target) send conflicting commands to the same servo
+    • The Bottango live driver has <strong>no channel lock protection</strong> — intended for isolated testing only, not simultaneous use with scene playback
+    <br>
+    • During scene playback, if the Steam Deck joystick or Bottango live driver moves a locked channel, both the mixer (via batch) and the direct path send conflicting commands to the same servo
   </div>
 
   <div style="margin-top: 20px;">

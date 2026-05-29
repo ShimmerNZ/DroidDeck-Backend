@@ -27,7 +27,7 @@
                     class="failsafe-btn failsafe-active mobile-failsafe-btn" 
                     onclick="toggleFailsafe()"
                     title="Toggle Failsafe Mode">
-                <span class="failsafe-icon">ðŸ›¡ï¸</span>
+                <span class="failsafe-icon">🛡️</span>
                 <span class="failsafe-text">FAILSAFE</span>
             </button>
             
@@ -90,8 +90,8 @@
                 
                 <div class="scene-navigation-info">
                     <div class="nav-instruction">
-                        <span class="nav-key">â†â†’</span> Change Category | 
-                        <span class="nav-key">â†‘â†“</span> Select Scene | 
+                        <span class="nav-key">←→</span> Change Category | 
+                        <span class="nav-key">↑↓</span> Select Scene | 
                         <span class="nav-key">Enter</span> Play Scene
                     </div>
                     <div class="scene-counter" id="sceneCounter">0 / 0</div>
@@ -114,6 +114,15 @@
                     <button class="btn btn-secondary" onclick="refreshScenes()">Refresh Scenes</button>
                     <button class="btn btn-secondary" onclick="homeAllServos()">Home Servos</button>
                     <button class="btn btn-secondary" onclick="toggleSceneGrid()">Toggle Grid View</button>
+                </div>
+            </div>
+
+            <div class="glass-card">
+                <div class="card-title">Playback Mode</div>
+                <div class="action-grid">
+                    <button class="btn mode-btn" id="modeSequential" onclick="setPlayMode('sequential')">Sequential</button>
+                    <button class="btn mode-btn" id="modeRandom" onclick="setPlayMode('random')">Random</button>
+                    <button class="btn" id="idleToggleBtn" onclick="toggleIdleMode()">Idle: OFF</button>
                 </div>
             </div>
         </div>
@@ -170,6 +179,32 @@
                             <div class="health-value" id="networkStats">--</div>
                             <div class="health-label">Network</div>
                         </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="glass-card">
+                <div class="card-title">Motion Pipeline Performance</div>
+                <div class="health-grid">
+                    <div class="health-metric">
+                        <div class="health-value" id="serialFpsValue">--</div>
+                        <div class="health-label">Serial FPS</div>
+                        <div class="health-status" id="serialFpsStatus">Unknown</div>
+                    </div>
+                    <div class="health-metric">
+                        <div class="health-value" id="blendMsValue">--</div>
+                        <div class="health-label">Blend Time (ms)</div>
+                        <div class="health-status" id="blendMsStatus">Unknown</div>
+                    </div>
+                    <div class="health-metric">
+                        <div class="health-value" id="serialCmdsValue">--</div>
+                        <div class="health-label">Cmds/sec</div>
+                        <div class="health-status" id="serialCmdsStatus">Unknown</div>
+                    </div>
+                    <div class="health-metric">
+                        <div class="health-value" id="activeChannelsValue">--</div>
+                        <div class="health-label">Active Channels</div>
+                        <div class="health-status" id="activeChannelsStatus">Unknown</div>
                     </div>
                 </div>
             </div>
@@ -286,8 +321,8 @@
 
                     <!-- Save Configuration -->
                     <div class="action-grid">
-                        <button class="btn" onclick="saveNemaConfig()">ðŸ’¾ Save Config</button>
-                        <button class="btn btn-secondary" onclick="resetNemaConfig()">â†º Reset to Defaults</button>
+                        <button class="btn" onclick="saveNemaConfig()">💾 Save Config</button>
+                        <button class="btn btn-secondary" onclick="resetNemaConfig()">↺ Reset to Defaults</button>
                     </div>
                 </div>
 
@@ -307,11 +342,11 @@
                         </div>
                         <div class="status-item">
                             <span class="status-label">Homed:</span>
-                            <span class="status-indicator" id="nemaHomedIndicator">âŒ</span>
+                            <span class="status-indicator" id="nemaHomedIndicator">❌</span>
                         </div>
                         <div class="status-item">
                             <span class="status-label">Enabled:</span>
-                            <span class="status-indicator" id="nemaEnabledIndicator">âŒ</span>
+                            <span class="status-indicator" id="nemaEnabledIndicator">❌</span>
                         </div>
                     </div>
 
@@ -337,19 +372,19 @@
                     <!-- Control Buttons -->
                     <div class="nema-controls">
                         <button class="btn btn-success" onclick="toggleNemaEnable()" id="nemaEnableBtn">
-                            âš¡ ENABLE
+                            ⚡ ENABLE
                         </button>
                         
                         <button class="btn" onclick="homeNema()">
-                            ðŸ  HOME
+                            🏠 HOME
                         </button>
 
                         <button class="btn" onclick="toggleNemaSweep()" id="nemaSweepBtn">
-                            â–¶ï¸ TEST SWEEP
+                            ▶️ TEST SWEEP
                         </button>
 
                         <button class="btn btn-danger" onclick="stopNema()">
-                            â¹ï¸ STOP
+                            ⏹️ STOP
                         </button>
                     </div>
 
@@ -394,13 +429,13 @@
                         <p>Use your controller's D-pad to test navigation:</p>
                         <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; max-width: 200px; margin: 1rem 0;">
                             <div></div>
-                            <button class="btn btn-small" id="navUp">â†‘</button>
+                            <button class="btn btn-small" id="navUp">↑</button>
                             <div></div>
-                            <button class="btn btn-small" id="navLeft">â†</button>
+                            <button class="btn btn-small" id="navLeft">←</button>
                             <button class="btn btn-small" id="navSelect">SEL</button>
-                            <button class="btn btn-small" id="navRight">â†’</button>
+                            <button class="btn btn-small" id="navRight">→</button>
                             <div></div>
-                            <button class="btn btn-small" id="navDown">â†“</button>
+                            <button class="btn btn-small" id="navDown">↓</button>
                             <div></div>
                         </div>
                         <div id="lastNavigation">Last navigation: None</div>

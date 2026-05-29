@@ -115,7 +115,7 @@ function handleBackendMessage(data) {
             updateAllServoPositions(data);
             break;
         case 'nema_status':
-            updateNemaStatus(data.status);
+            updateNemaStatus(data);
             break;
         case 'nema_position_update':
             updateNemaPosition(data.position_cm);
@@ -163,6 +163,22 @@ function handleBackendMessage(data) {
                 controllerMappings = data.config;
                 updateMappingList();
                 showToast(`Loaded ${Object.keys(data.config).length} controller mappings`, 'success');
+            }
+            break;
+        case 'mode_response':
+            handleModeResponse(data);
+            break;
+        case 'scenes_updated':
+            loadScenes();
+            break;
+        case 'calibration_reset':
+            showToast('Controller calibration reset', 'success');
+            break;
+        case 'system_state_changed':
+            // Sync failsafe state if included
+            if (data.failsafe_enabled !== undefined) {
+                failsafeActive = data.failsafe_enabled;
+                updateFailsafeButton(data.failsafe_enabled);
             }
             break;
         default:
@@ -543,5 +559,32 @@ function openSettings() {
         switchScreen('settings');
     } else {
         showToast('Settings panel - Coming soon!', 'info');
+    }
+}
+
+function handleAudioFilesResponse(data) {
+    const files = data.files || [];
+    // Update any audio file selectors in the scene editor
+    const audioSelects = document.querySelectorAll('.audio-file-select');
+    audioSelects.forEach(select => {
+        const currentValue = select.value;
+        // Preserve blank/none option
+        while (select.options.length > 1) {
+            select.remove(1);
+        }
+        files.forEach(filename => {
+            const opt = document.createElement('option');
+            opt.value = filename;
+            opt.textContent = filename;
+            select.appendChild(opt);
+        });
+        if (currentValue) select.value = currentValue;
+    });
+}
+
+function handleFailsafeStatus(data) {
+    if (data.failsafe_active !== undefined) {
+        failsafeActive = data.failsafe_active;
+        updateFailsafeButton(data.failsafe_active);
     }
 }

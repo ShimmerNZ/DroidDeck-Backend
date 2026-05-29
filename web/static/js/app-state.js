@@ -19,6 +19,7 @@ let showGridView = false;
 let nemaEnabled = false;
 let scenePlayingLocked = false;
 let currentlyPlayingScene = null;
+let nemaSweeping = false;
 
 // Initialize the application
 document.addEventListener('DOMContentLoaded', function() {
@@ -28,6 +29,9 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Handle navigation with keyboard
     document.addEventListener('keydown', handleKeyboardNavigation);
+    
+    // Initialise play mode button appearance
+    setPlayMode('sequential');
     
     // Start periodic updates
     setInterval(periodicUpdate, updateInterval);

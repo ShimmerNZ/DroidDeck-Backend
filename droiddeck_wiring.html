@@ -768,6 +768,52 @@
     </div>
   </div>
 
+  <!-- BOTTANGO LIVE DRIVER -->
+  <div class="component">
+    <div class="component-header">
+      <div class="component-icon" style="background:rgba(203,166,247,0.15)">🎬</div>
+      <div>
+        <div class="component-title" style="color:var(--comm)">Bottango Live Driver</div>
+        <div class="component-sub">Real-time animation control from Bottango on Windows PC · TCP client on Pi</div>
+      </div>
+    </div>
+    <div class="component-body">
+      <table class="conn-table">
+        <tr>
+          <th>Connection</th>
+          <th>Details</th>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--comm)"></span>Protocol</td>
+          <td class="pin-to">TCP — Pi connects outbound to Bottango as a client</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--comm)"></span>Bottango host</td>
+          <td class="pin-to">Windows PC IP — configured in <code>hardware_config.json</code> → <code>bottango.host</code></td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--comm)"></span>Port</td>
+          <td class="pin-to">59225 (Bottango Network/Advanced driver default)</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--comm)"></span>Driver API</td>
+          <td class="pin-to">Bottango Driver API v8 — <code>CUSTOM8</code> identifier</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--comm)"></span>Reconnect</td>
+          <td class="pin-to">Auto-retry every 5s — safe to start Pi before Bottango</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--comm)"></span>Channel map</td>
+          <td class="pin-to">Bottango ch 0–23 → Maestro 1 · ch 24–47 → Maestro 2</td>
+        </tr>
+      </table>
+      <div class="info-box" style="margin-top:10px">
+        <strong>Bottango setup:</strong> Add a Network (Advanced) driver. Set Server IP to the Pi's IP address and port to 59225. Enable "Set Driver live on program launch" to auto-connect on startup. Servo min/max values in Bottango map directly to the PWM range — direction is preserved exactly as configured per effector.
+      </div>
+    </div>
+  </div>
+
   <!-- MAESTRO CHANNEL OVERVIEW -->
   <div class="component">
     <div class="component-header">
@@ -799,7 +845,7 @@
         </tr>
       </table>
       <div class="info-box" style="margin-top:10px">
-        Specific servo channel assignments are configured in <code>servo_config.json</code>. Bottango channel numbers 0–23 map to Maestro 1 (<code>m1_chN</code>), channels 24–47 map to Maestro 2 (<code>m2_chN</code>).
+        Specific servo channel assignments are configured in <code>servo_config.json</code>. Bottango channel numbers 0–23 map to Maestro 1 (<code>m1_chN</code>), channels 24–47 map to Maestro 2 (<code>m2_chN</code>). This mapping applies to both exported animation files and the Bottango live driver.
       </div>
     </div>
   </div>
