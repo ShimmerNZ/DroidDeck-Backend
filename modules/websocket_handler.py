@@ -29,10 +29,7 @@ class WebSocketMessageHandler:
         self.controller_input_processor = controller_input_processor  # For reloading servo home positions
         self.last_navigation_time = 0
         self.navigation_cooldown = 0.3  # debounce navigation commands
-<<<<<<< Updated upstream
-=======
         self._imu_active = False  # tracks whether frontend is streaming IMU data
->>>>>>> Stashed changes
         # Message type routing table
         self.handlers = {
             # Servo control
