@@ -29,6 +29,10 @@ class WebSocketMessageHandler:
         self.controller_input_processor = controller_input_processor  # For reloading servo home positions
         self.last_navigation_time = 0
         self.navigation_cooldown = 0.3  # debounce navigation commands
+<<<<<<< Updated upstream
+=======
+        self._imu_active = False  # tracks whether frontend is streaming IMU data
+>>>>>>> Stashed changes
         # Message type routing table
         self.handlers = {
             # Servo control
@@ -48,6 +52,9 @@ class WebSocketMessageHandler:
             "save_calibration": self._handle_save_calibration,
             "get_controller_status": self._handle_get_controller_status,
             "save_controller_config": self._handle_save_controller_config,
+            "get_controller_config": self._handle_get_controller_config,
+            "imu_toggle_debug": self._handle_imu_toggle_debug,
+            "button_debug": self._handle_button_debug,
             
             # Stepper motor control
             "stepper": self._handle_stepper_command,
@@ -147,8 +154,22 @@ class WebSocketMessageHandler:
             
             axes = data.get("axes", {})
             buttons = data.get("buttons", {})
-            
-            
+
+            # Detect IMU toggle by observing whether imu_roll/imu_pitch are present.
+            # The frontend only sends these keys when IMU is enabled, so a transition
+            # in their presence is the ground-truth indicator of toggle state.
+            imu_now = "imu_roll" in axes or "imu_pitch" in axes
+            if imu_now != self._imu_active:
+                self._imu_active = imu_now
+                if imu_now:
+                    logger.info("IMU tilt enabled — receiving imu_roll/imu_pitch data")
+                else:
+                    logger.info("IMU tilt disabled — imu_roll/imu_pitch data stopped")
+
+            if imu_now:
+                roll  = axes.get("imu_roll", 0.0)
+                pitch = axes.get("imu_pitch", 0.0)
+
             if not hasattr(self.backend, 'controller_input_processor'):
                 logger.error("ERROR: No controller_input_processor available!")
                 return
@@ -219,6 +240,40 @@ class WebSocketMessageHandler:
             await self._send_error_response(websocket, f"Message handling error: {str(e)}")
             return False
     
+    async def _handle_button_debug(self, websocket, data: Dict[str, Any]):
+        """Log every button-down edge from the frontend for diagnostics."""
+        logger.info(f"[BTN] Frontend button pressed: {data.get('button')}")
+
+    async def _handle_imu_toggle_debug(self, websocket, data: Dict[str, Any]):
+        """Log the frontend's current imu_toggle_buttons set for debugging."""
+        buttons = data.get("buttons", [])
+        if buttons:
+            logger.info(f"[IMU] Frontend imu_toggle_buttons: {buttons}")
+        else:
+            logger.warning("[IMU] Frontend imu_toggle_buttons is empty — no toggle button configured")
+
+    async def _handle_get_controller_config(self, websocket, data: Dict[str, Any]):
+        """Return the backend's controller_config.json to the requesting client"""
+        try:
+            config_path = "configs/controller_config.json"
+            if not os.path.exists(config_path):
+                await self._send_error_response(websocket, "Controller config not found on backend")
+                return
+
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+
+            await self._send_websocket_message(websocket, {
+                "type":      "controller_config_data",
+                "config":    config,
+                "timestamp": time.time()
+            })
+            logger.info(f"Sent controller config to client ({len(config)} mappings)")
+
+        except Exception as e:
+            logger.error(f"Get controller config error: {e}")
+            await self._send_error_response(websocket, f"Error reading controller config: {str(e)}")
+
     async def _handle_save_controller_config(self, websocket, data: Dict[str, Any]):
         """Handle saving controller configuration"""
         try:

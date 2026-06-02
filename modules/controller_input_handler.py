@@ -24,7 +24,9 @@ class BehaviorType(Enum):
     SCENE_TRIGGER = "scene_trigger"
     TOGGLE_SCENES = "toggle_scenes"
     NEMA_STEPPER = "nema_stepper" 
-    SYSTEM_CONTROL = "system_control"  
+    SYSTEM_CONTROL = "system_control"
+    IMU_TILT = "imu_tilt"
+    IMU_TOGGLE = "imu_toggle"
 
 @dataclass
 class ControllerInput:
@@ -784,6 +786,97 @@ class ToggleScenesHandler(BehaviorHandler):
             self.logger.error(f"Error in toggle scenes handler: {e}")
             return False
 
+
+class ImuTiltHandler(BehaviorHandler):
+    """Maps an IMU accelerometer tilt axis (-1 to 1) across multiple servo channels.
+
+    Config mirrors multi_servo: a 'servos' list where each entry has:
+        channel   — servo channel key (e.g. 'm1_ch1')
+        invert    — bool, reverses direction for that servo
+        min_pulse — optional override (falls back to servo_config.json)
+        max_pulse — optional override
+
+    The raw_value (-1 → +1) is mapped across the full min→max range of each
+    servo so left/right eye servos can respond oppositely by inverting one.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.last_sent_values = {}
+        self.change_threshold = 0.01
+        self.servo_config = {}
+        try:
+            import json
+            with open('configs/servo_config.json', 'r') as f:
+                self.servo_config = json.load(f)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"ImuTiltHandler: could not load servo_config.json: {e}")
+
+    async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
+        try:
+            servos = config.get('servos', [])
+            if not servos or not self.hardware_service:
+                return False
+
+            success_count = 0
+            for servo_info in servos:
+                channel = servo_info.get('channel')
+                invert  = servo_info.get('invert', False)
+                if not channel:
+                    continue
+
+                if 'min_pulse' in servo_info and 'max_pulse' in servo_info:
+                    min_pulse  = servo_info['min_pulse']
+                    max_pulse  = servo_info['max_pulse']
+                    home_pulse = servo_info.get('home_pulse', (min_pulse + max_pulse) // 2)
+                else:
+                    servo_cfg  = self.servo_config.get(channel, {})
+                    min_pulse  = servo_cfg.get('min', 992)
+                    max_pulse  = servo_cfg.get('max', 2000)
+                    home_pulse = servo_cfg.get('home', (min_pulse + max_pulse) // 2)
+
+                value = -controller_input.raw_value if invert else controller_input.raw_value
+
+                last = self.last_sent_values.get(channel)
+                if last is not None and abs(value - last) < self.change_threshold:
+                    continue
+
+                # Piecewise linear: home maps to imu=0, each side scales to its own range.
+                # Positive tilt → home→max, negative tilt → home→min.
+                if value >= 0:
+                    pulse = home_pulse + int(value * (max_pulse - home_pulse))
+                else:
+                    pulse = home_pulse + int(value * (home_pulse - min_pulse))
+                pulse = max(min_pulse, min(max_pulse, pulse))
+
+                success = await self.hardware_service.set_servo_position(
+                    channel, pulse, "realtime"
+                )
+
+                if success:
+                    self.last_sent_values[channel] = value
+                    success_count += 1
+
+            return success_count > 0
+
+        except Exception as e:
+            self.logger.error(f"Error in IMU tilt handler: {e}")
+            return False
+
+
+class ImuToggleHandler(BehaviorHandler):
+    """Receives the IMU toggle button press from the frontend.
+
+    The actual IMU enable/disable is handled entirely in steamdeck.py.
+    This handler exists so the backend does not log errors when it receives
+    a button mapped to the imu_toggle behaviour.
+    """
+
+    async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
+        return True
+
+
 class ControllerInputProcessor:
     """Main controller input processing system"""
         
@@ -815,7 +908,9 @@ class ControllerInputProcessor:
             BehaviorType.SCENE_TRIGGER: SceneTriggerHandler(hardware_service, scene_engine, logger),
             BehaviorType.TOGGLE_SCENES: ToggleScenesHandler(hardware_service, scene_engine, logger),
             BehaviorType.NEMA_STEPPER: NemaStepperHandler(hardware_service, scene_engine, logger),
-            BehaviorType.SYSTEM_CONTROL: SystemControlHandler(hardware_service, scene_engine, logger, backend_ref)
+            BehaviorType.SYSTEM_CONTROL: SystemControlHandler(hardware_service, scene_engine, logger, backend_ref),
+            BehaviorType.IMU_TILT: ImuTiltHandler(hardware_service, scene_engine, logger, self),
+            BehaviorType.IMU_TOGGLE: ImuToggleHandler(hardware_service, scene_engine, logger),
         }
         
         # Configuration storage
