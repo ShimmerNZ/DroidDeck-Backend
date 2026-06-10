@@ -811,8 +811,8 @@ class WALLEBackend:
                     "memory": reading.memory_percent,
                     "temperature": reading.temperature,
                     "battery_voltage": reading.battery_voltage,
-                    "current_left_track": reading.current_left_track,
-                    "current_right_track": reading.current_right_track,
+                    "sabertooth_temp": reading.sabertooth_temp,
+                    "current_tracks": reading.current_tracks,
                     "current_total": reading.current_total,
                     "maestro1": hardware_status.get("hardware", {}).get("maestro1", {"connected": False}),
                     "maestro2": hardware_status.get("hardware", {}).get("maestro2", {"connected": False}),
@@ -1207,9 +1207,9 @@ class WALLEBackend:
         reading_data = {
             "battery_voltage": reading.battery_voltage,
             "temperature": reading.temperature,
-            "current_left_track": reading.current_left_track,
-            "current_right_track": reading.current_right_track,
-            "current_electronics": reading.current_electronics,
+            "sabertooth_temp": reading.sabertooth_temp,
+            "current_tracks": reading.current_tracks,
+            "current_total": reading.current_total,
         }
         
         await self.broadcast_message({

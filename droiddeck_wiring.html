@@ -611,8 +611,8 @@
     <div class="component-header">
       <div class="component-icon" style="background:rgba(249,226,175,0.15)">📊</div>
       <div>
-        <div class="component-title" style="color:var(--sensor)">ADS1115 ADC + Current Sensors</div>
-        <div class="component-sub">16-bit I²C ADC at 0x48 · ACS758 current sensors</div>
+        <div class="component-title" style="color:var(--sensor)">ADS1115 ADC + Sensors</div>
+        <div class="component-sub">16-bit I²C ADC at 0x48 · TMP36GZ temperature · ACS758 current sensors</div>
       </div>
     </div>
     <div class="component-body">
@@ -656,18 +656,23 @@
         </tr>
         <tr>
           <td class="pin-from"><span class="wire" style="background:var(--sensor)"></span>A0</td>
-          <td class="pin-to">Voltage divider on main bus</td>
-          <td class="note">Battery voltage</td>
+          <td class="pin-to">TMP36GZ VOUT</td>
+          <td class="note">Sabertooth temperature</td>
         </tr>
         <tr>
           <td class="pin-from"><span class="wire" style="background:var(--sensor)"></span>A1</td>
-          <td class="pin-to">ACS758 sensor 1 (VIOUT)</td>
-          <td class="note">Current draw 1</td>
+          <td class="pin-to">Coulometer current output</td>
+          <td class="note">Combined track current</td>
         </tr>
         <tr>
           <td class="pin-from"><span class="wire" style="background:var(--sensor)"></span>A2</td>
-          <td class="pin-to">ACS758 sensor 2 (VIOUT)</td>
-          <td class="note">Current draw 2</td>
+          <td class="pin-to">ACS758 (VIOUT)</td>
+          <td class="note">Total electronics current</td>
+        </tr>
+        <tr>
+          <td class="pin-from"><span class="wire" style="background:var(--sensor)"></span>A3</td>
+          <td class="pin-to">Voltage divider on main bus</td>
+          <td class="note">Battery voltage</td>
         </tr>
       </table>
     </div>

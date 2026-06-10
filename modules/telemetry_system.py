@@ -48,9 +48,9 @@ class TelemetryReading:
     memory_percent: float
     temperature: float
     battery_voltage: float
-    current_left_track: float      # A0 - Left track current
-    current_right_track: float     # A1 - Right track current  
-    current_total: float           # A2 - Total current
+    sabertooth_temp: float         # A0 - Sabertooth temperature (TMP36GZ)
+    current_tracks: float          # A1 - Combined track current (coulometer)
+    current_total: float           # A2 - Total electronics current (ACS758)
     gpio_available: bool = GPIO_AVAILABLE
     adc_available: bool = ADC_AVAILABLE
     
@@ -221,8 +221,8 @@ class SafeTelemetrySystem:
         # ADC setup
         self.adc_available = ADC_AVAILABLE
         self.ads = None
-        self.left_track_channel = None
-        self.right_track_channel = None
+        self.sabertooth_temp_channel = None
+        self.tracks_channel = None
         self.total_channel = None
         self.battery_channel = None
         self.setup_adc()
@@ -276,11 +276,11 @@ class SafeTelemetrySystem:
             
             # Create ADS1115 object
             self.ads = ADS.ADS1115(i2c)
-                        
-            self.left_track_channel = AnalogIn(self.ads, ADS.P0)      # A0 - Left track current
-            self.right_track_channel = AnalogIn(self.ads, ADS.P1)     # A1 - Right track current
-            self.total_channel = AnalogIn(self.ads, ADS.P2)           # A2 - Total current
-            self.battery_channel = AnalogIn(self.ads, ADS.P3)         # A3 - Battery voltage
+
+            self.sabertooth_temp_channel = AnalogIn(self.ads, ADS.P0)  # A0 - Sabertooth temp (TMP36GZ)
+            self.tracks_channel = AnalogIn(self.ads, ADS.P1)            # A1 - Combined track current
+            self.total_channel = AnalogIn(self.ads, ADS.P2)             # A2 - Total electronics current
+            self.battery_channel = AnalogIn(self.ads, ADS.P3)           # A3 - Battery voltage
             
             # Test ADC connectivity
             test_voltage = self.battery_channel.voltage
@@ -312,17 +312,11 @@ class SafeTelemetrySystem:
                 level="CRITICAL",
                 message="CRITICAL: Battery voltage dangerously low!"
             ),
-            "high_current_left": TelemetryAlert(
-                name="High Left Track Current",
-                condition="current_left_track > 50.0",
+            "high_current_tracks": TelemetryAlert(
+                name="High Track Current",
+                condition="current_tracks > 50.0",
                 level="WARNING",
-                message="Left track current draw is higher than normal"
-            ),
-            "high_current_right": TelemetryAlert(
-                name="High Right Track Current", 
-                condition="current_right_track > 50.0",
-                level="WARNING",
-                message="Right track current draw is higher than normal"
+                message="Track current draw is higher than normal"
             ),
             "high_current_total": TelemetryAlert(
                 name="High Total Current",
@@ -388,8 +382,12 @@ class SafeTelemetrySystem:
         return self.battery_estimator.get_estimate(voltage)
 
     def voltage_to_current(self, voltage: float) -> float:
-        """Convert voltage reading to current using sensor calibration"""
+        """Convert ACS758 VIOUT voltage to current in amps"""
         return (voltage - self.ZERO_CURRENT_VOLTAGE) / self.CURRENT_SENSITIVITY
+
+    def voltage_to_tmp36_celsius(self, voltage: float) -> float:
+        """Convert TMP36GZ output voltage to degrees Celsius"""
+        return (voltage * 1000.0 - 500.0) / 10.0
     
     def adc_to_battery_voltage(self, adc_voltage: float) -> float:
         """Convert ADC reading to actual battery voltage using voltage divider"""
@@ -432,21 +430,21 @@ class SafeTelemetrySystem:
         try:
             if not self.adc_available or not self.ads:
                 raise Exception("ADC not available")
-                        
+
             # Read all 4 channels
-            left_track_voltage = self.left_track_channel.voltage      # A0
-            right_track_voltage = self.right_track_channel.voltage    # A1
-            total_voltage = self.total_channel.voltage                # A2
-            battery_adc_voltage = self.battery_channel.voltage        # A3
+            temp_voltage = self.sabertooth_temp_channel.voltage   # A0 - TMP36GZ
+            tracks_voltage = self.tracks_channel.voltage          # A1 - Combined track current
+            total_voltage = self.total_channel.voltage            # A2 - Total electronics current
+            battery_adc_voltage = self.battery_channel.voltage    # A3 - Battery voltage
 
             # Convert to actual values
             battery_voltage = self.adc_to_battery_voltage(battery_adc_voltage)
-            current_left_track = self.voltage_to_current(left_track_voltage)
-            current_right_track = self.voltage_to_current(right_track_voltage)
+            sabertooth_temp = self.voltage_to_tmp36_celsius(temp_voltage)
+            current_tracks = self.voltage_to_current(tracks_voltage)
             current_total = self.voltage_to_current(total_voltage)
 
-            return battery_voltage, current_left_track, current_right_track, current_total
-            
+            return battery_voltage, sabertooth_temp, current_tracks, current_total
+
         except Exception as e:
             logger.debug(f"ADC reading failed: {e}")
             self.stats["adc_errors"] += 1
@@ -456,28 +454,28 @@ class SafeTelemetrySystem:
         """Generate realistic simulated sensor readings for testing"""
         current_time = time.time()
         elapsed = current_time - self.start_time
-        
+
         # Simulate battery voltage (slowly decreasing over time with noise)
-        voltage_drop = (elapsed / 3600) * 0.1  # 0.1V per hour
+        voltage_drop = (elapsed / 3600) * 0.1
         voltage_noise = 0.05 * (0.5 - random.random())
         battery_voltage = max(10.0, self.base_voltage - voltage_drop + voltage_noise)
-        
-        # Simulate current draw (varies with time and system load)
+
+        # Simulate Sabertooth temperature (idle ~35C, rises under load)
         cpu_load_factor = psutil.cpu_percent() / 100.0
-        current_variation = 2.0 * abs(math.sin(elapsed / 10))  # Periodic variation
-        load_current = cpu_load_factor * 10.0  # Higher current with CPU load
+        sabertooth_temp = 35.0 + cpu_load_factor * 20.0 + 2.0 * (0.5 - random.random())
+
+        # Simulate current draw (varies with time and system load)
+        current_variation = 2.0 * abs(math.sin(elapsed / 10))
+        load_current = cpu_load_factor * 10.0
         current_noise = 0.5 * (0.5 - random.random())
-        base_current = self.base_current + current_variation + load_current + current_noise
-        base_current = max(0, base_current)
-        
-        # Simulate different current readings for each channel
-        current_left_track = max(0, base_current)
-        current_right_track = max(0, base_current * 0.8 + 1.0 * (0.5 - random.random()))
+        base_current = max(0, self.base_current + current_variation + load_current + current_noise)
+
+        current_tracks = max(0, base_current)
         current_total = max(0, 2.5 + 0.5 * (0.5 - random.random()))
 
-        logger.debug(f"SIMULATED - Battery: {battery_voltage:.2f}V, Left Track: {current_left_track:.2f}A, Right Track: {current_right_track:.2f}A, Total: {current_total:.2f}A")
+        logger.debug(f"SIMULATED - Battery: {battery_voltage:.2f}V, Sabertooth: {sabertooth_temp:.1f}C, Tracks: {current_tracks:.2f}A, Total: {current_total:.2f}A")
 
-        return battery_voltage, current_left_track, current_right_track, current_total
+        return battery_voltage, sabertooth_temp, current_tracks, current_total
     
     async def update(self, hardware_status: Optional[Dict[str, Any]] = None) -> TelemetryReading:
         """
@@ -500,11 +498,11 @@ class SafeTelemetrySystem:
             # Get sensor readings in a thread so blocking I2C calls don't stall the event loop
             try:
                 loop = asyncio.get_event_loop()
-                battery_voltage, current_left_track, current_right_track, current_total = \
+                battery_voltage, sabertooth_temp, current_tracks, current_total = \
                     await loop.run_in_executor(None, self.get_real_adc_readings)
             except Exception:
-                battery_voltage, current_left_track, current_right_track, current_total = self.get_simulated_readings()
-            
+                battery_voltage, sabertooth_temp, current_tracks, current_total = self.get_simulated_readings()
+
             # Create telemetry reading
             reading = TelemetryReading(
                 timestamp=time.time(),
@@ -512,8 +510,8 @@ class SafeTelemetrySystem:
                 memory_percent=memory.percent,
                 temperature=temperature,
                 battery_voltage=battery_voltage,
-                current_left_track=current_left_track,
-                current_right_track=current_right_track, 
+                sabertooth_temp=sabertooth_temp,
+                current_tracks=current_tracks,
                 current_total=current_total,
                 gpio_available=GPIO_AVAILABLE,
                 adc_available=self.adc_available
@@ -537,7 +535,7 @@ class SafeTelemetrySystem:
 
             # Update battery run-time estimator
             self.battery_estimator.update(
-                current_amps=current_total,
+                current_amps=current_tracks,
                 voltage=battery_voltage,
                 timestamp=reading.timestamp,
             )
@@ -571,8 +569,8 @@ class SafeTelemetrySystem:
                 memory_percent=0.0,
                 temperature=45.0,
                 battery_voltage=12.0,
-                current_left_track=0.0,
-                current_right_track=0.0,
+                sabertooth_temp=0.0,
+                current_tracks=0.0,
                 current_total=0.0,
             )
     
@@ -590,8 +588,8 @@ class SafeTelemetrySystem:
                     "memory_percent": reading.memory_percent,
                     "adc_errors": self.stats["adc_errors"],
                     "temperature_errors": self.stats["temperature_errors"],
-                    "current_left_track": reading.current_left_track,
-                    "current_right_track": reading.current_right_track,
+                    "sabertooth_temp": reading.sabertooth_temp,
+                    "current_tracks": reading.current_tracks,
                     "current_total": reading.current_total,
                 }
                 
@@ -666,8 +664,8 @@ class SafeTelemetrySystem:
                 memory_percent=sum(r.memory_percent for r in recent_readings) / len(recent_readings),
                 temperature=sum(r.temperature for r in recent_readings) / len(recent_readings),
                 battery_voltage=sum(r.battery_voltage for r in recent_readings) / len(recent_readings),
-                current_left_track=sum(r.current_left_track for r in recent_readings) / len(recent_readings),
-                current_right_track=sum(r.current_right_track for r in recent_readings) / len(recent_readings),
+                sabertooth_temp=sum(r.sabertooth_temp for r in recent_readings) / len(recent_readings),
+                current_tracks=sum(r.current_tracks for r in recent_readings) / len(recent_readings),
                 current_total=sum(r.current_total for r in recent_readings) / len(recent_readings),
                 gpio_available=GPIO_AVAILABLE,
                 adc_available=self.adc_available
@@ -708,8 +706,8 @@ class SafeTelemetrySystem:
                     "memory_percent": current_reading.memory_percent if current_reading else 0,
                     "temperature": current_reading.temperature if current_reading else 0,
                     "battery_voltage": current_reading.battery_voltage if current_reading else 0,
-                    "current_left_track": current_reading.current_left_track if current_reading else 0,
-                    "current_right_track": current_reading.current_right_track if current_reading else 0,
+                    "sabertooth_temp": current_reading.sabertooth_temp if current_reading else 0,
+                    "current_tracks": current_reading.current_tracks if current_reading else 0,
                     "current_total": current_reading.current_total if current_reading else 0
                 } if current_reading else {},
                 "averages_5min": {
@@ -717,8 +715,8 @@ class SafeTelemetrySystem:
                     "memory_percent": avg_5min.memory_percent if avg_5min else 0,
                     "temperature": avg_5min.temperature if avg_5min else 0,
                     "battery_voltage": avg_5min.battery_voltage if avg_5min else 0,
-                    "current_left_track": avg_5min.current_left_track if avg_5min else 0,
-                    "current_right_track": avg_5min.current_right_track if avg_5min else 0,
+                    "sabertooth_temp": avg_5min.sabertooth_temp if avg_5min else 0,
+                    "current_tracks": avg_5min.current_tracks if avg_5min else 0,
                     "current_total": avg_5min.current_total if avg_5min else 0
                 } if avg_5min else {},
                 "alerts": {
@@ -764,8 +762,8 @@ class SafeTelemetrySystem:
             # Test condition syntax with proper variable names
             test_context = {
                 "battery_voltage": 12.0,
-                "current_left_track": 5.0,
-                "current_right_track": 4.0,
+                "sabertooth_temp": 35.0,
+                "current_tracks": 5.0,
                 "current_total": 2.0,
                 "temperature": 45.0,
                 "cpu_percent": 50.0,
@@ -832,18 +830,18 @@ class SafeTelemetrySystem:
                 logger.warning("No telemetry data to export")
                 return False
             
-            # Create CSV file with proper field names
             with open(filename, 'w', newline='') as csvfile:
                 fieldnames = [
-                    'timestamp', 'datetime', 'cpu_percent', 'memory_percent', 
-                    'temperature', 'battery_voltage', 'current_left_track', 'current_right_track', 'current_total',
-                    'gpio_available', 'adc_available', 'maestro1_connected', 
+                    'timestamp', 'datetime', 'cpu_percent', 'memory_percent',
+                    'temperature', 'battery_voltage', 'sabertooth_temp',
+                    'current_tracks', 'current_total',
+                    'gpio_available', 'adc_available', 'maestro1_connected',
                     'maestro2_connected', 'audio_system_ready', 'stream_fps'
                 ]
-                
+
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
-                
+
                 for reading in filtered_readings:
                     writer.writerow({
                         'timestamp': reading.timestamp,
@@ -852,8 +850,8 @@ class SafeTelemetrySystem:
                         'memory_percent': reading.memory_percent,
                         'temperature': reading.temperature,
                         'battery_voltage': reading.battery_voltage,
-                        'current_left_track': reading.current_left_track,
-                        'current_right_track': reading.current_right_track,
+                        'sabertooth_temp': reading.sabertooth_temp,
+                        'current_tracks': reading.current_tracks,
                         'current_total': reading.current_total,
                         'gpio_available': reading.gpio_available,
                         'adc_available': reading.adc_available,
@@ -912,13 +910,13 @@ class SafeTelemetrySystem:
                 battery_score = 0  # Critical voltage
             scores["battery"] = max(0, battery_score)
             
-            # Current health (reasonable draw expected) - use left track as primary indicator
-            if reading.current_left_track <= 30:
+            # Current health (reasonable draw expected)
+            if reading.current_tracks <= 30:
                 current_score = 100
-            elif reading.current_left_track <= 50:
-                current_score = 100 - ((reading.current_left_track - 30) * 2)
+            elif reading.current_tracks <= 50:
+                current_score = 100 - ((reading.current_tracks - 30) * 2)
             else:
-                current_score = max(0, 60 - reading.current_left_track)
+                current_score = max(0, 60 - reading.current_tracks)
             scores["current"] = max(0, current_score)
 
             # Hardware connectivity (bonus points for working hardware)
@@ -1058,8 +1056,8 @@ class SafeTelemetrySystem:
             if self.ads:
                 self.ads = None
                 self.battery_channel = None
-                self.left_track_channel = None
-                self.right_track_channel = None
+                self.sabertooth_temp_channel = None
+                self.tracks_channel = None
                 self.total_channel = None
             
             logger.info("Telemetry system cleanup complete")
@@ -1068,31 +1066,19 @@ class SafeTelemetrySystem:
             logger.error(f"Telemetry cleanup error: {e}")
 
 
-# Backward compatibility helper functions (deprecated - use new naming)
+# Backward compatibility helper (deprecated)
 def get_legacy_current_mapping(reading: TelemetryReading) -> Dict[str, float]:
-    """
-    DEPRECATED: Provide backward compatibility for legacy current naming.
-    This function maps new naming to old naming for transitional period.
-    
-    Returns:
-        Dictionary with legacy current names mapped to new values
-    """
+    """DEPRECATED: Legacy current name mapping."""
     return {
-        "current": reading.current_left_track,      # Legacy: main current -> left track
-        "current_a1": reading.current_right_track,  # Legacy: current_a1 -> right track
-        "current_a2": reading.current_total   # Legacy: current_a2 -> total
+        "current_tracks": reading.current_tracks,
+        "current_total": reading.current_total,
     }
 
 
 def create_legacy_compatible_reading(reading: TelemetryReading) -> TelemetryReading:
-    """
-    DEPRECATED: Create a reading object with legacy attributes for compatibility.
-    This is a temporary bridge function during the transition period.
-    """
-    # Add legacy attributes dynamically
-    setattr(reading, 'current', reading.current_left_track)
-    setattr(reading, 'current_a1', reading.current_right_track)
-    setattr(reading, 'current_a2', reading.current_total)
+    """DEPRECATED: Transitional bridge function."""
+    setattr(reading, 'current_tracks', reading.current_tracks)
+    setattr(reading, 'current_total', reading.current_total)
     return reading
 
 
