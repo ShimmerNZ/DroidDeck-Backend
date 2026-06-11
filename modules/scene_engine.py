@@ -16,6 +16,9 @@ from pathlib import Path
 from dataclasses import dataclass
 from enum import Enum
 
+from modules.servo_utils import parse_servo_id_safe
+from modules.file_utils import save_json_atomic
+
 
 # Audio duration utilities
 logger = logging.getLogger(__name__)
@@ -662,8 +665,8 @@ class EnhancedSceneEngine:
                     progress = min(1.0, (time.time() - start_time) / duration)
                     try:
                         await self.scene_progress_callback(self.current_scene, progress)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Scene progress callback error: {e}")
                 
                 await asyncio.sleep(0.05)
             
@@ -998,14 +1001,7 @@ class EnhancedSceneEngine:
     
     def _parse_servo_id(self, servo_id: str) -> Tuple[int, int]:
         """Parse servo ID like 'm1_ch5' into (maestro_num, channel)"""
-        try:
-            parts = servo_id.split('_')
-            maestro_num = int(parts[0][1])  # Extract number from 'm1', 'm2', etc.
-            channel = int(parts[1][2:])     # Extract number from 'ch5', etc.
-            return maestro_num, channel
-        except Exception as e:
-            logger.error(f"❌ Invalid servo ID format: {servo_id}")
-            return 1, 0
+        return parse_servo_id_safe(servo_id)
     
     def _update_scene_metrics(self, scene_name: str, scene_data: Dict[str, Any], 
                             execution_time: float, success: bool):
@@ -1406,9 +1402,16 @@ class EnhancedSceneEngine:
                     old_backup.unlink()
                     logger.debug(f"Removed old backup: {old_backup.name}")
             
-            # Save to file
-            with open(self.config_path, "w", encoding='utf-8') as f:
-                json.dump(scenes_data, f, indent=2, ensure_ascii=False)
+            # Save to file - atomic write in the executor so a power cut
+            # mid-save cannot truncate the scenes config and the event loop
+            # never blocks on SD-card IO
+            loop = asyncio.get_running_loop()
+            saved = await loop.run_in_executor(
+                None, save_json_atomic, self.config_path, scenes_data
+            )
+            if not saved:
+                logger.error(f"❌ Failed to write scenes config: {self.config_path}")
+                return False
             
             # Update internal scenes dictionary
             self.scenes = {scene["label"]: scene for scene in scenes_data}
@@ -1458,8 +1461,7 @@ class EnhancedSceneEngine:
                     scene_copy["label"] = scene_name
                 scenes_list.append(scene_copy)
             
-            with open(self.config_path, "w", encoding='utf-8') as f:
-                json.dump(scenes_list, f, indent=2, ensure_ascii=False)
+            save_json_atomic(self.config_path, scenes_list)
             
             logger.info(f"💾 Created default scene configuration: {self.config_path}")
             

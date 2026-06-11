@@ -12,6 +12,9 @@ import time
 import os
 from typing import Dict, Any, Optional, Callable
 
+from modules.config_store import ConfigStore
+from modules.file_utils import save_json_atomic
+
 logger = logging.getLogger(__name__)
 
 class WebSocketMessageHandler:
@@ -30,6 +33,8 @@ class WebSocketMessageHandler:
         self.last_navigation_time = 0
         self.navigation_cooldown = 0.3  # debounce navigation commands
         self._imu_active = False  # tracks whether frontend is streaming IMU data
+        self._prev_buttons: Dict[str, bool] = {}  # last seen button state for delta filtering
+        self.config_store = ConfigStore()
         # Message type routing table
         self.handlers = {
             # Servo control
@@ -107,6 +112,7 @@ class WebSocketMessageHandler:
 
             # Remote update
             "server_update": self._handle_server_update,
+            "server_rollback": self._handle_server_rollback,
         }
         
         logger.info(f" WebSocket handler initialized with {len(self.handlers)} message types")
@@ -128,7 +134,6 @@ class WebSocketMessageHandler:
                         raw_value=axis_value,
                         input_type="axis"
                     )
-                logger.info(f">>> LOOP: Axis {axis_name} processed successfully")
                 # Process all buttons
                 for button_name, button_pressed in buttons.items():
                     # Convert boolean to float (1.0 or 0.0)
@@ -146,9 +151,6 @@ class WebSocketMessageHandler:
     async def _handle_steamdeck_controller(self, websocket, data: Dict[str, Any]):
         """Handle steamdeck controller input"""
         try:
-            if hasattr(self.backend, 'controller_input_processor'):
-                mappings = self.backend.controller_input_processor.get_controller_mappings()
-            
             axes = data.get("axes", {})
             buttons = data.get("buttons", {})
 
@@ -162,16 +164,13 @@ class WebSocketMessageHandler:
                     logger.info("IMU tilt enabled — receiving imu_roll/imu_pitch data")
                 else:
                     logger.info("IMU tilt disabled — imu_roll/imu_pitch data stopped")
-
-            if imu_now:
-                roll  = axes.get("imu_roll", 0.0)
-                pitch = axes.get("imu_pitch", 0.0)
-
+            
+            
             if not hasattr(self.backend, 'controller_input_processor'):
                 logger.error("ERROR: No controller_input_processor available!")
                 return
             
-            # Process axes
+            # Process axes (every frame - analog values need continuous processing)
             for axis_name, axis_value in axes.items():
                 try:
                     await self.backend.controller_input_processor.process_controller_input(
@@ -183,8 +182,15 @@ class WebSocketMessageHandler:
                     logger.error(f"Error processing axis {axis_name}: {axis_error}")
 
             
-            # Process buttons
+            # Process buttons on state change only. The frontend sends full
+            # button state at 50Hz; without this filter every idle button is
+            # dispatched through the behaviour registry every frame
+            # (~1,000 no-op coroutine calls per second).
             for button_name, is_pressed in buttons.items():
+                if self._prev_buttons.get(button_name) == is_pressed:
+                    continue
+                self._prev_buttons[button_name] = is_pressed
+
                 value = 1.0 if is_pressed else 0.0
                 try:
                     await self.backend.controller_input_processor.process_controller_input(
@@ -252,13 +258,11 @@ class WebSocketMessageHandler:
     async def _handle_get_controller_config(self, websocket, data: Dict[str, Any]):
         """Return the backend's controller_config.json to the requesting client"""
         try:
-            config_path = "configs/controller_config.json"
-            if not os.path.exists(config_path):
+            if not self.config_store.exists("controller_config"):
                 await self._send_error_response(websocket, "Controller config not found on backend")
                 return
 
-            with open(config_path, 'r') as f:
-                config = json.load(f)
+            config = await self.config_store.aload("controller_config", {})
 
             await self._send_websocket_message(websocket, {
                 "type":      "controller_config_data",
@@ -280,15 +284,8 @@ class WebSocketMessageHandler:
                 await self._send_error_response(websocket, "Controller config must be a dictionary")
                 return
             
-            # Save to backend's config file
-            backend_config_path = "configs/controller_config.json"
-            
-            # Create configs directory if it doesn't exist
-            os.makedirs("configs", exist_ok=True)
-            
-            # Save config
-            with open(backend_config_path, 'w') as f:
-                json.dump(config, f, indent=2)
+            # Save to backend's config file - atomic write in the executor
+            await self.config_store.asave("controller_config", config)
             
             # Reload config in controller input processor
             if hasattr(self.backend, 'controller_input_processor'):
@@ -394,7 +391,7 @@ class WebSocketMessageHandler:
             await self._send_error_response(websocket, f"Stop calibration mode error: {str(e)}")
 
     async def _handle_get_controller_status(self, websocket, data: Dict[str, Any]):
-        """Get current controller connection status - ENHANCED"""
+        """Get current controller connection status"""
         try:
             if hasattr(self.backend, 'bluetooth_controller'):
                 controller_info = self.backend.bluetooth_controller.get_controller_info()
@@ -449,7 +446,7 @@ class WebSocketMessageHandler:
             await self._send_error_response(websocket, f"Controller status error: {str(e)}")
 
     async def _handle_save_calibration(self, websocket, data: Dict[str, Any]):
-        """Save calibration data from frontend wizard - ENHANCED"""
+        """Save calibration data from frontend wizard"""
         try:
             if hasattr(self.backend, 'bluetooth_controller'):
                 calibration_data = data.get('calibration', {})
@@ -637,16 +634,12 @@ class WebSocketMessageHandler:
         
         # Update backend controller_config.json with center_offset values
         try:
-            controller_config_path = "configs/controller_config.json"
-            
             # Load current controller config
-            try:
-                with open(controller_config_path, 'r') as f:
-                    controller_config = json.load(f)
-            except FileNotFoundError:
-                logger.warning(f"Controller config not found at {controller_config_path}")
+            if not self.config_store.exists("controller_config"):
+                logger.warning("Controller config not found")
                 await self._send_error_response(websocket, "Controller config file not found")
                 return
+            controller_config = await self.config_store.aload("controller_config", {})
             
             # Update center_offset for any joystick mappings that target these servos
             updated_count = 0
@@ -694,8 +687,7 @@ class WebSocketMessageHandler:
             
             # Save updated config
             if updated_count > 0:
-                with open(controller_config_path, 'w') as f:
-                    json.dump(controller_config, f, indent=2)
+                await self.config_store.asave("controller_config", controller_config)
                 logger.info(f"[OK] Updated backend controller_config.json: {updated_count} center offsets applied")
                 
                 # Reload both controller config and servo home positions
@@ -739,13 +731,9 @@ class WebSocketMessageHandler:
         
         try:
             # Load servo_config.json
-            servo_config_path = "configs/servo_config.json"
-            
-            try:
-                with open(servo_config_path, 'r') as f:
-                    servo_config = json.load(f)
-            except FileNotFoundError:
-                logger.warning(f"Servo config not found, creating new one")
+            servo_config = await self.config_store.aload("servo_config")
+            if servo_config is None:
+                logger.warning("Servo config not found, creating new one")
                 servo_config = {}
             
             # Update servo config with new settings
@@ -771,15 +759,14 @@ class WebSocketMessageHandler:
                 logger.info(f" Updated {channel_key}: min={settings.get('min')}, max={settings.get('max')}, home={settings.get('home')}, name='{settings.get('name')}'")
             
             # Save updated servo config
-            with open(servo_config_path, 'w') as f:
-                json.dump(servo_config, f, indent=2)
+            await self.config_store.asave("servo_config", servo_config)
             logger.info(f"[OK] Saved servo_config.json: {updated_count} channels updated")
             
             # Also update controller_config.json center offsets (reuse existing logic)
-            controller_config_path = "configs/controller_config.json"
             try:
-                with open(controller_config_path, 'r') as f:
-                    controller_config = json.load(f)
+                controller_config = await self.config_store.aload("controller_config")
+                if controller_config is None:
+                    raise FileNotFoundError("controller_config.json not found")
                 
                 offset_count = 0
                 for control_name, control_config_data in controller_config.items():
@@ -821,8 +808,7 @@ class WebSocketMessageHandler:
                                     offset_count += 1
                 
                 if offset_count > 0:
-                    with open(controller_config_path, 'w') as f:
-                        json.dump(controller_config, f, indent=2)
+                    await self.config_store.asave("controller_config", controller_config)
                     logger.info(f"[OK] Updated controller_config.json: {offset_count} center offsets")
                     
                     # Reload controller config
@@ -863,13 +849,9 @@ class WebSocketMessageHandler:
         
         try:
             # Load servo_config.json from backend
-            servo_config_path = "configs/servo_config.json"
-            
-            try:
-                with open(servo_config_path, 'r') as f:
-                    servo_config = json.load(f)
-            except FileNotFoundError:
-                logger.warning(f"Servo config not found: {servo_config_path}")
+            servo_config = await self.config_store.aload("servo_config")
+            if servo_config is None:
+                logger.warning("Servo config not found")
                 await self._send_error_response(websocket, "Servo config file not found on backend")
                 return
             
@@ -1731,11 +1713,10 @@ class WebSocketMessageHandler:
                 self.audio_controller.set_volume(volume_float)
                 logger.info(f"[OK] Audio controller volume set to {volume_float:.2f}")
             
-            # Save to hardware_config.json for persistence
+            # Save to hardware_config.json for persistence - existing values
+            # are preserved because we load, merge, then save atomically
             try:
-                hw_config_path = "configs/hardware_config.json"
-                with open(hw_config_path, 'r') as f:
-                    hw_config = json.load(f)
+                hw_config = await self.config_store.aload("hardware_config", {})
                 
                 if "hardware" not in hw_config:
                     hw_config["hardware"] = {}
@@ -1744,8 +1725,7 @@ class WebSocketMessageHandler:
                 
                 hw_config["hardware"]["audio"]["volume"] = volume_float
                 
-                with open(hw_config_path, 'w') as f:
-                    json.dump(hw_config, f, indent=2)
+                await self.config_store.asave("hardware_config", hw_config)
                 
                 logger.info(f"[OK] Volume {volume_float:.2f} saved to hardware_config.json")
             except Exception as e:
@@ -1856,17 +1836,11 @@ class WebSocketMessageHandler:
                 return
 
             # Persist to camera_config.json
-            config_path = "configs/camera_config.json"
             try:
-                if os.path.exists(config_path):
-                    with open(config_path, "r") as f:
-                        cam_config = json.load(f)
-                else:
-                    cam_config = {}
+                cam_config = await self.config_store.aload("camera_config", {})
                 cam_config["esp32_url"] = esp32_url
                 cam_config["esp32_base_url"] = esp32_url.replace("/stream", "")
-                with open(config_path, "w") as f:
-                    json.dump(cam_config, f, indent=4)
+                await self.config_store.asave("camera_config", cam_config)
                 logger.info(f"Camera URL saved to config: {esp32_url}")
             except Exception as e:
                 logger.warning(f"Could not persist camera URL to config file: {e}")
@@ -1992,13 +1966,18 @@ class WebSocketMessageHandler:
             # Get camera proxy URL from backend configuration
             camera_proxy_url = getattr(self.backend, 'camera_proxy_url', 'http://10.1.1.230:8081')
             
-            # Send settings to camera proxy
+            # Send settings to camera proxy - blocking HTTP call runs in the
+            # executor so the event loop never stalls on a slow/absent proxy
             try:
                 import requests
-                response = requests.post(
-                    f"{camera_proxy_url}/camera/settings", 
-                    json=config, 
-                    timeout=5
+                loop = asyncio.get_running_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: requests.post(
+                        f"{camera_proxy_url}/camera/settings",
+                        json=config,
+                        timeout=5
+                    )
                 )
                 
                 if response.status_code == 200:
@@ -2105,8 +2084,17 @@ class WebSocketMessageHandler:
         except Exception as e:
             logger.error(f"Failed to apply calibration data: {e}")
             return False
+    # Repos the updater is allowed to install from. The repo value from the
+    # message is checked against this list - an arbitrary client on the
+    # hotspot cannot point the updater at their own repository.
+    ALLOWED_UPDATE_REPOS = {
+        "ShimmerNZ/Wall-e-Backend",
+        "ShimmerNZ/DroidDeck-Backend",
+    }
+
     async def _handle_server_update(self, websocket, data: Dict[str, Any]):
         """Download the latest backend release from GitHub and restart the service."""
+        import re
         import subprocess
         import tempfile
         import zipfile
@@ -2116,6 +2104,26 @@ class WebSocketMessageHandler:
 
         branch = data.get("branch", "main")
         repo   = data.get("repo", "ShimmerNZ/DroidDeck-Backend")
+
+        # Validate repo against the whitelist and branch against a safe pattern
+        if repo not in self.ALLOWED_UPDATE_REPOS:
+            logger.warning(f"server_update rejected - repo not whitelisted: {repo}")
+            await self._send_websocket_message(websocket, {
+                "type": "server_update_complete",
+                "success": False,
+                "message": f"Repo '{repo}' is not in the update whitelist",
+            })
+            return
+
+        if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or ".." in branch:
+            logger.warning(f"server_update rejected - invalid branch: {branch!r}")
+            await self._send_websocket_message(websocket, {
+                "type": "server_update_complete",
+                "success": False,
+                "message": "Invalid branch name",
+            })
+            return
+
         zip_url = f"https://github.com/{repo}/archive/refs/heads/{branch}.zip"
 
         # Paths that must never be overwritten
@@ -2133,6 +2141,7 @@ class WebSocketMessageHandler:
             "scenes/",
             "bottango_imports/",
             "logs/",
+            "app.bak/",
         }
 
         def is_protected(rel: Path) -> bool:
@@ -2167,12 +2176,18 @@ class WebSocketMessageHandler:
 
             tmp_dir, zip_path = await loop.run_in_executor(None, download)
 
-            # Extract
+            # Extract - members are validated before extraction so a
+            # crafted archive cannot write outside the extract directory
             await _send("Extracting files...")
 
             def extract():
                 extract_dir = tmp_dir / "extracted"
                 with zipfile.ZipFile(zip_path, "r") as z:
+                    for member in z.infolist():
+                        name = member.filename
+                        member_path = Path(name)
+                        if member_path.is_absolute() or ".." in member_path.parts:
+                            raise RuntimeError(f"Unsafe path in archive: {name}")
                     z.extractall(extract_dir)
                 folders = list(extract_dir.iterdir())
                 if not folders:
@@ -2181,10 +2196,19 @@ class WebSocketMessageHandler:
 
             source_dir = await loop.run_in_executor(None, extract)
 
-            # Install (skip protected paths)
-            await _send("Installing update...")
+            # Install (skip protected paths). Every file about to be
+            # replaced is first copied into app.bak/ so a bad deploy can
+            # be reverted with a server_rollback message.
+            await _send("Backing up current version and installing update...")
 
             def install():
+                backup_dir = app_root / "app.bak"
+                # Fresh backup per update - the previous backup is replaced
+                if backup_dir.exists():
+                    shutil.rmtree(backup_dir, ignore_errors=True)
+                backup_dir.mkdir(parents=True, exist_ok=True)
+
+                backed_up = []
                 for item in source_dir.rglob("*"):
                     if not item.is_file():
                         continue
@@ -2192,8 +2216,22 @@ class WebSocketMessageHandler:
                     if is_protected(rel):
                         continue
                     target = app_root / rel
+                    if target.exists():
+                        backup_target = backup_dir / rel
+                        backup_target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(target, backup_target)
+                        backed_up.append(str(rel))
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(item, target)
+
+                # Record what this backup contains so rollback knows its origin
+                info = {
+                    "timestamp": time.time(),
+                    "updated_to_branch": branch,
+                    "updated_to_repo": repo,
+                    "files": backed_up,
+                }
+                save_json_atomic(backup_dir / "backup_info.json", info)
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
             await loop.run_in_executor(None, install)
@@ -2203,7 +2241,7 @@ class WebSocketMessageHandler:
             await self._send_websocket_message(websocket, {
                 "type": "server_update_complete",
                 "success": True,
-                "message": f"Update from '{branch}' complete. Backend restarting.",
+                "message": f"Update from '{branch}' complete. Backend restarting. Previous version saved to app.bak.",
             })
 
             # Small delay so the response reaches the client before restart
@@ -2221,4 +2259,78 @@ class WebSocketMessageHandler:
                 "type": "server_update_complete",
                 "success": False,
                 "message": f"Update failed: {e}",
+            })
+
+    async def _handle_server_rollback(self, websocket, data: Dict[str, Any]):
+        """Restore the previous version from app.bak and restart the service."""
+        import subprocess
+        import shutil
+        from pathlib import Path
+
+        app_root = Path(__file__).parent.parent
+        backup_dir = app_root / "app.bak"
+        info_path = backup_dir / "backup_info.json"
+
+        try:
+            if not backup_dir.exists() or not info_path.exists():
+                await self._send_websocket_message(websocket, {
+                    "type": "server_rollback_complete",
+                    "success": False,
+                    "message": "No backup available - app.bak not found",
+                })
+                return
+
+            with open(info_path, "r") as f:
+                info = json.load(f)
+
+            from_branch = info.get("updated_to_branch", "unknown")
+            backup_age_min = (time.time() - info.get("timestamp", 0)) / 60.0
+
+            await self._send_websocket_message(websocket, {
+                "type": "server_update_progress",
+                "message": (
+                    f"Rolling back update from branch '{from_branch}' "
+                    f"(backup taken {backup_age_min:.0f} minutes ago)..."
+                ),
+            })
+
+            loop = asyncio.get_running_loop()
+
+            def restore():
+                restored = 0
+                for item in backup_dir.rglob("*"):
+                    if not item.is_file() or item.name == "backup_info.json":
+                        continue
+                    rel = item.relative_to(backup_dir)
+                    target = app_root / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(item, target)
+                    restored += 1
+                return restored
+
+            restored_count = await loop.run_in_executor(None, restore)
+
+            await self._send_websocket_message(websocket, {
+                "type": "server_rollback_complete",
+                "success": True,
+                "message": f"Rollback complete - {restored_count} files restored. Backend restarting.",
+            })
+
+            logger.warning(f"Server rollback executed: {restored_count} files restored from app.bak")
+
+            # Small delay so the response reaches the client before restart
+            await asyncio.sleep(1.5)
+
+            subprocess.Popen(
+                ["sudo", "systemctl", "restart", "droiddeck-backend"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        except Exception as e:
+            logger.error(f"Server rollback failed: {e}")
+            await self._send_websocket_message(websocket, {
+                "type": "server_rollback_complete",
+                "success": False,
+                "message": f"Rollback failed: {e}",
             })

@@ -347,12 +347,15 @@ After=network-online.target time-sync.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=$CURRENT_USER
 WorkingDirectory=$BACKEND_DIR
 ExecStart=$PYTHON_PATH main.py
 Restart=on-failure
 RestartSec=5
+WatchdogSec=30
+TimeoutStartSec=90
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=$SERVICE_NAME
@@ -364,6 +367,19 @@ EOF
 
     sudo systemctl daemon-reload
     sudo systemctl enable ${SERVICE_NAME}
+
+    # Persistent journald storage so service logs survive reboots and
+    # power cuts - essential for diagnosing crashes at events. The drop-in
+    # leaves the rest of the journald config untouched.
+    print_status "Enabling persistent journald storage..."
+    sudo mkdir -p /var/log/journal
+    sudo mkdir -p /etc/systemd/journald.conf.d
+    sudo tee /etc/systemd/journald.conf.d/droiddeck-persistent.conf > /dev/null << EOF
+[Journal]
+Storage=persistent
+SystemMaxUse=200M
+EOF
+    sudo systemctl restart systemd-journald
 
     # Allow the service user to restart the backend without a password prompt
     echo "$CURRENT_USER ALL=(ALL) NOPASSWD: /bin/systemctl restart ${SERVICE_NAME}" | \

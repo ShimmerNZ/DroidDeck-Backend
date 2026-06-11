@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WALL-E Camera Proxy - Optimized Version with Smart Buffering Prevention
-Performance optimized, low latency, with intelligent frame management
+WALL-E Camera Proxy
+
+Connects to the ESP32 camera MJPEG stream, keeps only the newest frame,
+and rebroadcasts it to any number of local clients. Reconnects to the
+ESP32 indefinitely with exponential backoff so a flaky WiFi link never
+permanently kills the stream.
 """
 
 import cv2
@@ -18,7 +22,6 @@ import numpy as np
 import logging
 from pathlib import Path
 from collections import deque
-import io
 
 # Setup logging
 logging.basicConfig(
@@ -30,58 +33,85 @@ logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
 CONFIG_PATH = "configs/camera_config.json"
 
+# Reconnect backoff bounds (seconds)
+RECONNECT_BACKOFF_MAX = 30.0
+
+
+def _save_json_atomic(path, data, indent=4):
+    """
+    Atomically write JSON so a power loss mid-write cannot corrupt the file.
+    Local copy of modules/file_utils.save_json_atomic - the proxy runs as a
+    standalone process so it avoids package import dependencies.
+    """
+    path = Path(path)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=indent, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        return True
+    except Exception as e:
+        logger.error(f"Atomic save failed for {path}: {e}")
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        return False
+
+
 class CameraProxy:
     def __init__(self):
         self.load_config()
-        
-        # Frame management - OPTIMIZED for low latency
+
+        # Frame management - the condition signals consumers when a new
+        # frame arrives so delivery is event-driven instead of polling
         self.current_frame = None
-        self.frame_lock = threading.RLock()
-        
+        self.frame_condition = threading.Condition()
+
         # Performance tracking
         self.frame_count = 0
         self.dropped_frames = 0
-        self.connection_errors = 0
+        self.connection_errors = 0          # Cumulative count for stats
+        self.consecutive_failures = 0       # Drives reconnect backoff
         self.running = True
         self.connected_to_esp32 = False
         self.stream_thread = None
-        
+
         # Frame timing tracking
         self.frame_times = deque(maxlen=60)
         self.last_frame_timestamp = 0
 
-        # ESP32 status cache — polled in background every 5 seconds
-        self.esp32_status = {}
-        self.esp32_status_lock = threading.Lock()
-        self._status_poll_thread = threading.Thread(
-            target=self._status_poll_worker, daemon=True
-        )
-        self._status_poll_thread.start()
-        
         # ESP32 camera settings with correct parameter names
-        # Defaults match firmware CameraSettings struct for OV3660
         self.esp32_settings = {
-            "resolution": 6,       # SVGA (800x600) - FRAMESIZE_SVGA
-            "quality": 10,         # JPEG quality (4-25, lower = higher quality)
-            "brightness": 1,       # OV3660 default
-            "contrast": 0,
-            "saturation": -2,      # OV3660 default
-            "h_mirror": False,
-            "v_flip": True,        # OV3660 default
+            "resolution": 6,       # SVGA (800x600)
+            "quality": 12,         # JPEG quality (4-63, lower = higher quality)
+            "brightness": 0,       # -2 to 2
+            "contrast": 0,         # -2 to 2
+            "saturation": 0,       # -2 to 2
+            "h_mirror": False,     # Horizontal mirror
+            "v_flip": False,       # Vertical flip
+            "xclk_freq": 12        # Clock frequency (8-20 MHz)
         }
-        
+
         # Stream control
         self.streaming_enabled = False
         self.stream_active = False
-        
+
         # Timing control
         self.last_frame_time = 0
         self.target_frame_interval = 1.0 / self.target_fps
-        
+
+        # Placeholder frames cached per display state
+        self._placeholder_cache = {}
+
         # Setup graceful shutdown
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
-        
+
         logger.info(f"Camera Proxy initialized - Port: {self.rebroadcast_port}, Target FPS: {self.target_fps}")
 
     def signal_handler(self, signum, frame):
@@ -94,7 +124,7 @@ class CameraProxy:
         """Load camera configuration with optimized defaults"""
         default_config = {
             "esp32_url": "http://10.1.1.203:81/stream",
-            "esp32_base_url": "http://10.1.1.203:81", 
+            "esp32_base_url": "http://10.1.1.203:81",
             "rebroadcast_port": 8081,
             "connection_timeout": 5,
             "reconnect_delay": 2,
@@ -106,32 +136,31 @@ class CameraProxy:
             "enable_stats": True,
             "max_frame_age": 0.2      # Skip frames older than 200ms
         }
-        
+
         try:
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-            
+
             if os.path.exists(CONFIG_PATH):
                 with open(CONFIG_PATH, "r") as f:
                     config = json.load(f)
                 logger.info(f"Loaded camera config from {CONFIG_PATH}")
             else:
                 config = default_config
-                with open(CONFIG_PATH, "w") as f:
-                    json.dump(default_config, f, indent=4)
+                _save_json_atomic(CONFIG_PATH, default_config)
                 logger.info(f"Created default camera config at {CONFIG_PATH}")
-                
+
         except Exception as e:
             logger.warning(f"Failed to load camera config: {e}, using defaults")
             config = default_config
-        
+
         # Load config values
         self.esp32_url = config.get("esp32_url", default_config["esp32_url"])
-        
+
         if "esp32_base_url" in config:
             self.esp32_base_url = config["esp32_base_url"]
         else:
             self.esp32_base_url = self.esp32_url.replace("/stream", "")
-            
+
         self.rebroadcast_port = config.get("rebroadcast_port", default_config["rebroadcast_port"])
         self.connection_timeout = config.get("connection_timeout", default_config["connection_timeout"])
         self.reconnect_delay = config.get("reconnect_delay", default_config["reconnect_delay"])
@@ -142,7 +171,7 @@ class CameraProxy:
         self.chunk_size = config.get("chunk_size", default_config["chunk_size"])
         self.enable_stats = config.get("enable_stats", default_config["enable_stats"])
         self.max_frame_age = config.get("max_frame_age", default_config["max_frame_age"])
-        
+
         logger.info(f"Config - Target FPS: {self.target_fps}, Chunk size: {self.chunk_size}")
 
     def get_esp32_settings(self):
@@ -151,97 +180,135 @@ class CameraProxy:
             response = requests.get(f"{self.esp32_base_url}/settings", timeout=2)
             if response.status_code == 200:
                 data = response.json()
-                
+
                 if isinstance(data, dict):
                     for esp32_key, value in data.items():
                         if esp32_key in self.esp32_settings:
                             self.esp32_settings[esp32_key] = value
-                    
+
                     logger.info("Got settings from ESP32")
                     return self.esp32_settings
-                    
+
         except requests.exceptions.RequestException as e:
             logger.debug(f"ESP32 settings request failed: {e}")
         except Exception as e:
             logger.debug(f"ESP32 settings error: {e}")
-        
+
         logger.debug("Using cached camera settings (ESP32 not reachable)")
         return self.esp32_settings
 
     def update_esp32_settings(self, settings):
-        """Update ESP32 camera settings via POST /settings (form-encoded).
-        If the ESP32 is streaming (423), the stream is paused, settings applied, then resumed."""
-        esp32_data = {k: v for k, v in settings.items() if k in self.esp32_settings}
-        if not esp32_data:
-            return {
-                "success": False, "updated_count": 0,
-                "total_count": len(settings),
-                "settings": self.esp32_settings.copy(),
-                "message": "No recognised settings to update"
-            }
+        """Update ESP32 camera settings using correct endpoints"""
+        success_count = 0
+        total_settings = len(settings)
+        failed_settings = []
 
-        was_streaming = self.stream_active
+        try:
+            esp32_data = {}
+            for frontend_setting, value in settings.items():
+                if frontend_setting in self.esp32_settings:
+                    esp32_data[frontend_setting] = value
 
-        def _post_settings(data):
-            endpoint = f"{self.esp32_base_url}/settings"
-            logger.info(f"POST {endpoint}: {data}")
-            return requests.post(endpoint, data=data, timeout=5)
+            if esp32_data:
+                endpoint = f"{self.esp32_base_url}/settings"
+                logger.info(f"Sending POST to {endpoint} with data: {esp32_data}")
 
-        def _apply(data):
-            """POST settings and return (success_count, message)."""
-            try:
-                response = _post_settings(data)
+                response = requests.post(endpoint, data=esp32_data, timeout=5)
+
                 if response.status_code == 200:
-                    for key, value in data.items():
+                    for key, value in esp32_data.items():
                         self.esp32_settings[key] = value
-                    logger.info(f"Updated {len(data)} setting(s)")
-                    return len(data), f"Updated {len(data)} setting(s)"
+                        success_count += 1
+                    logger.info(f"Successfully updated {success_count} settings via POST")
+
+                elif response.status_code == 423:
+                    logger.warning("ESP32 is streaming - cannot update settings")
+                    for key in esp32_data.keys():
+                        failed_settings.append(key)
+
                 else:
                     logger.warning(f"POST /settings returned HTTP {response.status_code}")
-                    return 0, f"ESP32 returned HTTP {response.status_code}"
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"POST /settings failed: {e}")
-                return 0, f"Connection error: {e}"
+                    success_count, failed_settings = self._try_individual_updates(settings)
 
-        # If streaming, pause→apply→resume
-        if was_streaming:
-            logger.info("Stream active — pausing to apply settings")
-            self.stop_stream()
-            time.sleep(0.5)  # Let ESP32 exit its stream handler
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"POST /settings failed: {e}")
+            success_count, failed_settings = self._try_individual_updates(settings)
 
-        success_count, message = _apply(esp32_data)
+        except Exception as e:
+            logger.error(f"Error in POST settings update: {e}")
+            success_count, failed_settings = self._try_individual_updates(settings)
 
-        if was_streaming:
-            logger.info("Resuming stream after settings update")
-            self.start_stream()
+        if success_count == 0 and not failed_settings:
+            success_count, failed_settings = self._try_individual_updates(settings)
 
-        return {
-            "success": success_count == len(esp32_data),
+        result = {
+            "success": success_count == total_settings,
             "updated_count": success_count,
-            "total_count": len(settings),
+            "total_count": total_settings,
             "settings": self.esp32_settings.copy(),
-            "failed_settings": [] if success_count == len(esp32_data) else list(esp32_data.keys()),
-            "message": message
+            "failed_settings": failed_settings
         }
+
+        if failed_settings:
+            result["message"] = f"Failed to update: {', '.join(failed_settings)}"
+        elif success_count == total_settings:
+            result["message"] = f"Successfully updated {success_count} settings"
+        elif success_count > 0:
+            result["message"] = f"Updated {success_count}/{total_settings} settings"
+        else:
+            result["message"] = "No settings were updated"
+
+        return result
+
+    def _try_individual_updates(self, settings):
+        """Fallback: Try updating settings individually using GET parameters"""
+        success_count = 0
+        failed_settings = []
+
+        supported_get_params = ['quality', 'brightness', 'contrast']
+
+        for frontend_setting, value in settings.items():
+            if frontend_setting in supported_get_params:
+                try:
+                    endpoint = f"{self.esp32_base_url}/settings?{frontend_setting}={value}"
+                    logger.info(f"Trying GET: {endpoint}")
+
+                    response = requests.get(endpoint, timeout=3)
+                    if response.status_code == 200:
+                        self.esp32_settings[frontend_setting] = value
+                        success_count += 1
+                        logger.info(f"Updated {frontend_setting} via GET")
+                    else:
+                        failed_settings.append(frontend_setting)
+                        logger.warning(f"GET update failed for {frontend_setting}: HTTP {response.status_code}")
+
+                except Exception as e:
+                    failed_settings.append(frontend_setting)
+                    logger.error(f"GET update error for {frontend_setting}: {e}")
+            else:
+                failed_settings.append(frontend_setting)
+                logger.warning(f"Parameter {frontend_setting} not supported by ESP32 GET method")
+
+        return success_count, failed_settings
 
     def start_stream(self):
         """Start the camera stream manually"""
         if self.stream_active:
             logger.info("Stream already active")
             return True
-            
+
         if self.stream_thread and self.stream_thread.is_alive():
             logger.warning("Stream thread already running, stopping first...")
             self.stop_stream()
             time.sleep(0.5)
-        
+
         logger.info("Starting camera stream...")
         self.streaming_enabled = True
-        self.connection_errors = 0
-        
+        self.consecutive_failures = 0
+
         self.stream_thread = threading.Thread(target=self._stream_worker, daemon=True)
         self.stream_thread.start()
-        
+
         time.sleep(1)
         return self.stream_active
 
@@ -249,184 +316,256 @@ class CameraProxy:
         """Stop the camera stream"""
         logger.info("Stopping camera stream...")
         self.streaming_enabled = False
-        
+
         if self.stream_thread and self.stream_thread.is_alive():
             self.stream_thread.join(timeout=3)
-        
+
         self.stream_active = False
         self.connected_to_esp32 = False
+
+        # Wake any waiting stream consumers so they switch to placeholders
+        with self.frame_condition:
+            self.frame_condition.notify_all()
+
         logger.info("Camera stream stopped")
         return True
 
+    def _current_backoff_delay(self) -> float:
+        """Exponential backoff delay based on consecutive failures."""
+        if self.consecutive_failures <= 1:
+            return self.reconnect_delay
+        delay = self.reconnect_delay * (2 ** (self.consecutive_failures - 1))
+        return min(delay, RECONNECT_BACKOFF_MAX)
+
+    def _record_connection_failure(self, error):
+        """Track a failed connection attempt and log at escalating severity."""
+        self.connected_to_esp32 = False
+        self.connection_errors += 1
+        self.consecutive_failures += 1
+
+        delay = self._current_backoff_delay()
+        if self.consecutive_failures == self.max_connection_errors:
+            # Escalate once when the link looks properly down - but keep retrying
+            logger.error(
+                f"Camera unreachable after {self.consecutive_failures} consecutive "
+                f"attempts - continuing to retry every {RECONNECT_BACKOFF_MAX:.0f}s max ({error})"
+            )
+        else:
+            logger.warning(
+                f"Camera connection error (attempt {self.consecutive_failures}, "
+                f"retry in {delay:.0f}s): {error}"
+            )
+        return delay
+
     def _stream_worker(self):
-        """Optimized stream processing with smart frame management"""
+        """
+        Stream processing with smart frame management.
+
+        Reconnects indefinitely with exponential backoff. The consecutive
+        failure counter resets on every successful connection, so brief WiFi
+        dropouts spread across a long session can never accumulate into a
+        permanent stream shutdown.
+        """
         bytes_buffer = bytearray()
         last_fps_check = time.time()
         frames_this_second = 0
-        
+
         logger.info("Starting camera stream worker...")
-        
+
         while self.streaming_enabled and self.running:
-            if self.connection_errors >= self.max_connection_errors:
-                logger.error(f"Max connection errors reached ({self.max_connection_errors}), stopping stream")
-                break
-                
             try:
                 logger.info(f"Connecting to ESP32 camera at: {self.esp32_url}")
-                
+
                 session = requests.Session()
                 session.headers.update({
-                    'User-Agent': 'WALL-E-Camera-Proxy/2.0',
+                    'User-Agent': 'WALL-E-Camera-Proxy/2.1',
                     'Accept': 'multipart/x-mixed-replace; boundary=123456789000000000000987654321'
                 })
-                
+
                 stream = session.get(
                     self.esp32_url,
                     stream=True,
                     timeout=self.connection_timeout,
                     headers={'Connection': 'keep-alive'}
                 )
-                
+
                 if stream.status_code != 200:
                     raise requests.exceptions.RequestException(f"HTTP {stream.status_code}")
-                
+
                 self.stream_active = True
                 self.connected_to_esp32 = True
+
+                # Successful connection - reset the backoff counter
+                if self.consecutive_failures > 0:
+                    logger.info(
+                        f"Camera reconnected after {self.consecutive_failures} failed attempts"
+                    )
+                self.consecutive_failures = 0
+
                 logger.info("Connected to ESP32 camera stream")
-                
+
                 bytes_buffer.clear()
-                
+
                 for chunk in stream.iter_content(chunk_size=self.chunk_size):
                     if not self.streaming_enabled or not self.running:
                         break
-                        
+
                     bytes_buffer.extend(chunk)
-                    
+
                     # Process frames as they arrive
                     while True:
                         start_marker = bytes_buffer.find(b'\xff\xd8')  # JPEG start
                         if start_marker == -1:
                             break
-                            
+
                         end_marker = bytes_buffer.find(b'\xff\xd9', start_marker)  # JPEG end
                         if end_marker == -1:
                             break
-                        
+
                         # Extract JPEG frame
                         jpeg_frame = bytes_buffer[start_marker:end_marker + 2]
                         del bytes_buffer[:end_marker + 2]
-                        
+
                         current_time = time.time()
-                        
+
                         # Smart frame processing - prevent accumulation
                         if self._process_frame_smart(jpeg_frame, current_time):
                             frames_this_second += 1
-                        
+
                         # FPS monitoring
                         if current_time - last_fps_check >= 1.0:
                             if frames_this_second > 0:
-                                logger.info(f"Processing FPS: {frames_this_second}")
+                                logger.debug(f"Processing FPS: {frames_this_second}")
                             last_fps_check = current_time
                             frames_this_second = 0
-                
+
             except requests.exceptions.RequestException as e:
-                self.connected_to_esp32 = False
-                self.connection_errors += 1
-                logger.warning(f"Camera connection error ({self.connection_errors}/{self.max_connection_errors}): {e}")
+                delay = self._record_connection_failure(e)
                 if self.streaming_enabled:
-                    time.sleep(self.reconnect_delay)
+                    time.sleep(delay)
             except Exception as e:
-                self.connected_to_esp32 = False
-                self.connection_errors += 1
+                delay = self._record_connection_failure(e)
                 logger.error(f"Camera stream error: {e}")
                 if self.streaming_enabled:
-                    time.sleep(self.reconnect_delay)
-        
+                    time.sleep(delay)
+
         self.stream_active = False
         self.connected_to_esp32 = False
+        with self.frame_condition:
+            self.frame_condition.notify_all()
         logger.info("Camera stream worker stopped")
 
     def _process_frame_smart(self, jpeg_frame, current_time):
-        """Keep only the newest frame - simple and fast"""
+        """Keep only the newest frame and wake waiting consumers"""
         try:
             frame_size = len(jpeg_frame)
             if frame_size < 512:
                 return False
-            
-            # Always replace with newest - no complex logic
-            with self.frame_lock:
+
+            with self.frame_condition:
                 self.current_frame = {
-                    'data': jpeg_frame,
+                    'data': bytes(jpeg_frame),
                     'size': frame_size,
                     'timestamp': current_time
                 }
-            
+                self.frame_condition.notify_all()
+
             self.frame_count += 1
             return True
-                
+
         except Exception:
             return False
 
     def generate_stream(self):
-        """Stream generation without redundant age checking"""
-        last_delivery_time = 0
+        """
+        Yield MJPEG parts to a connected client.
+
+        Event-driven: waits on the frame condition instead of spinning, and
+        only sends a frame the client has not already received. Rate is
+        capped at target_fps; while disconnected a placeholder is sent at a
+        low rate so the client keeps a live picture.
+        """
+        last_sent_timestamp = 0.0
+        last_delivery_time = 0.0
         target_interval = 1.0 / self.target_fps
-        
+
         while self.running:
             try:
-                current_time = time.time()
-                
-                # Rate limiting
-                if current_time - last_delivery_time < target_interval:
-                    time.sleep(0.001)  # Tiny sleep to prevent CPU spin
-                    continue
-                
-                with self.frame_lock:
+                with self.frame_condition:
                     frame_info = self.current_frame
-                
-                if frame_info and self.stream_active:
-                    # NO AGE CHECKING - trust the input filter
+                    has_new = (
+                        frame_info is not None
+                        and frame_info['timestamp'] > last_sent_timestamp
+                    )
+                    if not has_new:
+                        # Sleep until a new frame arrives or timeout for
+                        # placeholder/shutdown handling
+                        self.frame_condition.wait(timeout=0.2)
+                        frame_info = self.current_frame
+                        has_new = (
+                            frame_info is not None
+                            and frame_info['timestamp'] > last_sent_timestamp
+                        )
+
+                if has_new and self.stream_active:
+                    # Enforce the delivery rate cap, taking the newest frame
+                    # available after any wait
+                    wait_needed = target_interval - (time.time() - last_delivery_time)
+                    if wait_needed > 0:
+                        time.sleep(wait_needed)
+                        with self.frame_condition:
+                            frame_info = self.current_frame
+
                     yield (b'--frame\r\n'
                         b'Content-Type: image/jpeg\r\n'
                         b'Content-Length: ' + str(frame_info['size']).encode() + b'\r\n\r\n' +
                         frame_info['data'] + b'\r\n')
-                    
-                    last_delivery_time = current_time
-                else:
-                    # Placeholder
-                    if not hasattr(self, '_cached_placeholder'):
-                        self._cached_placeholder = self._create_placeholder_frame()
-                    
+
+                    last_sent_timestamp = frame_info['timestamp']
+                    last_delivery_time = time.time()
+
+                elif not self.stream_active:
+                    # Placeholder while stopped/connecting, at a gentle rate
+                    placeholder = self._get_placeholder_frame()
                     yield (b'--frame\r\n'
                         b'Content-Type: image/jpeg\r\n'
-                        b'Content-Length: ' + str(len(self._cached_placeholder)).encode() + b'\r\n\r\n' +
-                        self._cached_placeholder + b'\r\n')
-                    time.sleep(0.05)
-                    
+                        b'Content-Length: ' + str(len(placeholder)).encode() + b'\r\n\r\n' +
+                        placeholder + b'\r\n')
+                    time.sleep(0.2)
+
+            except GeneratorExit:
+                break
             except Exception as e:
                 logger.debug(f"Stream error: {e}")
-                time.sleep(0.01)
+                time.sleep(0.05)
 
-    def _create_placeholder_frame(self):
-        """Create cached placeholder frame"""
+    def _get_placeholder_frame(self):
+        """Return a cached placeholder frame matching the current state"""
+        state = "stopped" if not self.streaming_enabled else "connecting"
+        cached = self._placeholder_cache.get(state)
+        if cached is not None:
+            return cached
+
         try:
             img = np.zeros((480, 640, 3), dtype=np.uint8)
-            if not self.streaming_enabled:
+            if state == "stopped":
                 text = "Stream Stopped"
                 color = (128, 128, 128)
             else:
                 text = "Connecting..."
                 color = (255, 255, 0)
-                
+
             cv2.putText(img, text, (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 2, color, 3)
-            
+
             encode_params = [
                 cv2.IMWRITE_JPEG_QUALITY, 70,
                 cv2.IMWRITE_JPEG_OPTIMIZE, 1
             ]
             _, buffer = cv2.imencode('.jpg', img, encode_params)
-            return buffer.tobytes()
-            
+            frame = buffer.tobytes()
+            self._placeholder_cache[state] = frame
+            return frame
+
         except Exception as e:
             logger.error(f"Failed to create placeholder frame: {e}")
             # Return minimal black frame
@@ -438,6 +577,7 @@ class CameraProxy:
             "frame_count": self.frame_count,
             "dropped_frames": self.dropped_frames,
             "connection_errors": self.connection_errors,
+            "consecutive_failures": self.consecutive_failures,
             "streaming_enabled": self.streaming_enabled,
             "stream_active": self.stream_active,
             "connected_to_esp32": self.connected_to_esp32,
@@ -451,34 +591,8 @@ class CameraProxy:
         self.running = False
         if self.streaming_enabled:
             self.stop_stream()
-
-    def _status_poll_worker(self):
-        """Background thread that polls ESP32 /status every 5 seconds"""
-        while self.running:
-            try:
-                response = requests.get(
-                    f"{self.esp32_base_url}/status", timeout=3
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    with self.esp32_status_lock:
-                        self.esp32_status = {
-                            "rssi":       data.get("rssi", 0),
-                            "free_heap":  data.get("free_heap", 0),
-                            "free_psram": data.get("free_psram", 0),
-                            "frames_sent": data.get("frames_sent", 0),
-                            "cpu_mhz":    data.get("cpu_mhz", 0),
-                            "uptime_ms":  data.get("uptime_ms", 0),
-                            "streaming":  data.get("streaming", False),
-                        }
-            except Exception:
-                pass
-            time.sleep(5)
-
-    def get_esp32_status(self):
-        """Return the most recent cached ESP32 status"""
-        with self.esp32_status_lock:
-            return self.esp32_status.copy()
+        with self.frame_condition:
+            self.frame_condition.notify_all()
 
     def create_flask_app(self):
         """Create and configure Flask application"""
@@ -550,16 +664,11 @@ class CameraProxy:
                     current_settings.update(fresh_settings)
                 except Exception as e:
                     logger.debug(f"Could not get fresh ESP32 settings: {e}")
-                
+
                 return jsonify(current_settings)
             except Exception as e:
                 logger.error(f"Failed to get camera settings: {e}")
                 return jsonify(self.esp32_settings)
-
-        @app.route('/camera/status', methods=['GET'])
-        def get_camera_status():
-            """Return cached ESP32 hardware status (RSSI, heap, PSRAM, frames)"""
-            return jsonify(self.get_esp32_status())
 
         @app.route('/camera/settings', methods=['POST'])
         def update_camera_settings():
@@ -568,9 +677,9 @@ class CameraProxy:
                 settings = request.json
                 if not settings:
                     return jsonify({"error": "No settings provided"}), 400
-                
+
                 result = self.update_esp32_settings(settings)
-                
+
                 if result["updated_count"] > 0:
                     return jsonify({
                         "success": True,
@@ -584,7 +693,7 @@ class CameraProxy:
                         "settings": result["settings"],
                         "failed_settings": result.get("failed_settings", [])
                     }), 400
-                        
+
             except Exception as e:
                 logger.error(f"Camera settings update error: {e}")
                 return jsonify({
@@ -613,15 +722,14 @@ class CameraProxy:
                             config = json.load(f)
                     config["esp32_url"] = new_url
                     config["esp32_base_url"] = self.esp32_base_url
-                    with open(CONFIG_PATH, "w") as f:
-                        json.dump(config, f, indent=4)
-                    logger.info(f"Camera URL updated and saved: {new_url}")
+                    if _save_json_atomic(CONFIG_PATH, config):
+                        logger.info(f"Camera URL updated and saved: {new_url}")
                 except Exception as e:
                     logger.warning(f"Could not persist camera URL to config: {e}")
 
                 # Reset connection so the stream reconnects to the new URL
                 self.connected_to_esp32 = False
-                self.connection_errors = 0
+                self.consecutive_failures = 0
 
                 return jsonify({"success": True, "esp32_url": new_url})
 
@@ -644,9 +752,9 @@ class CameraProxy:
             try:
                 size = request.args.get('size', type=int, default=5 * 1024 * 1024)
                 size = min(size, 50 * 1024 * 1024)  # Cap at 50MB
-                
+
                 test_data = b'0' * size
-                
+
                 return Response(
                     test_data,
                     mimetype='application/octet-stream',
@@ -656,7 +764,7 @@ class CameraProxy:
                         'Connection': 'close'
                     }
                 )
-                
+
             except Exception as e:
                 logger.error(f"Bandwidth test error: {e}")
                 return jsonify({"error": f"Bandwidth test failed: {str(e)}"}), 500
@@ -667,22 +775,22 @@ class CameraProxy:
             try:
                 start_time = time.time()
                 total_bytes = 0
-                
+
                 for chunk in request.stream:
                     total_bytes += len(chunk)
-                
+
                 end_time = time.time()
                 duration = end_time - start_time
-                
+
                 upload_mbps = (total_bytes * 8) / (duration * 1000000) if duration > 0 else 0
-                
+
                 return jsonify({
                     "success": True,
                     "bytes_received": total_bytes,
                     "duration_seconds": duration,
                     "upload_mbps": upload_mbps
                 })
-                
+
             except Exception as e:
                 logger.error(f"Upload bandwidth test error: {e}")
                 return jsonify({"error": f"Upload test failed: {str(e)}"}), 500
@@ -692,14 +800,15 @@ class CameraProxy:
 
 def main():
     """Main entry point"""
+    proxy = None
     try:
         proxy = CameraProxy()
         app = proxy.create_flask_app()
-        
+
         if proxy.auto_start_stream:
             logger.info("Auto-starting camera stream...")
             proxy.start_stream()
-        
+
         logger.info(f"Starting camera proxy server on port {proxy.rebroadcast_port}")
         app.run(
             host='0.0.0.0',
@@ -708,13 +817,13 @@ def main():
             threaded=True,
             use_reloader=False
         )
-        
+
     except KeyboardInterrupt:
         logger.info("Received interrupt signal")
     except Exception as e:
         logger.error(f"Camera proxy error: {e}")
     finally:
-        if 'proxy' in locals():
+        if proxy is not None:
             proxy.stop()
 
 

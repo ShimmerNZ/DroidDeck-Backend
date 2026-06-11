@@ -84,14 +84,26 @@ function updateSceneList() {
         
         const metaText = features.length > 0 ? features.join(' • ') : 'Basic scene';
         
-        sceneItem.innerHTML = `
-            <div class="scene-item-emoji">${scene.emoji || '🎭'}</div>
-            <div class="scene-item-details">
-                <div class="scene-item-title">${scene.label}</div>
-                <div class="scene-item-meta">${metaText}</div>
-            </div>
-            <div class="scene-item-duration">${scene.duration}s</div>
-        `;
+        // Build scene item using textContent for user-sourced values
+        const emojiEl = document.createElement('div');
+        emojiEl.className = 'scene-item-emoji';
+        emojiEl.textContent = scene.emoji || '🎭';
+        const titleEl = document.createElement('div');
+        titleEl.className = 'scene-item-title';
+        titleEl.textContent = scene.label;
+        const metaEl = document.createElement('div');
+        metaEl.className = 'scene-item-meta';
+        metaEl.textContent = metaText;
+        const detailsEl = document.createElement('div');
+        detailsEl.className = 'scene-item-details';
+        detailsEl.appendChild(titleEl);
+        detailsEl.appendChild(metaEl);
+        const durationEl = document.createElement('div');
+        durationEl.className = 'scene-item-duration';
+        durationEl.textContent = scene.duration + 's';
+        sceneItem.appendChild(emojiEl);
+        sceneItem.appendChild(detailsEl);
+        sceneItem.appendChild(durationEl);
         
         sceneList.appendChild(sceneItem);
     });
@@ -158,11 +170,18 @@ function updateSceneGrid() {
         sceneButton.className = 'scene-button';
         sceneButton.onclick = () => playScene(scene.label);
         
-        sceneButton.innerHTML = `
-            <div class="scene-emoji">${scene.emoji || '🎭'}</div>
-            <div class="scene-label">${scene.label}</div>
-            <div class="scene-duration">${scene.duration}s</div>
-        `;
+        const btnEmoji = document.createElement('div');
+        btnEmoji.className = 'scene-emoji';
+        btnEmoji.textContent = scene.emoji || '🎭';
+        const btnLabel = document.createElement('div');
+        btnLabel.className = 'scene-label';
+        btnLabel.textContent = scene.label;
+        const btnDuration = document.createElement('div');
+        btnDuration.className = 'scene-duration';
+        btnDuration.textContent = scene.duration + 's';
+        sceneButton.appendChild(btnEmoji);
+        sceneButton.appendChild(btnLabel);
+        sceneButton.appendChild(btnDuration);
         
         sceneGrid.appendChild(sceneButton);
     });
@@ -668,12 +687,17 @@ function updateMappingList() {
         
         const behaviorText = getBehaviorDisplayText(mapping);
         
-        mappingItem.innerHTML = `
-            <div class="mapping-info">
-                <div class="mapping-input-name">${inputName}</div>
-                <div class="mapping-behavior">${behaviorText}</div>
-            </div>
-        `;
+        const mappingInfo = document.createElement('div');
+        mappingInfo.className = 'mapping-info';
+        const inputNameEl = document.createElement('div');
+        inputNameEl.className = 'mapping-input-name';
+        inputNameEl.textContent = inputName;
+        const behaviorEl = document.createElement('div');
+        behaviorEl.className = 'mapping-behavior';
+        behaviorEl.textContent = behaviorText;
+        mappingInfo.appendChild(inputNameEl);
+        mappingInfo.appendChild(behaviorEl);
+        mappingItem.appendChild(mappingInfo);
         
         mappingList.appendChild(mappingItem);
     });

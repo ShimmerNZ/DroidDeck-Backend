@@ -33,8 +33,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // Initialise play mode button appearance
     setPlayMode('sequential');
     
-    // Start periodic updates
-    setInterval(periodicUpdate, updateInterval);
+    // Start periodic updates - handle stored so saveSettings can restart it
+    window._periodicUpdateInterval = setInterval(periodicUpdate, updateInterval);
 });
 
 // Settings management
@@ -99,6 +99,13 @@ function saveSettings() {
     autoReconnect = autoReconnectSetting;
     updateInterval = parseInt(intervalSetting);
     enableAnimations = animationsSetting;
+    
+    // Restart the periodic update interval so the new value takes effect
+    // immediately without needing a page reload
+    if (window._periodicUpdateInterval) {
+        clearInterval(window._periodicUpdateInterval);
+    }
+    window._periodicUpdateInterval = setInterval(periodicUpdate, updateInterval);
     
     showToast('Settings saved', 'success');
 }

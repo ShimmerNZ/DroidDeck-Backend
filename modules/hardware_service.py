@@ -24,6 +24,7 @@ from modules.shared_serial_manager import (
     EnhancedSharedSerialPortManager
 )
 from modules.nema23_controller import NEMA23Controller, StepperConfig, StepperControlInterface
+from modules.servo_utils import parse_servo_id
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +51,8 @@ class HardwareConfig:
     maestro1_device_number: int = 12
     maestro2_device_number: int = 13
     
-    # Sabertooth configuration
-    sabertooth_port: str = "/dev/ttyAMA1"
-    sabertooth_baud_rate: int = 9600
+    # Note: the Sabertooth 2x60 is driven via Maestro PWM channels, not a
+    # dedicated serial port, so it has no serial configuration here.
     
     # GPIO pins
     motor_step_pin: int = 16
@@ -584,34 +584,7 @@ class HardwareService:
         Raises:
             ValueError: If servo_id format is invalid
         """
-        try:
-            parts = servo_id.split('_')
-            if len(parts) != 2:
-                raise ValueError(f"Invalid servo ID format: {servo_id}")
-            
-            # Extract maestro number from 'm1', 'm2', etc.
-            maestro_part = parts[0]
-            if not maestro_part.startswith('m') or len(maestro_part) != 2:
-                raise ValueError(f"Invalid maestro part: {maestro_part}")
-            
-            maestro_num = int(maestro_part[1])
-            if maestro_num not in [1, 2]:
-                raise ValueError(f"Invalid maestro number: {maestro_num}")
-            
-            # Extract channel number from 'ch0', 'ch5', etc.
-            channel_part = parts[1]
-            if not channel_part.startswith('ch'):
-                raise ValueError(f"Invalid channel part: {channel_part}")
-            
-            channel = int(channel_part[2:])
-            if channel < 0 or channel > 23:  # Maestro supports 0-23 channels
-                raise ValueError(f"Invalid channel number: {channel}")
-            
-            return maestro_num, channel
-            
-        except (ValueError, IndexError) as e:
-            logger.error(f"Failed to parse servo ID '{servo_id}': {e}")
-            raise ValueError(f"Invalid servo ID format: {servo_id}")
+        return parse_servo_id(servo_id)
     
     # ==================== ORIGINAL SERVO CONTROL METHODS (ENHANCED) ====================
     
@@ -922,14 +895,14 @@ class HardwareService:
                 for channel in range(self.maestro1.channel_count):
                     try:
                         self.maestro1.set_target(channel, 1500, priority=CommandPriority.EMERGENCY)
-                    except:
+                    except Exception:
                         pass
             
             if self.maestro2:
                 for channel in range(self.maestro2.channel_count):
                     try:
                         self.maestro2.set_target(channel, 1500, priority=CommandPriority.EMERGENCY)
-                    except:
+                    except Exception:
                         pass
             
             if self.motor:
@@ -1533,7 +1506,7 @@ class HardwareService:
                         state = read_input(self.config.emergency_stop_pin)
                         test_result["details"]["emergency_stop_state"] = bool(state) if state is not None else False
                         test_result["details"]["pins_configured"].append("emergency_stop")
-                    except:
+                    except Exception:
                         pass
                 
                 # Test limit switch pin
@@ -1542,7 +1515,7 @@ class HardwareService:
                         state = read_input(self.config.limit_switch_pin)
                         test_result["details"]["limit_switch_state"] = bool(state) if state is not None else False
                         test_result["details"]["pins_configured"].append("limit_switch")
-                    except:
+                    except Exception:
                         pass
                 
             except Exception as e:
@@ -1582,22 +1555,6 @@ class HardwareService:
                     ports_tested.append(f"{self.config.maestro_port}: FAILED ({e})")
             else:
                 ports_tested.append(f"{self.config.maestro_port}: NOT_FOUND")
-            
-            # Test Sabertooth port
-            if Path(self.config.sabertooth_port).exists():
-                try:
-                    test_serial = serial.Serial(
-                        self.config.sabertooth_port,
-                        self.config.sabertooth_baud_rate,
-                        timeout=0.1
-                    )
-                    test_serial.close()
-                    ports_working.append(self.config.sabertooth_port)
-                    ports_tested.append(f"{self.config.sabertooth_port}: OK")
-                except Exception as e:
-                    ports_tested.append(f"{self.config.sabertooth_port}: FAILED ({e})")
-            else:
-                ports_tested.append(f"{self.config.sabertooth_port}: NOT_FOUND")
             
             test_result["details"] = {
                 "ports_tested": ports_tested,
@@ -1705,8 +1662,6 @@ class HardwareService:
                 "maestro_baud_rate": self.config.maestro_baud_rate,
                 "maestro1_device_number": self.config.maestro1_device_number,
                 "maestro2_device_number": self.config.maestro2_device_number,
-                "sabertooth_port": self.config.sabertooth_port,
-                "sabertooth_baud_rate": self.config.sabertooth_baud_rate,
                 "motor_step_pin": self.config.motor_step_pin,
                 "motor_dir_pin": self.config.motor_dir_pin,
                 "motor_enable_pin": self.config.motor_enable_pin,
@@ -1907,8 +1862,6 @@ def create_hardware_service(config_dict: Dict[str, Any]) -> HardwareService:
             maestro_baud_rate=hw_config.get("maestro1", {}).get("baud_rate", 57600),
             maestro1_device_number=hw_config.get("maestro1", {}).get("device_number", 12),
             maestro2_device_number=hw_config.get("maestro2", {}).get("device_number", 13),
-            sabertooth_port=hw_config.get("sabertooth", {}).get("port", "/dev/ttyAMA1"),
-            sabertooth_baud_rate=hw_config.get("sabertooth", {}).get("baud_rate", 9600),
             motor_step_pin=hw_config.get("gpio", {}).get("motor_step_pin", 16),
             motor_dir_pin=hw_config.get("gpio", {}).get("motor_dir_pin", 12),
             motor_enable_pin=hw_config.get("gpio", {}).get("motor_enable_pin", 13),

@@ -8,12 +8,14 @@ Real-time system monitoring with ADC sensor support and simulation fallback
 import asyncio
 import json
 import logging
+import operator
+import re
 import time
 import psutil
 import random
 import math
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, Callable, List
+from typing import Dict, Any, Optional, Callable, List, Tuple
 from collections import deque
 from pathlib import Path
 
@@ -27,18 +29,18 @@ try:
     import adafruit_ads1x15.ads1115 as ADS
     from adafruit_ads1x15.analog_in import AnalogIn
     ADC_AVAILABLE = True
-    logger.info("✅ ADC libraries imported successfully")
+    logger.info("ADC libraries imported successfully")
 except ImportError as e:
-    logger.warning(f"⚠️ ADC libraries not available - current sensing disabled: {e}")
+    logger.warning(f"ADC libraries not available - current sensing disabled: {e}")
 
 # GPIO handling with fallbacks
 GPIO_AVAILABLE = False
 try:
     import RPi.GPIO as GPIO
     GPIO_AVAILABLE = True
-    logger.info("✅ GPIO library imported successfully")
+    logger.info("GPIO library imported successfully")
 except ImportError:
-    logger.warning("⚠️ RPi.GPIO not available - GPIO features disabled")
+    logger.warning("RPi.GPIO not available - GPIO features disabled")
 
 @dataclass
 class TelemetryReading:
@@ -53,7 +55,7 @@ class TelemetryReading:
     current_total: float           # A2 - Total electronics current (ACS758)
     gpio_available: bool = GPIO_AVAILABLE
     adc_available: bool = ADC_AVAILABLE
-    
+
     # Hardware status
     maestro1_connected: bool = False
     maestro2_connected: bool = False
@@ -61,13 +63,13 @@ class TelemetryReading:
     maestro2_status: dict = field(default_factory=dict)
     stepper_motor_status: dict = field(default_factory=dict)
     audio_system_ready: bool = False
-    
+
     # Stream/camera info
     stream_fps: float = 0.0
     stream_resolution: str = "0x0"
     stream_latency: float = 0.0
 
-@dataclass 
+@dataclass
 class TelemetryAlert:
     """Telemetry alert/warning definition"""
     name: str
@@ -80,7 +82,66 @@ class TelemetryAlert:
     trigger_count: int = 0
 
 
-# 4S LiPo voltage → state-of-charge lookup table (voltage per cell × 4)
+# ---------------------------------------------------------------------------
+# Alert condition parsing
+#
+# Conditions are simple comparisons of the form "<metric> <op> <number>",
+# e.g. "battery_voltage < 13.2". They are parsed into (metric, operator,
+# value) tuples and evaluated with the operator module - no eval(), so a
+# condition string arriving over the WebSocket API can never execute code.
+# ---------------------------------------------------------------------------
+
+ALERT_METRICS = {
+    "battery_voltage",
+    "temperature",
+    "cpu_percent",
+    "memory_percent",
+    "adc_errors",
+    "temperature_errors",
+    "sabertooth_temp",
+    "current_tracks",
+    "current_total",
+}
+
+_CONDITION_PATTERN = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(<=|>=|==|!=|<|>)\s*(-?\d+(?:\.\d+)?)\s*$"
+)
+
+_OPERATORS = {
+    "<": operator.lt,
+    "<=": operator.le,
+    ">": operator.gt,
+    ">=": operator.ge,
+    "==": operator.eq,
+    "!=": operator.ne,
+}
+
+
+def parse_alert_condition(condition: str) -> Tuple[str, Callable, float]:
+    """
+    Parse an alert condition string into (metric, operator_func, value).
+
+    Raises:
+        ValueError: if the condition is not a valid simple comparison or
+                    references an unknown metric.
+    """
+    match = _CONDITION_PATTERN.match(condition)
+    if not match:
+        raise ValueError(
+            f"Condition must be '<metric> <op> <number>' (e.g. 'battery_voltage < 13.2'), got: {condition!r}"
+        )
+
+    metric, op_symbol, value_str = match.groups()
+
+    if metric not in ALERT_METRICS:
+        raise ValueError(
+            f"Unknown metric {metric!r}. Valid metrics: {', '.join(sorted(ALERT_METRICS))}"
+        )
+
+    return metric, _OPERATORS[op_symbol], float(value_str)
+
+
+# 4S LiPo voltage -> state-of-charge lookup table (voltage per cell x 4)
 _SOC_CURVE = [
     (16.8, 100), (16.4, 95), (16.0, 90), (15.6, 80),
     (15.2, 70),  (14.8, 60), (14.4, 50), (14.0, 40),
@@ -108,7 +169,7 @@ class BatteryEstimator:
         self.peak_current = 0.0
 
     def reset(self):
-        """Reset estimator — call after a pack swap or charge."""
+        """Reset estimator - call after a pack swap or charge."""
         self.mah_consumed = 0.0
         self._last_timestamp = None
         self._current_window.clear()
@@ -213,11 +274,11 @@ class SafeTelemetrySystem:
     Enhanced telemetry system with real hardware readings + fallback simulation.
     Provides system monitoring, alerting, and data logging capabilities.
     """
-    
+
     def __init__(self, history_size: int = 1000, alert_callback: Optional[Callable] = None):
         self.history_size = history_size
         self.alert_callback = alert_callback
-        
+
         # ADC setup
         self.adc_available = ADC_AVAILABLE
         self.ads = None
@@ -226,54 +287,56 @@ class SafeTelemetrySystem:
         self.total_channel = None
         self.battery_channel = None
         self.setup_adc()
-        
+
         # Hardware calibration constants
         self.VOLTAGE_DIVIDER_RATIO = 4.025
         self.ADC_REFERENCE_VOLTAGE = 5.21
         self.ZERO_CURRENT_VOLTAGE = 2.598
         self.CURRENT_SENSITIVITY = 0.0297
-        
+
         # Simulation parameters for fallback
         self.start_time = time.time()
         self.base_voltage = 12.6
         self.base_current = 5.0
-        
+
         # Data storage
         self.reading_history: deque = deque(maxlen=history_size)
         self.last_reading: Optional[TelemetryReading] = None
-        
-        # Alert system
+
+        # Alert system - parsed conditions cached per alert name
         self.alerts: Dict[str, TelemetryAlert] = {}
+        self._parsed_conditions: Dict[str, Tuple[str, Callable, float]] = {}
         self.setup_default_alerts()
-        
+
         # Statistics
         self.stats = {
             "readings_taken": 0,
             "adc_errors": 0,
             "temperature_errors": 0,
+            "update_errors": 0,
             "alerts_triggered": 0,
             "system_uptime": 0.0,
             "average_update_time": 0.0
         }
-        
+
         # Battery run-time estimator
         self._load_battery_config()
 
         # Hardware status callbacks
         self.hardware_status_callbacks: List[Callable] = []
-        
-        logger.info(f"📊 Telemetry system initialized - ADC: {'✅ Real' if self.adc_available else '🎲 Simulated'}")
-    
+
+        logger.info(f"Telemetry system initialized - ADC: {'real' if self.adc_available else 'simulated'}")
+
     def setup_adc(self) -> bool:
         """Setup ADC with graceful error handling"""
         if not ADC_AVAILABLE:
-            logger.warning("⚠️ ADC libraries not available - using simulated readings")
+            logger.warning("ADC libraries not available - using simulated readings")
             return False
-        
+
         try:
             # Initialize I2C bus
             i2c = busio.I2C(board.SCL, board.SDA)
-            
+
             # Create ADS1115 object
             self.ads = ADS.ADS1115(i2c)
 
@@ -281,22 +344,22 @@ class SafeTelemetrySystem:
             self.tracks_channel = AnalogIn(self.ads, ADS.P1)            # A1 - Combined track current
             self.total_channel = AnalogIn(self.ads, ADS.P2)             # A2 - Total electronics current
             self.battery_channel = AnalogIn(self.ads, ADS.P3)           # A3 - Battery voltage
-            
+
             # Test ADC connectivity
             test_voltage = self.battery_channel.voltage
             if test_voltage is not None:
-                logger.info(f"✅ ADC initialized - Test reading: {test_voltage:.3f}V")
+                logger.info(f"ADC initialized - Test reading: {test_voltage:.3f}V")
                 self.adc_available = True
                 return True
             else:
                 raise Exception("ADC test reading failed")
-                
+
         except Exception as e:
-            logger.warning(f"⚠️ Failed to initialize ADC: {e}")
+            logger.warning(f"Failed to initialize ADC: {e}")
             self.adc_available = False
             self.ads = None
             return False
-    
+
     def setup_default_alerts(self):
         """Setup default system alerts"""
         self.alerts = {
@@ -308,7 +371,7 @@ class SafeTelemetrySystem:
             ),
             "critical_battery": TelemetryAlert(
                 name="Critical Battery",
-                condition="battery_voltage < 11.0", 
+                condition="battery_voltage < 11.0",
                 level="CRITICAL",
                 message="CRITICAL: Battery voltage dangerously low!"
             ),
@@ -321,7 +384,7 @@ class SafeTelemetrySystem:
             "high_current_total": TelemetryAlert(
                 name="High Total Current",
                 condition="current_total > 25.0",
-                level="WARNING", 
+                level="WARNING",
                 message="Total current draw is higher than normal"
             ),
             "high_temperature": TelemetryAlert(
@@ -355,12 +418,20 @@ class SafeTelemetrySystem:
                 message="ADC sensor communication issues detected"
             )
         }
-        
-        logger.info(f"⚠️ Setup {len(self.alerts)} default alerts")
+
+        # Pre-parse all default conditions
+        self._parsed_conditions.clear()
+        for alert_name, alert in self.alerts.items():
+            try:
+                self._parsed_conditions[alert_name] = parse_alert_condition(alert.condition)
+            except ValueError as e:
+                logger.error(f"Invalid default alert condition '{alert_name}': {e}")
+
+        logger.info(f"Setup {len(self.alerts)} default alerts")
 
     def _load_battery_config(self):
         """Load battery capacity from hardware_config.json and create estimator."""
-        capacity_mah = 12000  # Default: 4S 4P × 3000mAh
+        capacity_mah = 12000  # Default: 4S 4P x 3000mAh
         try:
             config_path = Path("configs/hardware_config.json")
             if config_path.exists():
@@ -370,7 +441,7 @@ class SafeTelemetrySystem:
         except Exception as e:
             logger.warning(f"Could not load battery config, using default {capacity_mah}mAh: {e}")
         self.battery_estimator = BatteryEstimator(capacity_mah=capacity_mah)
-        logger.info(f"🔋 Battery estimator initialised — capacity: {capacity_mah}mAh")
+        logger.info(f"Battery estimator initialised - capacity: {capacity_mah}mAh")
 
     def reset_battery_estimator(self):
         """Reset the estimator after a pack swap or charge."""
@@ -388,11 +459,11 @@ class SafeTelemetrySystem:
     def voltage_to_tmp36_celsius(self, voltage: float) -> float:
         """Convert TMP36GZ output voltage to degrees Celsius"""
         return (voltage * 1000.0 - 500.0) / 10.0
-    
+
     def adc_to_battery_voltage(self, adc_voltage: float) -> float:
         """Convert ADC reading to actual battery voltage using voltage divider"""
         return adc_voltage * self.VOLTAGE_DIVIDER_RATIO
-    
+
     def get_temperature(self) -> float:
         """Get CPU temperature from system"""
         try:
@@ -401,13 +472,13 @@ class SafeTelemetrySystem:
                 "/sys/class/thermal/thermal_zone0/temp",
                 "/sys/devices/virtual/thermal/thermal_zone0/temp"
             ]
-            
+
             for thermal_file in thermal_files:
                 if Path(thermal_file).exists():
                     with open(thermal_file, "r") as f:
                         temp_str = f.read().strip()
                         return float(temp_str) / 1000.0
-            
+
             # Fallback to psutil if available
             if hasattr(psutil, "sensors_temperatures"):
                 temps = psutil.sensors_temperatures()
@@ -415,16 +486,19 @@ class SafeTelemetrySystem:
                     for name, entries in temps.items():
                         if entries:
                             return entries[0].current
-            
+
             # Last resort - estimate from CPU usage
             cpu_percent = psutil.cpu_percent(interval=0.1)
             return 40.0 + (cpu_percent * 0.5)  # Rough estimation
-            
+
         except Exception as e:
             logger.debug(f"Temperature reading error: {e}")
             self.stats["temperature_errors"] += 1
-            return 45.0  # Safe default
-    
+            # Carry forward the previous temperature rather than fabricating one
+            if self.last_reading is not None:
+                return self.last_reading.temperature
+            return 0.0
+
     def get_real_adc_readings(self) -> tuple:
         """Get real ADC readings from hardware sensors"""
         try:
@@ -449,7 +523,7 @@ class SafeTelemetrySystem:
             logger.debug(f"ADC reading failed: {e}")
             self.stats["adc_errors"] += 1
             raise
-    
+
     def get_simulated_readings(self) -> tuple:
         """Generate realistic simulated sensor readings for testing"""
         current_time = time.time()
@@ -476,32 +550,51 @@ class SafeTelemetrySystem:
         logger.debug(f"SIMULATED - Battery: {battery_voltage:.2f}V, Sabertooth: {sabertooth_temp:.1f}C, Tracks: {current_tracks:.2f}A, Total: {current_total:.2f}A")
 
         return battery_voltage, sabertooth_temp, current_tracks, current_total
-    
+
+    def _get_sensor_readings_with_fallback(self) -> tuple:
+        """
+        Sensor reading strategy:
+          - Real ADC available: read it; on a transient failure carry forward
+            the previous reading's values so displayed data never jumps to a
+            fabricated number. With no previous reading, return zeros (the
+            frontend treats zero/missing values with its own carry-forward).
+          - No ADC hardware at all: use simulated readings (bench mode).
+        """
+        if self.adc_available and self.ads:
+            try:
+                return self.get_real_adc_readings()
+            except Exception:
+                if self.last_reading is not None:
+                    logger.debug("ADC read failed - carrying forward previous values")
+                    last = self.last_reading
+                    return (last.battery_voltage, last.sabertooth_temp,
+                            last.current_tracks, last.current_total)
+                return (0.0, 0.0, 0.0, 0.0)
+
+        return self.get_simulated_readings()
+
     async def update(self, hardware_status: Optional[Dict[str, Any]] = None) -> TelemetryReading:
         """
         Update telemetry with comprehensive system readings
-        
+
         Args:
             hardware_status: Optional hardware status from other systems
-            
+
         Returns:
             TelemetryReading object with current system state
         """
         start_time = time.time()
-        
+
         try:
             # Get basic system metrics
             cpu_percent = psutil.cpu_percent(interval=None)
             memory = psutil.virtual_memory()
             temperature = self.get_temperature()
-            
+
             # Get sensor readings in a thread so blocking I2C calls don't stall the event loop
-            try:
-                loop = asyncio.get_event_loop()
-                battery_voltage, sabertooth_temp, current_tracks, current_total = \
-                    await loop.run_in_executor(None, self.get_real_adc_readings)
-            except Exception:
-                battery_voltage, sabertooth_temp, current_tracks, current_total = self.get_simulated_readings()
+            loop = asyncio.get_event_loop()
+            battery_voltage, sabertooth_temp, current_tracks, current_total = \
+                await loop.run_in_executor(None, self._get_sensor_readings_with_fallback)
 
             # Create telemetry reading
             reading = TelemetryReading(
@@ -516,7 +609,7 @@ class SafeTelemetrySystem:
                 gpio_available=GPIO_AVAILABLE,
                 adc_available=self.adc_available
             )
-            
+
             # Add hardware status if provided
             if hardware_status:
                 reading.maestro1_connected = hardware_status.get("maestro1_connected", False)
@@ -528,7 +621,7 @@ class SafeTelemetrySystem:
                 reading.stream_fps = hardware_status.get("stream_fps", 0.0)
                 reading.stream_resolution = hardware_status.get("stream_resolution", "0x0")
                 reading.stream_latency = hardware_status.get("stream_latency", 0.0)
-            
+
             # Store reading
             self.reading_history.append(reading)
             self.last_reading = reading
@@ -542,12 +635,12 @@ class SafeTelemetrySystem:
 
             # Check alerts
             await self.check_alerts(reading)
-            
+
             # Update statistics
             self.stats["readings_taken"] += 1
             self.stats["system_uptime"] = time.time() - self.start_time
             update_time = time.time() - start_time
-            
+
             # Calculate rolling average update time
             if self.stats["average_update_time"] == 0:
                 self.stats["average_update_time"] = update_time
@@ -555,47 +648,69 @@ class SafeTelemetrySystem:
                 self.stats["average_update_time"] = (
                     self.stats["average_update_time"] * 0.9 + update_time * 0.1
                 )
-            
+
             logger.debug(f"Telemetry updated in {update_time*1000:.1f}ms")
-            
+
             return reading
-            
+
         except Exception as e:
             logger.error(f"Telemetry update failed: {e}")
-            # Return safe default reading
+            self.stats["update_errors"] += 1
+
+            # Carry forward the previous reading rather than fabricating
+            # values - a fake voltage could trigger a false battery alarm
+            # or mask a real one
+            if self.last_reading is not None:
+                return self.last_reading
+
+            # No prior data at all: return zeros, which the frontend treats
+            # as missing via its own carry-forward handling
             return TelemetryReading(
                 timestamp=time.time(),
                 cpu_percent=0.0,
                 memory_percent=0.0,
-                temperature=45.0,
-                battery_voltage=12.0,
+                temperature=0.0,
+                battery_voltage=0.0,
                 sabertooth_temp=0.0,
                 current_tracks=0.0,
                 current_total=0.0,
             )
-    
+
+    def _get_parsed_condition(self, alert_name: str, alert: TelemetryAlert):
+        """Get (and cache) the parsed condition tuple for an alert."""
+        parsed = self._parsed_conditions.get(alert_name)
+        if parsed is None:
+            parsed = parse_alert_condition(alert.condition)
+            self._parsed_conditions[alert_name] = parsed
+        return parsed
+
     async def check_alerts(self, reading: TelemetryReading):
         """Check all alerts against current reading"""
         current_time = time.time()
-        
+
+        # Metric values available to alert conditions
+        context = {
+            "battery_voltage": reading.battery_voltage,
+            "temperature": reading.temperature,
+            "cpu_percent": reading.cpu_percent,
+            "memory_percent": reading.memory_percent,
+            "adc_errors": self.stats["adc_errors"],
+            "temperature_errors": self.stats["temperature_errors"],
+            "sabertooth_temp": reading.sabertooth_temp,
+            "current_tracks": reading.current_tracks,
+            "current_total": reading.current_total,
+        }
+
         for alert_name, alert in self.alerts.items():
             try:
-                # Build evaluation context with proper naming
-                context = {
-                    "battery_voltage": reading.battery_voltage,
-                    "temperature": reading.temperature,
-                    "cpu_percent": reading.cpu_percent,
-                    "memory_percent": reading.memory_percent,
-                    "adc_errors": self.stats["adc_errors"],
-                    "temperature_errors": self.stats["temperature_errors"],
-                    "sabertooth_temp": reading.sabertooth_temp,
-                    "current_tracks": reading.current_tracks,
-                    "current_total": reading.current_total,
-                }
-                
-                # Evaluate alert condition
-                condition_met = eval(alert.condition, {"__builtins__": {}}, context)
-                
+                metric, op_func, threshold = self._get_parsed_condition(alert_name, alert)
+
+                metric_value = context.get(metric)
+                if metric_value is None:
+                    continue
+
+                condition_met = op_func(metric_value, threshold)
+
                 if condition_met and not alert.triggered:
                     # Alert triggered for first time
                     alert.triggered = True
@@ -603,35 +718,37 @@ class SafeTelemetrySystem:
                     alert.last_triggered = current_time
                     alert.trigger_count += 1
                     self.stats["alerts_triggered"] += 1
-                    
+
                     logger.warning(f"ALERT TRIGGERED: {alert.name} - {alert.message}")
-                    
+
                     # Notify callback with safe error handling
                     if self.alert_callback:
                         try:
                             await self.alert_callback(alert, reading)
                         except Exception as e:
                             logger.error(f"Alert callback error: {e}")
-                
+
                 elif condition_met and alert.triggered:
                     # Alert still active
                     alert.last_triggered = current_time
-                
+
                 elif not condition_met and alert.triggered:
                     # Alert resolved
                     alert.triggered = False
                     logger.info(f"ALERT RESOLVED: {alert.name}")
-                    
+
+            except ValueError as e:
+                logger.error(f"Invalid condition for alert '{alert_name}': {e}")
             except Exception as e:
                 logger.error(f"Error checking alert '{alert_name}': {e}")
-    
+
     def get_readings_history(self, count: Optional[int] = None) -> List[TelemetryReading]:
         """
         Get historical telemetry readings
-        
+
         Args:
             count: Number of recent readings to return (None for all)
-            
+
         Returns:
             List of TelemetryReading objects
         """
@@ -639,24 +756,24 @@ class SafeTelemetrySystem:
             return list(self.reading_history)
         else:
             return list(self.reading_history)[-count:]
-    
+
     def get_average_reading(self, minutes: int = 5) -> Optional[TelemetryReading]:
         """
         Get average reading over specified time period
-        
+
         Args:
             minutes: Number of minutes to average over
-            
+
         Returns:
             TelemetryReading with averaged values or None
         """
         try:
             cutoff_time = time.time() - (minutes * 60)
             recent_readings = [r for r in self.reading_history if r.timestamp >= cutoff_time]
-            
+
             if not recent_readings:
                 return None
-            
+
             # Calculate averages
             avg_reading = TelemetryReading(
                 timestamp=time.time(),
@@ -670,22 +787,22 @@ class SafeTelemetrySystem:
                 gpio_available=GPIO_AVAILABLE,
                 adc_available=self.adc_available
             )
-            
+
             return avg_reading
-            
+
         except Exception as e:
             logger.error(f"Failed to calculate average reading: {e}")
             return None
-    
+
     def get_telemetry_summary(self) -> Dict[str, Any]:
         """Get comprehensive telemetry system summary"""
         try:
             current_reading = self.last_reading
             avg_5min = self.get_average_reading(5)
-            
+
             # Active alerts
             active_alerts = [alert for alert in self.alerts.values() if alert.triggered]
-            
+
             summary = {
                 "system_status": {
                     "uptime_seconds": self.stats["system_uptime"],
@@ -734,23 +851,23 @@ class SafeTelemetrySystem:
                     "total_triggered": self.stats["alerts_triggered"]
                 }
             }
-            
+
             return summary
-            
+
         except Exception as e:
             logger.error(f"Failed to get telemetry summary: {e}")
             return {"error": str(e)}
-    
+
     def add_custom_alert(self, name: str, condition: str, level: str, message: str) -> bool:
         """
         Add custom alert to the system
-        
+
         Args:
             name: Alert name (unique identifier)
-            condition: Python expression to evaluate (e.g., "battery_voltage < 12.0")
+            condition: Simple comparison (e.g., "battery_voltage < 12.0")
             level: Alert level (INFO, WARNING, CRITICAL)
             message: Human-readable alert message
-            
+
         Returns:
             bool: True if alert added successfully
         """
@@ -758,25 +875,10 @@ class SafeTelemetrySystem:
             # Validate alert level
             if level not in ["INFO", "WARNING", "CRITICAL"]:
                 raise ValueError("Alert level must be INFO, WARNING, or CRITICAL")
-            
-            # Test condition syntax with proper variable names
-            test_context = {
-                "battery_voltage": 12.0,
-                "sabertooth_temp": 35.0,
-                "current_tracks": 5.0,
-                "current_total": 2.0,
-                "temperature": 45.0,
-                "cpu_percent": 50.0,
-                "memory_percent": 60.0,
-                "adc_errors": 0,
-                "temperature_errors": 0
-            }
-            
-            try:
-                eval(condition, {"__builtins__": {}}, test_context)
-            except Exception as e:
-                raise ValueError(f"Invalid condition syntax: {e}")
-            
+
+            # Validate and parse the condition - raises ValueError on bad input
+            parsed = parse_alert_condition(condition)
+
             # Add alert
             self.alerts[name] = TelemetryAlert(
                 name=name,
@@ -784,52 +886,54 @@ class SafeTelemetrySystem:
                 level=level,
                 message=message
             )
-            
+            self._parsed_conditions[name] = parsed
+
             logger.info(f"Added custom alert: {name}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to add custom alert '{name}': {e}")
             return False
-    
+
     def remove_alert(self, name: str) -> bool:
         """Remove alert from the system"""
         try:
             if name in self.alerts:
                 del self.alerts[name]
+                self._parsed_conditions.pop(name, None)
                 logger.info(f"Removed alert: {name}")
                 return True
             else:
                 logger.warning(f"Alert '{name}' not found")
                 return False
-                
+
         except Exception as e:
             logger.error(f"Failed to remove alert '{name}': {e}")
             return False
-    
+
     def export_telemetry_data(self, filename: str, hours: int = 24) -> bool:
         """
         Export telemetry data to CSV file
-        
+
         Args:
             filename: Output filename
             hours: Number of hours of data to export
-            
+
         Returns:
             bool: True if exported successfully
         """
         try:
             import csv
             from datetime import datetime
-            
+
             # Filter readings by time
             cutoff_time = time.time() - (hours * 3600)
             filtered_readings = [r for r in self.reading_history if r.timestamp >= cutoff_time]
-            
+
             if not filtered_readings:
                 logger.warning("No telemetry data to export")
                 return False
-            
+
             with open(filename, 'w', newline='') as csvfile:
                 fieldnames = [
                     'timestamp', 'datetime', 'cpu_percent', 'memory_percent',
@@ -860,37 +964,37 @@ class SafeTelemetrySystem:
                         'audio_system_ready': reading.audio_system_ready,
                         'stream_fps': reading.stream_fps
                     })
-            
+
             logger.info(f"Exported {len(filtered_readings)} telemetry readings to {filename}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to export telemetry data: {e}")
             return False
-    
+
     def get_system_health_score(self) -> Dict[str, Any]:
         """
         Calculate overall system health score
-        
+
         Returns:
             Dictionary with health score and breakdown
         """
         try:
             if not self.last_reading:
                 return {"score": 0, "status": "NO_DATA", "breakdown": {}}
-            
+
             reading = self.last_reading
             scores = {}
-            
+
             # CPU health (0-100, lower is better)
             cpu_score = max(0, 100 - reading.cpu_percent)
             scores["cpu"] = cpu_score
-            
+
             # Memory health (0-100, lower usage is better)
             memory_score = max(0, 100 - reading.memory_percent)
             scores["memory"] = memory_score
-            
-            # Temperature health (optimal around 40-60°C)
+
+            # Temperature health (optimal around 40-60C)
             if reading.temperature <= 60:
                 temp_score = 100
             elif reading.temperature <= 75:
@@ -900,7 +1004,7 @@ class SafeTelemetrySystem:
             else:
                 temp_score = 0  # Critical temperature
             scores["temperature"] = max(0, temp_score)
-            
+
             # Battery health (optimal 12-16V)
             if reading.battery_voltage >= 12.0:
                 battery_score = min(100, reading.battery_voltage * 8.33 - 100)
@@ -909,7 +1013,7 @@ class SafeTelemetrySystem:
             else:
                 battery_score = 0  # Critical voltage
             scores["battery"] = max(0, battery_score)
-            
+
             # Current health (reasonable draw expected)
             if reading.current_tracks <= 30:
                 current_score = 100
@@ -929,12 +1033,12 @@ class SafeTelemetrySystem:
                 hardware_bonus += 5
             if reading.adc_available:
                 hardware_bonus += 5
-            
+
             # Calculate overall score
             base_scores = list(scores.values())
             overall_score = sum(base_scores) / len(base_scores)
             overall_score = min(100, overall_score + (hardware_bonus * 0.5))
-            
+
             # Determine status
             if overall_score >= 85:
                 status = "EXCELLENT"
@@ -946,19 +1050,19 @@ class SafeTelemetrySystem:
                 status = "POOR"
             else:
                 status = "CRITICAL"
-            
+
             # Count active alerts
             active_alerts = sum(1 for alert in self.alerts.values() if alert.triggered)
-            critical_alerts = sum(1 for alert in self.alerts.values() 
+            critical_alerts = sum(1 for alert in self.alerts.values()
                                 if alert.triggered and alert.level == "CRITICAL")
-            
+
             # Penalize for active alerts
             if critical_alerts > 0:
                 overall_score = min(overall_score, 25)  # Cap at POOR if critical alerts
                 status = "CRITICAL"
             elif active_alerts > 0:
                 overall_score *= 0.8  # Reduce score for active alerts
-            
+
             return {
                 "score": round(overall_score, 1),
                 "status": status,
@@ -976,15 +1080,15 @@ class SafeTelemetrySystem:
                 },
                 "timestamp": reading.timestamp
             }
-            
+
         except Exception as e:
             logger.error(f"Failed to calculate health score: {e}")
             return {"score": 0, "status": "ERROR", "error": str(e)}
-    
+
     def register_hardware_status_callback(self, callback: Callable):
         """Register callback for hardware status updates"""
         self.hardware_status_callbacks.append(callback)
-    
+
     async def broadcast_hardware_status(self, status: Dict[str, Any]):
         """Broadcast hardware status to registered callbacks"""
         for callback in self.hardware_status_callbacks:
@@ -992,37 +1096,37 @@ class SafeTelemetrySystem:
                 await callback(status)
             except Exception as e:
                 logger.error(f"Hardware status callback error: {e}")
-    
+
     def calibrate_sensors(self, calibration_data: Dict[str, float]) -> bool:
         """
         Update sensor calibration values
-        
+
         Args:
             calibration_data: Dictionary with calibration constants
-            
+
         Returns:
             bool: True if calibration updated successfully
         """
         try:
             if "voltage_divider_ratio" in calibration_data:
                 self.VOLTAGE_DIVIDER_RATIO = calibration_data["voltage_divider_ratio"]
-            
+
             if "current_sensitivity" in calibration_data:
                 self.CURRENT_SENSITIVITY = calibration_data["current_sensitivity"]
-            
+
             if "zero_current_voltage" in calibration_data:
                 self.ZERO_CURRENT_VOLTAGE = calibration_data["zero_current_voltage"]
-            
+
             if "adc_reference_voltage" in calibration_data:
                 self.ADC_REFERENCE_VOLTAGE = calibration_data["adc_reference_voltage"]
-            
+
             logger.info(f"Updated sensor calibration: {calibration_data}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to calibrate sensors: {e}")
             return False
-    
+
     def get_calibration_info(self) -> Dict[str, float]:
         """Get current sensor calibration values"""
         return {
@@ -1031,27 +1135,28 @@ class SafeTelemetrySystem:
             "zero_current_voltage": self.ZERO_CURRENT_VOLTAGE,
             "adc_reference_voltage": self.ADC_REFERENCE_VOLTAGE
         }
-    
+
     def reset_statistics(self):
         """Reset telemetry statistics"""
         self.stats = {
             "readings_taken": 0,
             "adc_errors": 0,
             "temperature_errors": 0,
+            "update_errors": 0,
             "alerts_triggered": 0,
             "system_uptime": 0.0,
             "average_update_time": 0.0
         }
         logger.info("Telemetry statistics reset")
-    
+
     def cleanup(self):
         """Clean up telemetry system resources"""
         logger.info("Cleaning up telemetry system...")
-        
+
         try:
             # Clear history to free memory
             self.reading_history.clear()
-            
+
             # Reset ADC if available
             if self.ads:
                 self.ads = None
@@ -1059,9 +1164,9 @@ class SafeTelemetrySystem:
                 self.sabertooth_temp_channel = None
                 self.tracks_channel = None
                 self.total_channel = None
-            
+
             logger.info("Telemetry system cleanup complete")
-            
+
         except Exception as e:
             logger.error(f"Telemetry cleanup error: {e}")
 
@@ -1080,7 +1185,3 @@ def create_legacy_compatible_reading(reading: TelemetryReading) -> TelemetryRead
     setattr(reading, 'current_tracks', reading.current_tracks)
     setattr(reading, 'current_total', reading.current_total)
     return reading
-
-
-# Export the main telemetry system class
-__all__ = ['SafeTelemetrySystem', 'TelemetryReading', 'TelemetryAlert']

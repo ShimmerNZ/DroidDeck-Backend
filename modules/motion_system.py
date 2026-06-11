@@ -901,7 +901,6 @@ class MotionMixer:
         self._load_servo_config(servo_config_path)
 
         # Stats
-        self._init_time = time.monotonic()
         self.stats = {
             "ticks": 0,
             "active_layers": 0,
@@ -972,8 +971,8 @@ class MotionMixer:
                 self.joystick_layer.set_immediate(1.0)
             if self.joystick_layer.state != LayerState.ACTIVE:
                 self.joystick_layer.state = LayerState.ACTIVE
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Joystick layer guard error: {e}")
         self.joystick_layer.set_channel(channel_id, position)
     async def play_scene(self, scene_name: str, scene_data: Dict[str, Any],
                          crossfade_in: float = 0.3, crossfade_out: float = 0.5,

@@ -4,7 +4,8 @@ After=network-online.target time-sync.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=wall-e
 WorkingDirectory=/home/wall-e/DroidDeck-Backend
 ExecStart=/home/wall-e/DroidDeck-Backend/venv/bin/DroidDeck.sh
@@ -13,6 +14,14 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=droiddeck-backend
+
+# Watchdog: backend must ping WATCHDOG=1 within this window or systemd
+# restarts the service. Pings come from modules/sd_watchdog.py running
+# on the asyncio event loop, so a wedged loop triggers a restart.
+WatchdogSec=30
+
+# Allow time for hardware init before READY=1 arrives
+TimeoutStartSec=90
 
 # Allow time for hardware to settle after boot
 ExecStartPre=/bin/sleep 3

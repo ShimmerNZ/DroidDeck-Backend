@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Droid Deck Web Server Module - Fixed Socket.IO Connection Handler
+Droid Deck Web Server Module
+Flask + Socket.IO web interface bridging browser clients to the backend.
 """
 
 import os
@@ -12,6 +14,8 @@ from pathlib import Path
 from flask import Flask, send_from_directory, jsonify, request
 from flask_socketio import SocketIO, emit
 from typing import Dict, Any, Optional
+
+from modules.file_utils import save_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -120,11 +124,9 @@ class DroidDeckWebServer:
         }
     
     def save_web_config(self):
-        """Save web configuration"""
+        """Save web configuration atomically"""
         try:
-            with open(self.webconfig_file, 'w') as f:
-                json.dump(self.web_config, f, indent=2)
-            return True
+            return save_json_atomic(self.webconfig_file, self.web_config)
         except Exception as e:
             logger.error(f"Failed to save web config: {e}")
             return False
@@ -136,6 +138,12 @@ class DroidDeckWebServer:
                          template_folder=str(self.templates_dir))
         self.app.config['SECRET_KEY'] = 'droid-deck-web-secret'
         
+        # async_mode is deliberately 'threading': eventlet/gevent require
+        # stdlib monkey-patching, which cannot coexist with the asyncio
+        # backend (websockets server, mixer, scene engine) in this same
+        # process. Threading mode on Werkzeug is acceptable for the handful
+        # of LAN clients this serves; running a real WSGI server would
+        # require splitting the web UI into its own process.
         self.socketio = SocketIO(
             self.app, 
             cors_allowed_origins="*", 
@@ -243,10 +251,8 @@ class DroidDeckWebServer:
         try:
             config = data.get('config', {})
             config_path = Path("configs/controller_config.json")
-            config_path.parent.mkdir(parents=True, exist_ok=True)
 
-            with open(config_path, 'w') as f:
-                json.dump(config, f, indent=2)
+            save_json_atomic(config_path, config)
 
             logger.info(f"Controller config saved: {len(config)} mappings")
 
@@ -876,8 +882,9 @@ class DroidDeckWebServer:
             else:
                 self.socketio.emit('backend_message', {
                     'type': 'scene_list',
-                    'scenes': self._get_default_scenes(),
-                    'count': len(self._get_default_scenes()),
+                    'scenes': [],
+                    'count': 0,
+                    'error': 'Scene engine not available',
                     'timestamp': time.time()
                 }, room=client_sid)
                 
@@ -1333,35 +1340,6 @@ class DroidDeckWebServer:
         except Exception as e:
             logger.error(f"Error getting servo positions: {e}")
     
-    def _get_default_scenes(self):
-        """Return default scenes for testing"""
-        return [
-            {
-                'label': 'Happy',
-                'emoji': '😊',
-                'duration': 2.0,
-                'categories': ['Happy'],
-                'audio_enabled': False,
-                'servo_count': 3
-            },
-            {
-                'label': 'Sad',
-                'emoji': '😢',
-                'duration': 3.0,
-                'categories': ['Sad'],
-                'audio_enabled': False,
-                'servo_count': 2
-            },
-            {
-                'label': 'Excited',
-                'emoji': '🤩',
-                'duration': 4.0,
-                'categories': ['Happy', 'Energetic'],
-                'audio_enabled': True,
-                'servo_count': 5
-            }
-        ]
-    
     def start(self):
         """Start the web server in a separate thread"""
         if self.running:
@@ -1391,11 +1369,43 @@ class DroidDeckWebServer:
         
         self.server_thread = threading.Thread(target=run_server, daemon=True)
         self.server_thread.start()
-        
+
+        # Periodic prune of dead Socket.IO session ids. Disconnect events
+        # remove entries in the normal case; this catches any that slip
+        # through so web_clients cannot grow over a long session.
+        self._prune_thread = threading.Thread(target=self._prune_loop, daemon=True)
+        self._prune_thread.start()
+
         logger.info("Droid Deck Web Server started")
-    
+
+    def _prune_loop(self):
+        """Background prune of web_clients entries no longer connected"""
+        while self.running:
+            time.sleep(60.0)
+            if not self.running:
+                break
+            try:
+                if not self.socketio or not self.web_clients:
+                    continue
+                manager = self.socketio.server.manager
+                stale = {
+                    sid for sid in list(self.web_clients)
+                    if not manager.is_connected(sid, '/')
+                }
+                if stale:
+                    self.web_clients -= stale
+                    logger.info(f"Pruned {len(stale)} stale web client(s)")
+            except Exception as e:
+                logger.debug(f"Web client prune error: {e}")
+
     def stop(self):
-        """Stop the web server"""
+        """Stop the web server.
+
+        The Flask-SocketIO server runs in a daemon thread, so it dies with
+        the process; setting running=False stops the prune loop and marks
+        the server stopped for status queries. socketio.stop() can only be
+        called from within a request context, so it is not used here.
+        """
         self.running = False
         logger.info("Droid Deck Web Server stopped")
         

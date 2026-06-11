@@ -194,7 +194,7 @@ class OptimizedBluetoothController:
                 if self.joystick:
                     try:
                         self.joystick.quit()
-                    except:
+                    except Exception:
                         pass
                     self.joystick = None
                 
@@ -258,7 +258,7 @@ class OptimizedBluetoothController:
                 if self.joystick:
                     try:
                         self.joystick.quit()
-                    except:
+                    except Exception:
                         pass
                     self.joystick = None
                     
@@ -365,7 +365,7 @@ class OptimizedBluetoothController:
                         if self.joystick:
                             try:
                                 self.joystick.quit()
-                            except:
+                            except Exception:
                                 pass
                             self.joystick = None
                         continue
@@ -430,7 +430,7 @@ class OptimizedBluetoothController:
                 if self.joystick:
                     try:
                         self.joystick.quit()
-                    except:
+                    except Exception:
                         pass
                     self.joystick = None
                 await asyncio.sleep(0.1)
@@ -459,7 +459,7 @@ class OptimizedBluetoothController:
                         if self.joystick:
                             try:
                                 self.joystick.quit()
-                            except:
+                            except Exception:
                                 pass
                             self.joystick = None
                         continue
@@ -476,7 +476,7 @@ class OptimizedBluetoothController:
                         self.current_state.connected = False
                         self.joystick = None
                         continue
-                except:
+                except Exception:
                     self.logger.warning("Joystick became invalid")
                     self.current_state.connected = False
                     self.joystick = None
@@ -519,7 +519,7 @@ class OptimizedBluetoothController:
                         if self.joystick:
                             try:
                                 self.joystick.quit()
-                            except:
+                            except Exception:
                                 pass
                             self.joystick = None
                         break  # Exit the axis loop
@@ -532,7 +532,7 @@ class OptimizedBluetoothController:
                 if self.joystick:
                     try:
                         self.joystick.quit()
-                    except:
+                    except Exception:
                         pass
                     self.joystick = None
                 await asyncio.sleep(1.0)
@@ -722,14 +722,14 @@ class OptimizedBluetoothController:
         if self.joystick:
             try:
                 self.joystick.quit()
-            except:
+            except Exception:
                 pass
             
         if PYGAME_AVAILABLE:
             try:
                 pygame.joystick.quit()
                 pygame.quit()
-            except:
+            except Exception:
                 pass
         
         logger.info("Optimized controller service stopped")

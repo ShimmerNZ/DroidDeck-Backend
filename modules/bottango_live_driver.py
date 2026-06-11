@@ -309,8 +309,8 @@ class BottangoLiveDriver:
             try:
                 writer.close()
                 await writer.wait_closed()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Writer close error during session teardown: {e}")
 
     # ------------------------------------------------------------------
     # Protocol dispatch

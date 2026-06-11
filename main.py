@@ -54,6 +54,9 @@ from modules.bluetooth_controller import BackendBluetoothController
 from modules.controller_input_handler import ControllerInputProcessor
 from modules.motion_system import MotionMixer, BlendMode
 from modules.gpio_compat import setup_output_pin, set_output, is_gpio_available
+from modules.sd_watchdog import SystemdWatchdog
+from modules.health_supervisor import HealthSupervisor
+from modules.file_utils import save_json_atomic
 from web.webapp import DroidDeckWebServer
 
 logger = logging.getLogger(__name__)
@@ -210,6 +213,10 @@ class WALLEBackend:
         
         self.bottango_watcher = None
         self.bottango_live_driver = None
+
+        # systemd watchdog and internal health supervisor - started in start()
+        self.sd_watchdog = SystemdWatchdog()
+        self.health_supervisor = None
 
         logger.info(f"WALL-E Backend initialized (websockets {WEBSOCKETS_VERSION})")
     
@@ -669,13 +676,18 @@ class WALLEBackend:
             config_updates = data.get("config", {})
             logger.info(f"Updating camera config: {list(config_updates.keys())}")
             
-            # Send settings to camera proxy first
+            # Send settings to camera proxy - the blocking HTTP call runs in
+            # the executor so the event loop (and servo motion) never stalls
             import requests
+            loop = asyncio.get_running_loop()
             try:
-                response = requests.post(
-                    f"{self.camera_proxy_url}/camera/settings",
-                    json=config_updates,
-                    timeout=5
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: requests.post(
+                        f"{self.camera_proxy_url}/camera/settings",
+                        json=config_updates,
+                        timeout=5
+                    )
                 )
                 
                 if response.status_code == 200:
@@ -694,10 +706,10 @@ class WALLEBackend:
                     # Update local configuration
                     current_config.update(updated_settings)
                     
-                    # Save updated configuration
-                    camera_config_path.parent.mkdir(exist_ok=True)
-                    with open(camera_config_path, "w") as f:
-                        json.dump(current_config, f, indent=2)
+                    # Save updated configuration atomically
+                    await loop.run_in_executor(
+                        None, save_json_atomic, camera_config_path, current_config
+                    )
                     
                     # Broadcast successful update to all clients
                     await self.broadcast_message({
@@ -724,9 +736,9 @@ class WALLEBackend:
                         current_config = {}
                     
                     current_config.update(updated_settings)
-                    camera_config_path.parent.mkdir(exist_ok=True)
-                    with open(camera_config_path, "w") as f:
-                        json.dump(current_config, f, indent=2)
+                    await loop.run_in_executor(
+                        None, save_json_atomic, camera_config_path, current_config
+                    )
                     
                     # Broadcast partial success
                     await self.broadcast_message({
@@ -1062,7 +1074,26 @@ class WALLEBackend:
             if self.bottango_live_driver:
                 bottango_host = self.config.get("bottango", {}).get("host", "10.1.1.5")
                 logger.info(f"Bottango live driver: connecting to {bottango_host}:{BOTTANGO_LIVE_PORT}")
-            
+
+            # Signal systemd that startup is complete, then start the
+            # periodic WATCHDOG=1 pings on this event loop. If the loop
+            # ever wedges, the pings stop and systemd restarts the service.
+            # No-op when not running under systemd (development runs).
+            self.sd_watchdog.notify_ready()
+            asyncio.create_task(self.sd_watchdog.run())
+
+            # Internal health supervisor - watches mixer ticks, serial bus,
+            # telemetry freshness and the Bottango thread, broadcasting
+            # system_health to all clients every 10 seconds
+            self.health_supervisor = HealthSupervisor(
+                motion_mixer=self.motion_mixer,
+                serial_manager=self.hardware_service.shared_managers.get("maestro_port"),
+                telemetry_system=self.telemetry_system,
+                bottango_driver=self.bottango_live_driver,
+                broadcast=self.broadcast_message,
+            )
+            asyncio.create_task(self.health_supervisor.run())
+
             # Keep running until shutdown - this will exit when running becomes False
             while self.running:
                 await asyncio.sleep(0.1)  # Reduced from 1 second for faster shutdown response
@@ -1083,8 +1114,14 @@ class WALLEBackend:
             
         self._shutdown_started = True
         logger.info("Shutting down WALL-E Backend...")
-        
+
+        # Tell systemd we are stopping so the watchdog doesn't fire mid-shutdown
+        self.sd_watchdog.notify_stopping()
+
         self.running = False
+
+        if self.health_supervisor:
+            self.health_supervisor.stop()
 
         if hasattr(self, 'web_server'):
             self.web_server.stop()
@@ -1196,6 +1233,7 @@ class WALLEBackend:
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
         finally:
+            self.sd_watchdog.stop()
             # Ensure we exit cleanly
             logger.info("Final cleanup complete")
 
@@ -1421,8 +1459,15 @@ def setup_logging():
     # Configure root logger
     formatter = ModuleFormatter()
     
-    # File handler with UTF-8 encoding
-    file_handler = logging.FileHandler(logs_dir / "walle_backend.log", encoding='utf-8')
+    # Rotating file handler with UTF-8 encoding - 5MB per file, 5 backups,
+    # so a full event day of logs survives without filling the SD card
+    from logging.handlers import RotatingFileHandler
+    file_handler = RotatingFileHandler(
+        logs_dir / "walle_backend.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+        encoding='utf-8'
+    )
     file_handler.setFormatter(formatter)
     
     # Console handler with UTF-8 encoding
@@ -1639,13 +1684,12 @@ async def update_scene_registry(scenes_dir: Path):
             except Exception as e:
                 logger.warning(f"Failed to process scene {scene_file.name}: {e}")
         
-        # Save registry to configs folder
+        # Save registry to configs folder atomically
         configs_dir = Path("configs")
         configs_dir.mkdir(parents=True, exist_ok=True)
         registry_path = configs_dir / 'scenes_registry.json'
         
-        with open(registry_path, 'w') as f:
-            json.dump(registry, f, indent=2)
+        save_json_atomic(registry_path, registry)
         
         logger.info(f"📋 Scene registry updated: {len(registry)} scene(s) -> {registry_path}")
         
