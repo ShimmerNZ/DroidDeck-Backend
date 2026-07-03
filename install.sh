@@ -273,7 +273,8 @@ setup_esp32_hotspot() {
         print_status "Forcing wlan0 home connection to 2.4GHz band..."
         sudo nmcli connection modify preconfigured \
             802-11-wireless.band bg \
-            802-11-wireless.channel 1
+            802-11-wireless.channel 1 \
+            connection.autoconnect-retries 0
         sudo nmcli connection down preconfigured 2>/dev/null || true
         sudo nmcli connection up preconfigured || print_warning "Could not reconnect wlan0 - may need manual reconnect"
     else

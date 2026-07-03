@@ -1509,10 +1509,33 @@ class WebSocketMessageHandler:
                 if mixer:
                     s = mixer.stats
                     ds = mixer.dispatcher.stats
-                    uptime = max(time.monotonic() - getattr(mixer, '_init_time', time.monotonic()), 1.0)
-                    status['serial_fps'] = round(s['ticks'] / uptime, 1)
+
+                    # Windowed live rate: ticks and commands since the previous
+                    # status poll, divided by the wall-clock gap between polls.
+                    # The previous code divided lifetime ticks by a 1.0s fallback
+                    # (mixer has no _init_time), so it reported the cumulative
+                    # tick count as if it were a frequency.
+                    now = time.monotonic()
+                    ticks_now = s['ticks']
+                    cmds_now = ds['commands_sent']
+                    prev_time = getattr(self, '_mixer_stat_time', None)
+                    prev_ticks = getattr(self, '_mixer_stat_ticks', None)
+                    prev_cmds = getattr(self, '_mixer_stat_cmds', None)
+
+                    if prev_time is not None and now > prev_time:
+                        window = now - prev_time
+                        status['serial_fps'] = round((ticks_now - prev_ticks) / window, 1)
+                        status['serial_cmds_sec'] = round((cmds_now - prev_cmds) / window, 1)
+                    else:
+                        # First poll - no window yet
+                        status['serial_fps'] = 0.0
+                        status['serial_cmds_sec'] = 0.0
+
+                    self._mixer_stat_time = now
+                    self._mixer_stat_ticks = ticks_now
+                    self._mixer_stat_cmds = cmds_now
+
                     status['blend_ms'] = round(s.get('blend_time_ms', 0.0), 2)
-                    status['serial_cmds_sec'] = round(ds['commands_sent'] / uptime, 1)
                     status['active_channels'] = s['active_channels']
             except Exception:
                 pass
