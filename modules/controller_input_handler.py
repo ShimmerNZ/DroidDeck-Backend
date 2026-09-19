@@ -23,7 +23,7 @@ class BehaviorType(Enum):
     DIFFERENTIAL_TRACKS = "differential_tracks"
     SCENE_TRIGGER = "scene_trigger"
     TOGGLE_SCENES = "toggle_scenes"
-    NEMA_STEPPER = "nema_stepper" 
+    NEMA_STEPPER = "nema_stepper"
     SYSTEM_CONTROL = "system_control"
     IMU_TILT = "imu_tilt"
     IMU_TOGGLE = "imu_toggle"
@@ -38,17 +38,17 @@ class ControllerInput:
 
 class BehaviorHandler:
     """Base class for controller behavior handlers"""
-    
+
     def __init__(self, hardware_service=None, scene_engine=None, logger=None, processor=None):
         self.hardware_service = hardware_service
         self.scene_engine = scene_engine
         self.logger = logger or logging.getLogger(__name__)
         self.processor = processor  # Reference to ControllerInputProcessor for home positions
-    
+
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         """Process controller input with behavior-specific logic"""
         raise NotImplementedError
-    
+
     def _clamp_pulse(self, value: float, center_offset: int = 0, servo_channel: str = None) -> int:
         """
         Map joystick value (-1.0 to +1.0) to servo pulse range.
@@ -95,30 +95,30 @@ class DirectServoHandler(BehaviorHandler):
         super().__init__(*args, **kwargs)
         self.last_sent_values = {}  # Track last sent values per channel
         self.change_threshold = 0.02  # 2% change required to send update
-    
+
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
             servo_channel = config.get('target')
             invert = config.get('invert', False)
             sensitivity = config.get('sensitivity', 1.0)
-            
+
             # Always get fresh center_offset from processor's servo_home_positions
             # This allows dynamic updates without reloading controller config
             if self.processor:
                 center_offset = self.processor.get_center_offset_for_servo(servo_channel)
             else:
                 center_offset = config.get('center_offset', 0)
-            
+
             if not servo_channel or not self.hardware_service:
                 return False
-            
+
             channel_locked = self.scene_engine and self.scene_engine.is_channel_locked(servo_channel)
             has_mixer = ((self.processor and hasattr(self.processor, 'motion_mixer') and self.processor.motion_mixer) or (self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer))
 
             # If channel is locked and no mixer available, skip entirely
             if channel_locked and not has_mixer:
                 return True
-            
+
             # Apply inversion and sensitivity
             value = -controller_input.raw_value if invert else controller_input.raw_value
             value *= sensitivity
@@ -150,13 +150,13 @@ class DirectServoHandler(BehaviorHandler):
                 )
             else:
                 return True
-            
+
             if success:
                 self.logger.debug(f"Direct servo {servo_channel}: {pulse} (raw: {controller_input.raw_value:.2f}, offset: {center_offset})")
-                
+
                 self.last_sent_values[servo_channel] = value
             return success
-            
+
         except Exception as e:
             self.logger.error(f"Error in direct servo handler: {e}")
             return False
@@ -164,12 +164,12 @@ class DirectServoHandler(BehaviorHandler):
 class MultiServoHandler(BehaviorHandler):
     """
     Handle multiple servo control
-    
+
     Supports two modes:
     - 'axis': Single axis controls multiple servos (original behavior for joysticks)
     - 'button': Button hold controls multiple servos to fixed positions (new for button control)
     """
-    
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.last_sent_values = {}
@@ -184,59 +184,59 @@ class MultiServoHandler(BehaviorHandler):
         except Exception as e:
             if self.logger:
                 self.logger.warning(f"Could not load servo_config.json: {e}")
-    
+
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
             servos = config.get('servos', [])
             trigger_mode = config.get('trigger_mode', 'axis')  # 'axis' or 'button'
-            
+
             if not servos or not self.hardware_service:
                 return False
-            
+
             # BUTTON MODE: Held = configured positions, Released = home positions
             if trigger_mode == 'button':
                 return await self._process_button_mode(controller_input, servos)
-            
+
             # AXIS MODE: Original behavior for joystick/axis control
             else:
                 return await self._process_axis_mode(controller_input, servos)
-            
+
         except Exception as e:
             self.logger.error(f"Error in multi servo handler: {e}")
             return False
-    
+
     async def _process_button_mode(self, controller_input: ControllerInput, servos: List[Dict]) -> bool:
         """Handle button mode - fixed positions when held"""
         threshold = 0.5
         control_name = controller_input.control_name
         is_pressed = abs(controller_input.raw_value) > threshold
-        
+
         # Initialize button state
         if control_name not in self.button_states:
             self.button_states[control_name] = {
                 'was_pressed': False,
                 'last_pulses': {}
             }
-        
+
         state = self.button_states[control_name]
-        
+
         # Check if state changed
         if is_pressed == state['was_pressed']:
             return False  # No change
-        
+
         state['was_pressed'] = is_pressed
         success_count = 0
-        
+
         # Send commands to all servos
         for servo_info in servos:
             channel = servo_info.get('channel')
             if not channel:
                 continue
-            
+
             # Get servo-specific settings
             servo_cfg = self.servo_config.get(channel, {})
             home_position = servo_cfg.get('home', 1500)
-            
+
             # Button pressed: use configured position (or min_pulse if not specified)
             # Button released: use home position
             if is_pressed:
@@ -244,7 +244,7 @@ class MultiServoHandler(BehaviorHandler):
                 target_pulse = servo_info.get('min_pulse', servo_info.get('max_pulse', 1500))
             else:
                 target_pulse = home_position
-            
+
             # Only send if changed
             if state['last_pulses'].get(channel) != target_pulse:
                 # Route through motion mixer if available
@@ -255,26 +255,26 @@ class MultiServoHandler(BehaviorHandler):
                     success = await self.hardware_service.set_servo_position(
                         channel, target_pulse, "realtime"
                     )
-                
+
                 if success:
                     state['last_pulses'][channel] = target_pulse
                     self.logger.debug(f"Multi servo button {channel}: {target_pulse} ({'pressed' if is_pressed else 'released'})")
                     success_count += 1
-        
+
         return success_count > 0
-    
+
     async def _process_axis_mode(self, controller_input: ControllerInput, servos: List[Dict]) -> bool:
         """Handle axis mode - original continuous control"""
         success_count = 0
-        
+
         # Process each servo in the list
         for servo_info in servos:
             channel = servo_info.get('channel')
             invert = servo_info.get('invert', False)
-            
+
             if not channel:
                 continue
-            
+
             # Get servo-specific min/max from servo config or override
             if 'min_pulse' in servo_info and 'max_pulse' in servo_info:
                 # Use explicit min/max from config
@@ -285,14 +285,14 @@ class MultiServoHandler(BehaviorHandler):
                 servo_cfg = self.servo_config.get(channel, {})
                 min_pulse = servo_cfg.get('min', 992)
                 max_pulse = servo_cfg.get('max', 2000)
-            
+
             # Calculate center and range
             center = (min_pulse + max_pulse) // 2
             pulse_range = (max_pulse - min_pulse) // 2
-            
+
             # Apply invert and calculate pulse
             value = -controller_input.raw_value if invert else controller_input.raw_value
-            
+
             pulse = center + int(value * pulse_range)
             pulse = max(min_pulse, min(max_pulse, pulse))
 
@@ -312,27 +312,27 @@ class MultiServoHandler(BehaviorHandler):
                 success = await self.hardware_service.set_servo_position(
                     channel, pulse, "realtime"
                 )
-            
+
             if success:
                 self.logger.debug(f"Multi servo {channel}: {pulse} (raw: {controller_input.raw_value:.2f}, inverted: {invert})")
                 self.last_sent_values[channel] = value
                 success_count += 1
-        
+
         return success_count > 0
 
 class ToggleServoHandler(BehaviorHandler):
     """
     Handle toggle servo control - button press alternates between two positions
-    
+
     Supports two modes:
     - 'toggle': Press toggles between position_1 and position_2 (original behavior)
     - 'hold': Held = position_2, Released = position_1 (new behavior for continuous control)
     """
-    
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.toggle_states = {}  # Track current state for each control
-    
+
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
             servo_channel = config.get('target')
@@ -341,28 +341,28 @@ class ToggleServoHandler(BehaviorHandler):
             trigger_timing = config.get('trigger_timing', 'on_press')
             trigger_mode = config.get('trigger_mode', 'toggle')  # 'toggle' or 'hold'
             threshold = 0.5
-            
+
             if not servo_channel or not self.hardware_service:
                 return False
-            
+
             # Initialize state for this control+servo combination
             # Use unique key for each servo to avoid shared state issues when multiple servos on same button
             state_key = f"{controller_input.control_name}:{servo_channel}"
-            
+
             if state_key not in self.toggle_states:
                 self.toggle_states[state_key] = {
                     'current_position': 1,  # Start at position 1
                     'was_pressed': False,
                     'last_pulse_sent': None  # Track last pulse to avoid redundant commands
                 }
-            
+
             state = self.toggle_states[state_key]
             is_pressed = abs(controller_input.raw_value) > threshold
-            
+
             # HOLD MODE: Button held = position_2, Released = position_1
             if trigger_mode == 'hold':
                 target_pulse = position_2 if is_pressed else position_1
-                
+
                 # Only send command if position changed
                 if target_pulse != state['last_pulse_sent']:
                     # Route through motion mixer if available
@@ -373,14 +373,14 @@ class ToggleServoHandler(BehaviorHandler):
                         success = await self.hardware_service.set_servo_position(
                             servo_channel, target_pulse, "realtime"
                         )
-                    
+
                     if success:
                         state['last_pulse_sent'] = target_pulse
                         self.logger.debug(f"Hold servo {servo_channel}: {target_pulse} ({'held' if is_pressed else 'released'})")
                         return True
-                
+
                 return False
-            
+
             # TOGGLE MODE: Original behavior - press toggles between positions
             else:
                 # Handle trigger timing
@@ -393,9 +393,9 @@ class ToggleServoHandler(BehaviorHandler):
                     # Trigger on button release (falling edge)
                     if not is_pressed and state['was_pressed']:
                         should_trigger = True
-                
+
                 state['was_pressed'] = is_pressed
-                
+
                 if should_trigger:
                     # Toggle between positions
                     if state['current_position'] == 1:
@@ -404,7 +404,7 @@ class ToggleServoHandler(BehaviorHandler):
                     else:
                         pulse = position_2
                         state['current_position'] = 1
-                    
+
                     # Route through motion mixer if available
                     if self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer:
                         self._set_mixer_target(servo_channel, float(pulse))
@@ -413,27 +413,27 @@ class ToggleServoHandler(BehaviorHandler):
                         success = await self.hardware_service.set_servo_position(
                             servo_channel, pulse, "realtime"
                         )
-                    
+
                     if success:
                         state['last_pulse_sent'] = pulse
                         self.logger.debug(f"Toggle servo {servo_channel}: {pulse} (position {3 - state['current_position']})")
-                    
+
                     return success
-                
+
                 return False
-            
+
         except Exception as e:
             self.logger.error(f"Error in toggle servo handler: {e}")
             return False
 
 class JoystickPairHandler(BehaviorHandler):
     """Handle joystick pair control - both X and Y axes to separate servos"""
-    
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.last_x_value = 0.0
         self.last_y_value = 0.0
-    
+
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
             x_servo = config.get('x_servo')
@@ -441,7 +441,7 @@ class JoystickPairHandler(BehaviorHandler):
             invert_x = config.get('invert_x', False)
             invert_y = config.get('invert_y', False)
             sensitivity = config.get('sensitivity', 1.0)
-            
+
             # Always get fresh center offsets from processor's servo_home_positions
             # This allows dynamic updates without reloading controller config
             if self.processor:
@@ -450,13 +450,13 @@ class JoystickPairHandler(BehaviorHandler):
             else:
                 x_center_offset = config.get('x_center_offset', 0)
                 y_center_offset = config.get('y_center_offset', 0)
-            
+
             if not x_servo or not y_servo or not self.hardware_service:
                 return False
-            
+
             has_mixer = ((self.processor and hasattr(self.processor, 'motion_mixer') and self.processor.motion_mixer) or (self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer))
             success = False
-            
+
             # Handle X axis
             if controller_input.control_name.endswith('_x'):
                 x_locked = self.scene_engine and self.scene_engine.is_channel_locked(x_servo)
@@ -468,7 +468,7 @@ class JoystickPairHandler(BehaviorHandler):
                 value = -controller_input.raw_value if invert_x else controller_input.raw_value
                 value *= sensitivity
                 pulse = self._clamp_pulse(value, x_center_offset, x_servo)
-                
+
                 if has_mixer:
                     # Always update the joystick layer so the mixer can additive-blend it with scene output
                     self._set_mixer_target(x_servo, float(pulse))
@@ -482,11 +482,11 @@ class JoystickPairHandler(BehaviorHandler):
                     success = await self.hardware_service.set_servo_position(
                         x_servo, pulse, "realtime"
                     )
-                
+
                 if success:
                     self.last_x_value = controller_input.raw_value
                     self.logger.debug(f"Joystick X {x_servo}: {pulse} (offset: {x_center_offset})")
-            
+
             # Handle Y axis
             elif controller_input.control_name.endswith('_y'):
                 y_locked = self.scene_engine and self.scene_engine.is_channel_locked(y_servo)
@@ -498,7 +498,7 @@ class JoystickPairHandler(BehaviorHandler):
                 value = -controller_input.raw_value if invert_y else controller_input.raw_value
                 value *= sensitivity
                 pulse = self._clamp_pulse(value, y_center_offset, y_servo)
-                
+
                 if has_mixer:
                     # Always update the joystick layer so the mixer can additive-blend it with scene output
                     self._set_mixer_target(y_servo, float(pulse))
@@ -512,20 +512,20 @@ class JoystickPairHandler(BehaviorHandler):
                     success = await self.hardware_service.set_servo_position(
                         y_servo, pulse, "realtime"
                     )
-                
+
                 if success:
                     self.last_y_value = controller_input.raw_value
                     self.logger.debug(f"Joystick Y {y_servo}: {pulse} (offset: {y_center_offset})")
-            
+
             return success
-            
+
         except Exception as e:
             self.logger.error(f"Error in joystick pair handler: {e}")
             return False
 
 class SystemControlHandler(BehaviorHandler):
     """Handle system control commands - route to frontend for processing"""
-    
+
     def __init__(self, hardware_service=None, scene_engine=None, logger=None, backend_ref=None):
         super().__init__(hardware_service, scene_engine, logger)
         self.backend = backend_ref  # Reference to backend for message broadcasting
@@ -537,42 +537,42 @@ class SystemControlHandler(BehaviorHandler):
             action = config.get('system_action')
             trigger_timing = config.get('trigger_timing', 'on_press')
             threshold = 0.5
-            
+
             if not action:
                 self.logger.warning("System control config missing 'system_action'")
                 return False
-            
+
             # Check if this is a button press (for on_press timing)
             if trigger_timing == 'on_press' and controller_input.raw_value > threshold:
                 # Debounce navigation commands
                 current_time = time.time()
                 if current_time - self.last_navigation_time < self.navigation_cooldown:
                     return True  # Debounced, but no error
-                
+
                 self.last_navigation_time = current_time
-                
+
                 # Route system control to frontend via WebSocket
                 await self._route_to_frontend(controller_input.control_name, action, config)
-                
+
                 self.logger.info(f"System control routed to frontend: {action}")
                 return True
-                
+
             return False  # No error, just not triggered
-            
+
         except Exception as e:
             self.logger.error(f"Error in system control handler: {e}")
             return False
-            
+
     async def _route_to_frontend(self, control_name: str, action: str, config: Dict[str, Any]):
         """Route system control command to frontend via WebSocket"""
         try:
             if not self.backend:
                 self.logger.error("No backend reference for system control routing")
                 return
-            
+
             # Navigation actions use "navigation" message type for home_screen
             navigation_actions = ['up', 'down', 'left', 'right', 'select', 'exit']
-            
+
             if action in navigation_actions:
                 # Send as navigation message for home_screen
                 message = {
@@ -593,16 +593,16 @@ class SystemControlHandler(BehaviorHandler):
                     "source": "controller_backend"
                 }
                 self.logger.info(f"System control '{action}' routed to frontend")
-            
+
             # Broadcast to all connected frontend clients
             await self.backend.broadcast_message(message)
-            
+
         except Exception as e:
             self.logger.error(f"Failed to route to frontend: {e}")
 
 class DifferentialTracksHandler(BehaviorHandler):
     """Handle differential tracks control - tank steering"""
-    
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.last_forward = 0.0
@@ -610,17 +610,17 @@ class DifferentialTracksHandler(BehaviorHandler):
         self.last_sent_left = None
         self.last_sent_right = None
         self.change_threshold = 0.02
-    
+
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
             left_servo = config.get('left_servo')
             right_servo = config.get('right_servo')
             turn_sensitivity = config.get('turn_sensitivity', 1.0)
             forward_sensitivity = config.get('forward_sensitivity', 1.0)
-            
+
             if not left_servo or not right_servo or not self.hardware_service:
                 return False
-            
+
             # Determine if this is forward/backward or turn input
             if controller_input.control_name.endswith('_y'):
                 self.last_forward = controller_input.raw_value * forward_sensitivity
@@ -629,24 +629,33 @@ class DifferentialTracksHandler(BehaviorHandler):
             else:
                 # For non-axis inputs, treat as forward/backward
                 self.last_forward = controller_input.raw_value * forward_sensitivity
-            
+
             # Calculate differential steering
             left_speed, right_speed = self._calculate_differential_steering(
                 self.last_turn, self.last_forward
             )
-            
-            if (self.last_sent_left is not None and 
-                self.last_sent_right is not None and
-                abs(left_speed - self.last_sent_left) < self.change_threshold and
-                abs(right_speed - self.last_sent_right) < self.change_threshold):
-                return True  
-        
+
+            has_mixer = ((self.processor and hasattr(self.processor, 'motion_mixer') and self.processor.motion_mixer) or (self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer))
+
+            # Change threshold only applies to direct hardware commands. When
+            # routing through the mixer the tracks must always be re-sent on
+            # every poll, even with an unchanged value - the mixer's staleness
+            # watchdog uses that steady stream to know the input source is
+            # still alive, and a held stick that stops resending looks
+            # identical to a disconnected controller (see motion_system.py).
+            if not has_mixer:
+                if (self.last_sent_left is not None and
+                    self.last_sent_right is not None and
+                    abs(left_speed - self.last_sent_left) < self.change_threshold and
+                    abs(right_speed - self.last_sent_right) < self.change_threshold):
+                    return True
+
             # Convert to servo pulses
             left_pulse = self._clamp_pulse(left_speed)
             right_pulse = self._clamp_pulse(right_speed)
-            
+
             # Send commands to both servos via motion mixer or direct fallback
-            if self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer:
+            if has_mixer:
                 self._set_mixer_target(left_servo, float(left_pulse))
                 self._set_mixer_target(right_servo, float(right_pulse))
                 left_success = True
@@ -658,18 +667,18 @@ class DifferentialTracksHandler(BehaviorHandler):
                 right_success = await self.hardware_service.set_servo_position(
                     right_servo, right_pulse, "realtime"
                 )
-            
+
             if left_success and right_success:
                 self.last_sent_left = left_speed
                 self.last_sent_right = right_speed
                 self.logger.debug(f"Differential tracks L:{left_pulse} R:{right_pulse}")
-            
+
             return left_success and right_success
-            
+
         except Exception as e:
             self.logger.error(f"Error in differential tracks handler: {e}")
             return False
-    
+
     def _calculate_differential_steering(self, turn_input: float, forward_input: float) -> tuple:
         """Calculate left and right track speeds for tank steering"""
         # Mix forward and turn inputs
@@ -683,105 +692,105 @@ class DifferentialTracksHandler(BehaviorHandler):
         else:  # Straight movement
             left_speed = forward_input
             right_speed = forward_input
-        
+
         # Clamp to valid range
         left_speed = max(-1.0, min(1.0, left_speed))
         right_speed = max(-1.0, min(1.0, right_speed))
-        
+
         return left_speed, right_speed
 
 class SceneTriggerHandler(BehaviorHandler):
     """Handle scene trigger behavior"""
-    
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.last_states = {}  # Track button states for edge detection
-    
+
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
             scene_name = config.get('scene')
             trigger_timing = config.get('trigger_timing', 'on_press')
             threshold = config.get('threshold', 0.5)
-            
+
             if not scene_name or not self.scene_engine:
                 return False
-            
+
             # Get previous state
             control_key = controller_input.control_name
             was_pressed = self.last_states.get(control_key, False)
             is_pressed = controller_input.raw_value > threshold
-            
+
             # Update state
             self.last_states[control_key] = is_pressed
-            
+
             should_trigger = False
-            
+
             if trigger_timing == 'on_press':
                 should_trigger = is_pressed and not was_pressed
             elif trigger_timing == 'on_release':
                 should_trigger = not is_pressed and was_pressed
             elif trigger_timing == 'continuous':
                 should_trigger = is_pressed
-            
+
             if should_trigger:
                 # Run scene in background to avoid blocking controller input processing
                 asyncio.create_task(self.scene_engine.play_scene(scene_name))
                 self.logger.info(f"Scene triggered (non-blocking): {scene_name}")
                 return True
-            
+
             return True  # No error, just no trigger
-            
+
         except Exception as e:
             self.logger.error(f"Error in scene trigger handler: {e}")
             return False
 
 class ToggleScenesHandler(BehaviorHandler):
     """Handle toggling between two scenes"""
-    
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.current_scene = {}  # Track current scene per control
         self.last_states = {}  # Track button states
-    
+
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
             scene_1 = config.get('scene_1')
             scene_2 = config.get('scene_2')
             trigger_timing = config.get('trigger_timing', 'on_press')
             threshold = config.get('threshold', 0.5)
-            
+
             if not scene_1 or not scene_2 or not self.scene_engine:
                 return False
-            
+
             control_key = controller_input.control_name
-            
+
             # Get previous state
             was_pressed = self.last_states.get(control_key, False)
             is_pressed = controller_input.raw_value > threshold
-            
+
             # Update state
             self.last_states[control_key] = is_pressed
-            
+
             should_trigger = False
-            
+
             if trigger_timing == 'on_press':
                 should_trigger = is_pressed and not was_pressed
             elif trigger_timing == 'on_release':
                 should_trigger = not is_pressed and was_pressed
-            
+
             if should_trigger:
                 # Toggle between scenes
                 current = self.current_scene.get(control_key, 0)
                 scene_to_trigger = scene_1 if current == 0 else scene_2
                 self.current_scene[control_key] = 1 - current
-                
+
                 # Run scene in background to avoid blocking controller input processing
                 asyncio.create_task(self.scene_engine.play_scene(scene_to_trigger))
                 self.logger.info(f"Toggle scene triggered (non-blocking): {scene_to_trigger}")
                 return True
-            
+
             return True  # No error, just no trigger
-            
+
         except Exception as e:
             self.logger.error(f"Error in toggle scenes handler: {e}")
             return False
@@ -819,6 +828,11 @@ class ImuTiltHandler(BehaviorHandler):
             if not servos or not self.hardware_service:
                 return False
 
+            has_mixer = (
+                (self.processor and hasattr(self.processor, 'motion_mixer') and self.processor.motion_mixer)
+                or (self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer)
+            )
+
             success_count = 0
             for servo_info in servos:
                 channel = servo_info.get('channel')
@@ -836,23 +850,32 @@ class ImuTiltHandler(BehaviorHandler):
                     max_pulse  = servo_cfg.get('max', 2000)
                     home_pulse = servo_cfg.get('home', (min_pulse + max_pulse) // 2)
 
+                center      = (min_pulse + max_pulse) // 2
+                pulse_range = (max_pulse - min_pulse) // 2
+
                 value = -controller_input.raw_value if invert else controller_input.raw_value
 
-                last = self.last_sent_values.get(channel)
-                if last is not None and abs(value - last) < self.change_threshold:
-                    continue
+                if not has_mixer:
+                    last = self.last_sent_values.get(channel)
+                    if last is not None and abs(value - last) < self.change_threshold:
+                        continue
 
-                # Piecewise linear: home maps to imu=0, each side scales to its own range.
+                # Piecewise linear: home maps to imu=0, each side has its own range.
                 # Positive tilt → home→max, negative tilt → home→min.
+                # This correctly handles asymmetric home positions without linear distortion.
                 if value >= 0:
                     pulse = home_pulse + int(value * (max_pulse - home_pulse))
                 else:
                     pulse = home_pulse + int(value * (home_pulse - min_pulse))
                 pulse = max(min_pulse, min(max_pulse, pulse))
 
-                success = await self.hardware_service.set_servo_position(
-                    channel, pulse, "realtime"
-                )
+                if has_mixer:
+                    self._set_mixer_target(channel, float(pulse))
+                    success = True
+                else:
+                    success = await self.hardware_service.set_servo_position(
+                        channel, pulse, "realtime"
+                    )
 
                 if success:
                     self.last_sent_values[channel] = value
@@ -879,25 +902,25 @@ class ImuToggleHandler(BehaviorHandler):
 
 class ControllerInputProcessor:
     """Main controller input processing system"""
-        
+
     def __init__(self, hardware_service=None, scene_engine=None, stepper_controller=None, backend_ref=None, motion_mixer=None):
         self.hardware_service = hardware_service
         self.scene_engine = scene_engine
         self.stepper_controller = stepper_controller
         self.backend = backend_ref
         self.motion_mixer = motion_mixer
-        
+
         # Load servo config for min/max/home lookups
         self.servo_config = self._load_servo_config()
-        
+
         # Load servo home positions to use as center offsets
         self.servo_home_positions = self._load_servo_home_positions()
-        
+
         # Create persistent joystick layer in motion mixer if available
         self.joystick_layer = None
         if self.motion_mixer:
             self._init_joystick_layer()
-        
+
         # Initialize behavior handlers (pass self so they can access get_center_offset_for_servo)
         self.handlers = {
             BehaviorType.DIRECT_SERVO: DirectServoHandler(hardware_service, scene_engine, logger, self),
@@ -912,11 +935,11 @@ class ControllerInputProcessor:
             BehaviorType.IMU_TILT: ImuTiltHandler(hardware_service, scene_engine, logger, self),
             BehaviorType.IMU_TOGGLE: ImuToggleHandler(hardware_service, scene_engine, logger),
         }
-        
+
         # Configuration storage
         self.controller_mappings = {}
         self.active_inputs = {}  # Track active controller inputs
-        
+
         # Controller type specific configurations
         self.controller_mappings_by_type = {
             "xbox": {
@@ -929,13 +952,13 @@ class ControllerInputProcessor:
                     "forward_sensitivity": 1.0
                 },
                 "left_stick_y": {
-                    "behavior": "differential_tracks", 
+                    "behavior": "differential_tracks",
                     "left_servo": "m2_ch0",
                     "right_servo": "m2_ch1",
                     "turn_sensitivity": 0.8,
                     "forward_sensitivity": 1.0
                 },
-                
+
                 # Head control - right stick
                 "right_stick_x": {
                     "behavior": "direct_servo",
@@ -945,11 +968,11 @@ class ControllerInputProcessor:
                 },
                 "right_stick_y": {
                     "behavior": "direct_servo",
-                    "target": "m1_ch1", 
+                    "target": "m1_ch1",
                     "invert": False,
                     "sensitivity": 0.8
                 },
-                
+
                 # Arm controls - shoulders
                 "shoulder_left": {
                     "behavior": "direct_servo",
@@ -963,7 +986,7 @@ class ControllerInputProcessor:
                     "invert": False,
                     "sensitivity": 0.7
                 },
-                
+
                 # Trigger controls
                 "trigger_left": {
                     "behavior": "direct_servo",
@@ -977,7 +1000,7 @@ class ControllerInputProcessor:
                     "invert": False,
                     "sensitivity": 0.6
                 },
-                
+
                 # Scene triggers - face buttons (note: button_b also used for navigation)
                 "button_a": {
                     "behavior": "scene_trigger",
@@ -994,7 +1017,7 @@ class ControllerInputProcessor:
                     "scene": "Excited",
                     "trigger_timing": "on_press"
                 },
-                
+
                 # Back/Start buttons for additional scenes
                 "button_back": {
                     "behavior": "scene_trigger",
@@ -1007,7 +1030,7 @@ class ControllerInputProcessor:
                     "trigger_timing": "on_press"
                 }
             },
-            
+
             "steam_deck": {
                 # Same as Xbox for now - Steam Deck uses similar layout
                 "left_stick_x": {
@@ -1019,7 +1042,7 @@ class ControllerInputProcessor:
                 },
                 "left_stick_y": {
                     "behavior": "differential_tracks",
-                    "left_servo": "m2_ch0", 
+                    "left_servo": "m2_ch0",
                     "right_servo": "m2_ch1",
                     "turn_sensitivity": 0.8,
                     "forward_sensitivity": 1.0
@@ -1050,7 +1073,7 @@ class ControllerInputProcessor:
                 },
                 "button_x": {
                     "behavior": "scene_trigger",
-                    "scene": "Curious", 
+                    "scene": "Curious",
                     "trigger_timing": "on_press"
                 },
                 "button_y": {
@@ -1090,7 +1113,7 @@ class ControllerInputProcessor:
                 }
             }
         }
-        
+
         # Statistics
         self.stats = {
             "inputs_processed": 0,
@@ -1098,36 +1121,36 @@ class ControllerInputProcessor:
             "failed_commands": 0,
             "last_input_time": 0.0
         }
-        
+
         logger.info("Controller input processor initialized")
-    
+
     def _load_servo_home_positions(self) -> Dict[str, int]:
         """Load servo home positions from controller_config.json center_offset values"""
         try:
             import json
             from pathlib import Path
-            
+
             # Load from the backend's controller_config.json
             config_path = "configs/controller_config.json"
-            
+
             if not Path(config_path).exists():
                 logger.warning(f"Controller config not found at: {config_path}")
                 return {}
-            
+
             with open(config_path, 'r') as f:
                 controller_config = json.load(f)
-            
+
             logger.debug(f"Loaded controller config from: {config_path}")
-            
+
             # Extract home positions from center_offset values
             home_positions = {}
             for control_name, control_config_data in controller_config.items():
                 # Handle both list (multiple mappings) and dict (single mapping) formats
                 configs_to_check = control_config_data if isinstance(control_config_data, list) else [control_config_data]
-                
+
                 for control_config in configs_to_check:
                     behavior = control_config.get('behavior')
-                    
+
                     # Handle direct_servo behavior
                     if behavior == 'direct_servo':
                         target = control_config.get('target')
@@ -1137,35 +1160,35 @@ class ControllerInputProcessor:
                             home_pos = 1500 + center_offset
                             home_positions[target] = home_pos
                             logger.debug(f"  {target}: offset={center_offset}, home={home_pos}")
-                    
+
                     # Handle joystick_pair behavior
                     elif behavior == 'joystick_pair':
                         x_servo = control_config.get('x_servo')
                         y_servo = control_config.get('y_servo')
                         x_center_offset = control_config.get('x_center_offset', 0)
                         y_center_offset = control_config.get('y_center_offset', 0)
-                        
+
                         if x_servo and x_center_offset != 0:
                             home_pos = 1500 + x_center_offset
                             home_positions[x_servo] = home_pos
                             logger.debug(f"  {x_servo}: offset={x_center_offset}, home={home_pos}")
-                        
+
                         if y_servo and y_center_offset != 0:
                             home_pos = 1500 + y_center_offset
                             home_positions[y_servo] = home_pos
                             logger.debug(f"  {y_servo}: offset={y_center_offset}, home={home_pos}")
-            
+
             if home_positions:
                 logger.info(f"Loaded {len(home_positions)} servo home positions from controller config")
             else:
                 logger.info("No home positions with offsets found in controller config")
-            
+
             return home_positions
-            
+
         except Exception as e:
             logger.error(f"Failed to load servo home positions: {e}")
             return {}
-    
+
     def get_center_offset_for_servo(self, servo_channel: str) -> int:
         """Get the center offset for a servo based on its home position"""
         if servo_channel in self.servo_home_positions:
@@ -1173,7 +1196,7 @@ class ControllerInputProcessor:
             offset = home - 1500
             return offset
         return 0  # Default: no offset
-    
+
     def _init_joystick_layer(self):
         """Sync with the joystick layer already created by MotionMixer"""
         try:
@@ -1185,14 +1208,14 @@ class ControllerInputProcessor:
             logger.error(f"Failed to sync joystick layer: {e}")
             self.joystick_layer = None
 
-    
+
     def reload_servo_home_positions(self) -> bool:
         """Reload servo home positions from config file (call when config changes)"""
         try:
             old_count = len(self.servo_home_positions)
             self.servo_home_positions = self._load_servo_home_positions()
             new_count = len(self.servo_home_positions)
-            
+
             logger.info(f"Reloaded servo home positions: {old_count} -> {new_count}")
             return True
         except Exception as e:
@@ -1229,32 +1252,32 @@ class ControllerInputProcessor:
         except Exception as e:
             logger.error(f"Failed to reload servo config: {e}")
             return False
-    
+
     def reload_controller_config(self) -> bool:
         """Reload controller configuration from configs/controller_config.json"""
         try:
             import json
             from pathlib import Path
-            
+
             config_path = "configs/controller_config.json"
-            
+
             if not Path(config_path).exists():
                 logger.warning(f"Controller config not found at: {config_path}")
                 return False
-            
+
             with open(config_path, 'r') as f:
                 config_dict = json.load(f)
-            
+
             # Update the controller_mappings
             self.controller_mappings = config_dict.copy()
-            
+
             logger.info(f"Reloaded controller config: {len(self.controller_mappings)} mappings")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to reload controller config: {e}")
             return False
-    
+
     def load_controller_config_by_type(self, controller_type: str) -> bool:
         """Load controller configuration based on detected controller type"""
         try:
@@ -1273,12 +1296,12 @@ class ControllerInputProcessor:
         except Exception as e:
             logger.error(f"Failed to load controller config by type: {e}")
             return False
-    
+
     def load_controller_config(self, config_dict: Dict[str, Any]) -> bool:
         """Load controller configuration mappings from dict - handles both single and multiple mappings"""
         try:
             self.controller_mappings = config_dict.copy()
-            
+
             # Validate configurations - handle both list and dict formats
             valid_configs = 0
             total_mappings = 0
@@ -1299,32 +1322,32 @@ class ControllerInputProcessor:
                         valid_configs += 1
                     else:
                         logger.warning(f"Invalid controller config for {control_name}: {config}")
-            
+
             logger.info(f"Loaded {valid_configs}/{total_mappings} valid controller mappings from {len(self.controller_mappings)} buttons")
             return valid_configs > 0
-            
+
         except Exception as e:
             logger.error(f"Failed to load controller config: {e}")
             return False
-        
+
     def _validate_config(self, control_name: str, config: Dict[str, Any]) -> bool:
             """Validate a controller configuration"""
             try:
                 behavior = config.get('behavior')
                 if not behavior:
                     return False
-                
+
                 # Check if behavior type is supported
                 behavior_type = None
                 for bt in BehaviorType:
                     if bt.value == behavior:
                         behavior_type = bt
                         break
-                
+
                 if not behavior_type:
                     logger.warning(f"Unsupported behavior type: {behavior}")
                     return False
-                
+
                 # Behavior-specific validation
                 if behavior_type == BehaviorType.DIRECT_SERVO:
                     return 'target' in config
@@ -1340,9 +1363,9 @@ class ControllerInputProcessor:
                     return 'nema_behavior' in config
                 elif behavior_type == BehaviorType.SYSTEM_CONTROL:
                     return 'system_action' in config
-                
+
                 return True
-                
+
             except Exception as e:
                 logger.error(f"Config validation error: {e}")
                 return False
@@ -1353,7 +1376,7 @@ class ControllerInputProcessor:
             # Update statistics
             self.stats["inputs_processed"] += 1
             self.stats["last_input_time"] = time.time()
-            
+
             # Create controller input object
             controller_input = ControllerInput(
                 control_name=control_name,
@@ -1361,21 +1384,21 @@ class ControllerInputProcessor:
                 timestamp=time.time(),
                 input_type=input_type
             )
-            
+
             # Track active inputs
             self.active_inputs[control_name] = controller_input
-            
+
             # Find matching configuration(s) - now supports multiple mappings per button
             configs = self.controller_mappings.get(control_name)
             if not configs:
                 # Check for partial matches (e.g., left_stick_x matches left_stick config)
                 base_control = control_name.replace('_x', '').replace('_y', '')
                 configs = self.controller_mappings.get(base_control)
-                
+
                 if not configs:
                     logger.debug(f"No controller mapping found for {control_name}")
                     return False
-            
+
             # Ensure configs is a list (supports both old single config and new multi-config)
             if isinstance(configs, dict):
                 # Old format: single config as dict
@@ -1383,46 +1406,46 @@ class ControllerInputProcessor:
             elif not isinstance(configs, list):
                 logger.error(f"Invalid config format for {control_name}")
                 return False
-            
+
             # Process through all handlers for this button
             any_success = False
             for config in configs:
                 # Get behavior type
                 behavior = config.get('behavior')
                 behavior_type = None
-                
+
                 for bt in BehaviorType:
                     if bt.value == behavior:
                         behavior_type = bt
                         break
-                
+
                 if not behavior_type:
                     logger.warning(f"Unknown behavior type: {behavior}")
                     continue
-                
+
                 # Process through appropriate handler
                 handler = self.handlers.get(behavior_type)
                 if not handler:
                     logger.error(f"No handler for behavior type: {behavior_type}")
                     continue
-                
+
                 success = await handler.process(controller_input, config)
                 if success:
                     any_success = True
-            
+
             # Update statistics
             if any_success:
                 self.stats["successful_commands"] += 1
             else:
                 self.stats["failed_commands"] += 1
-            
+
             return any_success
-            
+
         except Exception as e:
             logger.error(f"Controller input processing error: {e}")
             self.stats["failed_commands"] += 1
             return False
-    
+
     def get_active_inputs(self) -> Dict[str, ControllerInput]:
         """Get currently active controller inputs"""
         # Clean up old inputs (older than 1 second)
@@ -1431,12 +1454,12 @@ class ControllerInputProcessor:
             name for name, input_obj in self.active_inputs.items()
             if current_time - input_obj.timestamp > 1.0
         ]
-        
+
         for name in expired_inputs:
             del self.active_inputs[name]
-        
+
         return self.active_inputs.copy()
-    
+
     def get_controller_stats(self) -> Dict[str, Any]:
         """Get controller processing statistics"""
         return {
@@ -1451,18 +1474,18 @@ class ControllerInputProcessor:
             "last_input_time": self.stats["last_input_time"],
             "supported_behaviors": [bt.value for bt in BehaviorType]
         }
-    
+
     def get_controller_mappings(self) -> Dict[str, Any]:
         """Get current controller mappings configuration"""
         return self.controller_mappings.copy()
-    
+
     def update_controller_mapping(self, control_name: str, config: Dict[str, Any]) -> bool:
         """Update or add a controller mapping - supports multiple mappings per button"""
         try:
             if self._validate_config(control_name, config):
                 # Check if we already have mapping(s) for this control
                 existing = self.controller_mappings.get(control_name)
-                
+
                 if existing is None:
                     # No existing mapping - create new list with this config
                     self.controller_mappings[control_name] = [config]
@@ -1475,21 +1498,21 @@ class ControllerInputProcessor:
                 else:
                     logger.error(f"Unexpected mapping format for {control_name}")
                     return False
-                
+
                 logger.info(f"Added controller mapping for {control_name} (total: {len(self.controller_mappings[control_name])})")
                 return True
             else:
                 logger.warning(f"Invalid configuration for {control_name}")
                 return False
-                
+
         except Exception as e:
             logger.error(f"Failed to update controller mapping: {e}")
             return False
-    
+
     def remove_controller_mapping(self, control_name: str, config_index: int = None) -> bool:
         """
         Remove a controller mapping
-        
+
         Args:
             control_name: The button/control name
             config_index: Optional index of specific config to remove. If None, removes all.
@@ -1498,20 +1521,20 @@ class ControllerInputProcessor:
             if control_name not in self.controller_mappings:
                 logger.warning(f"No mapping found for {control_name}")
                 return False
-            
+
             mappings = self.controller_mappings[control_name]
-            
+
             # If no index specified, remove all mappings for this control
             if config_index is None:
                 del self.controller_mappings[control_name]
                 logger.info(f"Removed all mappings for {control_name}")
                 return True
-            
+
             # Remove specific mapping by index
             if isinstance(mappings, list):
                 if 0 <= config_index < len(mappings):
                     mappings.pop(config_index)
-                    
+
                     # If list is now empty, remove the key entirely
                     if len(mappings) == 0:
                         del self.controller_mappings[control_name]
@@ -1527,11 +1550,11 @@ class ControllerInputProcessor:
                 del self.controller_mappings[control_name]
                 logger.info(f"Removed mapping for {control_name}")
                 return True
-                
+
         except Exception as e:
             logger.error(f"Failed to remove controller mapping: {e}")
             return False
-    
+
     def cleanup(self):
         """Clean up controller input processor"""
         logger.info("Cleaning up controller input processor...")
@@ -1543,64 +1566,64 @@ ControllerInputHandler = ControllerInputProcessor
 
 class NemaStepperHandler(BehaviorHandler):
     """Handle NEMA stepper control - backend version that controls actual hardware"""
-    
+
     def __init__(self, hardware_service=None, scene_engine=None, logger=None):
         super().__init__(hardware_service, scene_engine, logger)
         self.last_button_states = {}  # Track button press states
         self.toggle_states = {}       # Track toggle positions for each button
-        
+
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
             behavior_type = config.get('nema_behavior', 'toggle_positions')
             trigger_timing = config.get('trigger_timing', 'on_press')
             threshold = 0.5
-            
+
             # Only handle button presses for toggle_positions
             if behavior_type == "toggle_positions":
                 return await self._handle_toggle_positions(controller_input, config, trigger_timing, threshold)
-            
+
             # Add other behaviors later if needed
             self.logger.warning(f"NEMA behavior '{behavior_type}' not implemented yet")
             return False
-            
+
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Error in NEMA stepper handler: {e}")
             return False
-    
-    async def _handle_toggle_positions(self, controller_input: ControllerInput, config: Dict[str, Any], 
+
+    async def _handle_toggle_positions(self, controller_input: ControllerInput, config: Dict[str, Any],
                                      trigger_timing: str, threshold: float) -> bool:
         """Toggle between min and max positions on button press"""
         control_name = controller_input.control_name
         raw_value = controller_input.raw_value
-        
+
         # Track button state for proper press/release detection
         was_pressed = self.last_button_states.get(control_name, False)
         is_pressed = raw_value > threshold
         self.last_button_states[control_name] = is_pressed
-        
+
         # Only trigger on the specified timing
         should_trigger = False
         if trigger_timing == 'on_press':
             should_trigger = is_pressed and not was_pressed
         elif trigger_timing == 'on_release':
             should_trigger = not is_pressed and was_pressed
-        
+
         if should_trigger:
             # Get NEMA config
             min_pos = config.get('min_position', 0.0)
             max_pos = config.get('max_position', 20.0)
             speed = config.get('normal_speed', 1000)
             acceleration = config.get('acceleration', 800)
-            
+
             # Check if we have a stepper service available
             if hasattr(self.hardware_service, 'stepper_controller') and self.hardware_service.stepper_controller:
                 stepper = self.hardware_service.stepper_controller
-                
+
                 try:
                     # Get the current toggle state for this button (default to False = at min)
                     is_at_max = self.toggle_states.get(control_name, False)
-                    
+
                     # Determine target position based on toggle state
                     if is_at_max:
                         target_pos = min_pos
@@ -1610,31 +1633,31 @@ class NemaStepperHandler(BehaviorHandler):
                         target_pos = max_pos
                         new_toggle_state = True
                         self.logger.info(f"Toggling {control_name}: MIN -> MAX ({target_pos}cm)")
-                    
+
                     # Update stepper config with our desired speed/acceleration
                     stepper_config_update = {
                         "normal_speed": speed,
                         "acceleration": acceleration
                     }
                     stepper.update_config(stepper_config_update)
-                    
+
                     # Send move command
                     success = await stepper.move_to_position_cm(target_pos)
-                    
+
                     if success:
                         # Only update toggle state if movement was successful
                         self.toggle_states[control_name] = new_toggle_state
                         self.logger.info(f"NEMA stepper moving to {target_pos}cm (button: {control_name})")
                     else:
                         self.logger.error(f"NEMA stepper move command failed")
-                    
+
                     return success
-                    
+
                 except Exception as e:
                     self.logger.error(f"NEMA stepper control error: {e}")
                     return False
             else:
                 self.logger.warning("No stepper controller available for NEMA control")
                 return False
-        
+
         return True  # No error, just no trigger

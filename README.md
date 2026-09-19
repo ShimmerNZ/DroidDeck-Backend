@@ -1,6 +1,6 @@
 # 🤖 DroidDeck — WALL-E Robot Control System
 
-**Updated: May 2026**
+**Updated: September 2026**
 
 ## 📋 Table of Contents
 
@@ -8,16 +8,17 @@
 2. [Hardware Configuration](#hardware-configuration)
 3. [Power Supply](#power-supply)
 4. [TB6600 Stepper Driver Configuration](#tb6600-stepper-driver-configuration)
-5. [Pololu Maestro Configuration](#pololu-maestro-configuration)
-6. [Software Architecture](#software-architecture)
-7. [Bottango Animation Integration](#bottango-animation-integration)
+5. [Sabertooth 2×60 Motor Driver Configuration](#sabertooth-2x60-motor-driver-configuration)
+6. [Pololu Maestro Configuration](#pololu-maestro-configuration)
+7. [Software Architecture](#software-architecture)
+8. [Bottango Animation Integration](#bottango-animation-integration)
    - [Import Workflow](#import-workflow)
    - [Bottango Live Driver](#bottango-live-driver)
-8. [Configuration Files](#configuration-files)
-9. [Installation & Setup](#installation--setup)
-10. [Bluetooth Controller Setup](#bluetooth-controller-setup)
-11. [API Documentation](#api-documentation)
-12. [Troubleshooting](#troubleshooting)
+9. [Configuration Files](#configuration-files)
+10. [Installation & Setup](#installation--setup)
+11. [Bluetooth Controller Setup](#bluetooth-controller-setup)
+12. [API Documentation](#api-documentation)
+13. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -151,6 +152,25 @@ Position in steps = position_cm × 1000
 
 ---
 
+## Sabertooth 2×60 Motor Driver Configuration
+
+### DIP Switch Settings
+
+The Sabertooth 2×60 is configured for **R/C input mode**, **independent channel control**, and **lithium cutoff** for the 4S LiPo main bus. S1/S2 come from Maestro 1's servo PWM output — not a hobby RC receiver — so auto-calibration and the RC-loss failsafe are disabled in favor of the software-side watchdog (see [System Overview](#system-overview) and the motion mixer's joystick staleness watchdog).
+
+| Switch | Position | Function |
+|---|---|---|
+| 1 | DOWN | R/C input mode (switches 1+2 together select it) |
+| 2 | UP | R/C input mode |
+| 3 | DOWN | Lithium cutoff ON — auto-detects cell count on the 4S LiPo and cuts off at 3.0V/cell to protect the pack |
+| 4 | DOWN | Independent mode — S1/S2 are interpreted independently per channel; left/right track mixing is already computed in software by the motion mixer, so the Sabertooth must not mix again |
+| 5 | UP | Linear response — matches the curve already computed in software, rather than shaping it a second time (DOWN selects exponential response instead) |
+| 6 | DOWN | Microcontroller mode — disables the Sabertooth's own auto-calibration and RC-loss timeout failsafe, since S1/S2 come from a Maestro rather than a hobby receiver and link-loss safety is handled by the Maestro-side watchdog |
+
+Switches 1–2 together select R/C input mode. Switch 5 is a judgment call — UP (linear) is used here so the differential-steering curve computed in software isn't shaped twice; DOWN (exponential) is a reasonable alternative if a softer response near center is preferred.
+
+---
+
 ## Pololu Maestro Configuration
 
 Both Maestro controllers are **24-channel** units sharing a single UART at `/dev/ttyAMA0`.
@@ -204,7 +224,7 @@ DroidDeck Backend (main.py)
 ├── BluetoothController         — PS4/Xbox/generic gamepad input
 ├── TelemetrySystem             — Voltage, current, and temperature monitoring
 ├── CameraProxy                 — ESP32-CAM stream relay for multiple clients
-├── AudioController             — pygame audio playback
+├── AudioController              — pygame audio playback
 ├── DroidDeckWebServer          — Flask/Socket.IO web interface (port 5000)
 └── WebSocket Server            — Primary frontend comms (port 8766)
 ```
@@ -647,3 +667,4 @@ python3 --version  # Should be 3.9.13
 
 ### Future
 - AI behaviour system
+</content>

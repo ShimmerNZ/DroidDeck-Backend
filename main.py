@@ -55,8 +55,6 @@ from modules.controller_input_handler import ControllerInputProcessor
 from modules.motion_system import MotionMixer, BlendMode
 from modules.gpio_compat import setup_output_pin, set_output, is_gpio_available
 from modules.sd_watchdog import SystemdWatchdog
-from modules.health_supervisor import HealthSupervisor
-from modules.file_utils import save_json_atomic
 from web.webapp import DroidDeckWebServer
 
 logger = logging.getLogger(__name__)
@@ -88,7 +86,7 @@ class SystemState(Enum):
 
 class WALLEBackend:
     """Main WALL-E backend system using modular architecture."""
-    
+
     def __init__(self, config_dict: Dict[str, Any]):
         self.config = config_dict
         self.state = SystemState.FAILSAFE
@@ -110,10 +108,7 @@ class WALLEBackend:
 
         self.track_channels = self._identify_track_channels()
         self.track_home_position = 1500
-        self.track_last_command_time = {}
-        self.track_heartbeat_timeout = 2.0
-        self.track_heartbeat_task = None
-        
+
         # Maestro watchdog configuration - Channel-based approach
         self.watchdog_enabled = False
         self.watchdog_task = None
@@ -123,11 +118,11 @@ class WALLEBackend:
         self.watchdog_position_base = 1500  # Base position in microseconds
         self.watchdog_position_toggle = 10  # ±10us variation to ensure position change
         self.watchdog_position_state = False  # Toggle between two positions
-        
+
         # Camera proxy tracking
         self.camera_proxy_pid = None
         self.load_camera_proxy_pid()
-        
+
         # Initialize configuration manager
         self.config_manager = ConfigurationManager(
             config_directory="configs",
@@ -136,7 +131,7 @@ class WALLEBackend:
 
         # Camera proxy configuration
         self.camera_proxy_url = config_dict.get("camera", {}).get("proxy_url", "http://10.1.1.230:8081")
-        
+
         # Initialize modular components
         self.hardware_service = create_hardware_service(config_dict)
         self.hardware_service.set_backend_reference(self)
@@ -148,7 +143,7 @@ class WALLEBackend:
             history_size=1000,
             alert_callback=self.handle_telemetry_alert
         )
-        
+
         # Initialize motion blending system (must be before scene_engine and controller_input_processor)
         self.motion_mixer = MotionMixer(
             hardware_service=self.hardware_service,
@@ -164,13 +159,24 @@ class WALLEBackend:
                 logger.info(f"[INIT] Joystick layer blend_mode forced: {getattr(before, 'value', before)} -> {getattr(after, 'value', after)}")
         except Exception as e:
             logger.warning(f"[INIT] Failed to force joystick layer blend_mode: {e}")
-        
+
+        # Give the mixer's joystick watchdog the track channels to protect —
+        # these map to the Sabertooth's continuous drive, so stale or
+        # failsafe-blocked input has to be actively returned to home rather
+        # than just left in place.
+        try:
+            if hasattr(self, 'motion_mixer') and self.motion_mixer:
+                self.motion_mixer.set_protected_channels(self.track_channels)
+                self.motion_mixer.set_failsafe_state(self.failsafe_active)
+        except Exception as e:
+            logger.warning(f"[INIT] Failed to register protected channels on motion mixer: {e}")
+
         self.scene_engine = SceneEngine(
             hardware_service=self.hardware_service,
             audio_controller=self.audio_controller,
             motion_mixer=self.motion_mixer
         )
-        
+
 
         # Initialize web server (add this after your other component initialization)
         self.web_server = DroidDeckWebServer(
@@ -187,8 +193,8 @@ class WALLEBackend:
             motion_mixer=self.motion_mixer
         )
 
-        
-        
+
+
         # WebSocket message handler
         self.websocket_handler = WebSocketMessageHandler(
             hardware_service=self.hardware_service,
@@ -204,81 +210,108 @@ class WALLEBackend:
         # Initialize bluetooth controller with WebSocket broadcast capability
         self.bluetooth_controller = BackendBluetoothController(
             controller_input_processor=self.controller_input_processor,
-            websocket_broadcast=self.broadcast_websocket_message
+            websocket_broadcast=self.broadcast_websocket_message,
+            on_disconnect=self._on_controller_disconnected
         )
 
         # Setup callbacks and signal handlers
         self.setup_callbacks()
         self.setup_signal_handlers()
-        
+
         self.bottango_watcher = None
         self.bottango_live_driver = None
 
-        # systemd watchdog and internal health supervisor - started in start()
+        # systemd Type=notify integration - sends READY=1 once startup
+        # finishes and periodic WATCHDOG=1 pings while running (see
+        # modules/sd_watchdog.py and droiddeck-backend.service)
         self.sd_watchdog = SystemdWatchdog()
-        self.health_supervisor = None
+        self.sd_watchdog_task = None
 
         logger.info(f"WALL-E Backend initialized (websockets {WEBSOCKETS_VERSION})")
-    
+
     def _identify_track_channels(self) -> set:
         """Identify which channels are tracks from controller config"""
         track_channels = set()
         try:
-            config_path = Path("resources/configs/controller_config.json")
+            config_path = Path("configs/controller_config.json")
             if config_path.exists():
                 with open(config_path, 'r') as f:
                     controller_config = json.load(f)
-                
-                # Find all differential_tracks behaviors
-                for control_name, mapping in controller_config.items():
-                    if mapping.get('behavior') == 'differential_tracks':
-                        left = mapping.get('left_servo')
-                        right = mapping.get('right_servo')
-                        if left:
-                            track_channels.add(left)
-                        if right:
-                            track_channels.add(right)
-                
+
+                # Find all differential_tracks behaviors. Each control maps to a
+                # list of mapping dicts (multi-mapping format); support a bare
+                # dict too for backward compatibility with older config files.
+                for control_name, mappings in controller_config.items():
+                    if isinstance(mappings, dict):
+                        mappings = [mappings]
+                    if not isinstance(mappings, list):
+                        continue
+                    for mapping in mappings:
+                        if not isinstance(mapping, dict):
+                            continue
+                        if mapping.get('behavior') == 'differential_tracks':
+                            left = mapping.get('left_servo')
+                            right = mapping.get('right_servo')
+                            if left:
+                                track_channels.add(left)
+                            if right:
+                                track_channels.add(right)
+
                 logger.info(f"Identified track channels: {track_channels}")
+            else:
+                logger.warning(f"Controller config not found at {config_path}, using fallback track channels")
+                track_channels = {'m2_ch12', 'm2_ch13'}
         except Exception as e:
             logger.error(f"Failed to identify track channels: {e}")
             # Fallback to common defaults
-            track_channels = {'m2_ch0', 'm2_ch1'}
-        
+            track_channels = {'m2_ch12', 'm2_ch13'}
+
         return track_channels
 
     def is_track_channel(self, channel_key: str) -> bool:
         """Check if a channel is a track channel"""
         return channel_key in self.track_channels
-    
+
+    def _on_controller_disconnected(self):
+        """Called by the Bluetooth controller the moment a disconnect is
+        detected, so tracks stop immediately instead of waiting on the last
+        commanded joystick value to go stale."""
+        if hasattr(self, 'motion_mixer') and self.motion_mixer:
+            self.motion_mixer.force_protected_channels_home("controller disconnected")
+
     async def toggle_failsafe(self, enable: bool) -> Dict[str, Any]:
         """Toggle failsafe mode"""
         try:
             if enable:
                 # ENABLE FAILSAFE - Disable all motors
                 logger.warning("🛡️ ENABLING FAILSAFE MODE")
-                
+
                 # Stop watchdog heartbeat (Maestro script will auto-center tracks)
                 self.watchdog_enabled = False
                 if self.watchdog_task and not self.watchdog_task.done():
                     self.watchdog_task.cancel()
                     logger.info("Watchdog heartbeat stopped - Maestro script will timeout and center tracks")
-                
+
                 # Set tracks to home position
                 for channel in self.track_channels:
                     await self.hardware_service.set_servo_position(
                         channel, self.track_home_position, "emergency"
                     )
-                
+
                 # Disable NEMA
                 if self.hardware_service.stepper_controller:
                     self.hardware_service.stepper_controller.disable_motor()
-                
+
                 self.failsafe_active = True
                 self.state = SystemState.FAILSAFE
+
+                # Block the motion mixer's joystick layer from moving tracks
+                # while failsafe is active, and force them to home immediately
+                if hasattr(self, 'motion_mixer') and self.motion_mixer:
+                    self.motion_mixer.set_failsafe_state(True)
                 gpio_ok = set_output(self.failsafe_indicator_pin, False)
                 logger.info(f"Failsafe indicator GPIO {self.failsafe_indicator_pin} → LOW (safe): {'OK' if gpio_ok else 'FAILED'}")
-                
+
                 return {
                     "success": True,
                     "failsafe_active": True,
@@ -289,13 +322,13 @@ class WALLEBackend:
             else:
                 # DISABLE FAILSAFE - Enable motors
                 logger.info("✅ DISABLING FAILSAFE MODE - Enabling motors")
-                
+
                 nema_status = {"enabled": False, "homed": False, "error": None}
-                
+
                 # Check NEMA homing status
                 if self.hardware_service.stepper_controller:
                     stepper = self.hardware_service.stepper_controller
-                    
+
                     if stepper.home_position_found:
                         logger.info("NEMA already homed - enabling motor")
                         stepper.enable_motor()
@@ -315,18 +348,16 @@ class WALLEBackend:
                         except Exception as e:
                             logger.error(f"❌ NEMA homing error: {e}")
                             nema_status["error"] = str(e)
-                
+
                 self.failsafe_active = False
                 self.state = SystemState.NORMAL
                 gpio_ok = set_output(self.failsafe_indicator_pin, True)
                 logger.info(f"Failsafe indicator GPIO {self.failsafe_indicator_pin} → HIGH (active): {'OK' if gpio_ok else 'FAILED'}")
-                
-                # Start track heartbeat monitor
-                if not self.track_heartbeat_task or self.track_heartbeat_task.done():
-                    self.track_heartbeat_task = asyncio.create_task(
-                        self.start_track_heartbeat_monitor()
-                    )
-                
+
+                # Allow the motion mixer's joystick layer to drive tracks again
+                if hasattr(self, 'motion_mixer') and self.motion_mixer:
+                    self.motion_mixer.set_failsafe_state(False)
+
                 # Start channel-based watchdog
                 self.watchdog_enabled = True
                 if not self.watchdog_task or self.watchdog_task.done():
@@ -334,7 +365,7 @@ class WALLEBackend:
                         self.start_maestro_watchdog()
                     )
                     logger.info("✅ Maestro watchdog ENABLED (channel-based approach)")
-                
+
                 return {
                     "success": True,
                     "failsafe_active": False,
@@ -347,33 +378,10 @@ class WALLEBackend:
             logger.error(f"Error toggling failsafe: {e}")
             return {"success": False, "error": str(e), "failsafe_active": self.failsafe_active}
 
-    async def start_track_heartbeat_monitor(self):
-        """Monitor track commands and return to home if no activity"""
-        logger.info("Track heartbeat monitor started")
-        while True:
-            try:
-                await asyncio.sleep(0.5)
-                
-                if self.failsafe_active:
-                    continue
-                
-                current_time = time.time()
-                for channel in self.track_channels:
-                    last_time = self.track_last_command_time.get(channel, 0)
-                    if current_time - last_time > self.track_heartbeat_timeout:
-                        if last_time > 0:
-                            logger.debug(f"Track {channel} timeout - returning to home")
-                        await self.hardware_service.set_servo_position(
-                            channel, self.track_home_position, "realtime"
-                        )
-            except Exception as e:
-                logger.error(f"Track heartbeat monitor error: {e}")
-                await asyncio.sleep(1.0)
-
     async def start_maestro_watchdog(self):
         """
         Channel-based watchdog - sends position commands to ch16
-        
+
         Sends varying positions to ch16 every 500ms. The Maestro script
         monitors ch16 and auto-centers tracks if position hasn't changed
         for 4 consecutive checks (requires ~2.4 seconds of no updates).
@@ -384,11 +392,11 @@ class WALLEBackend:
         logger.info(f"   Monitoring Maestro {self.maestro_for_tracks} for track safety")
         logger.info(f"   Position range: {self.watchdog_position_base - self.watchdog_position_toggle}us <-> {self.watchdog_position_base + self.watchdog_position_toggle}us")
         logger.info(f"   Failsafe requires 4 consecutive failures (~2.4s)")
-        
+
         heartbeat_count = 0
         last_log_time = time.time()
         position_counter = 0  # Counter to create varying positions
-        
+
         while self.watchdog_enabled:
             try:
                 # Create varying positions instead of just two values
@@ -398,15 +406,15 @@ class WALLEBackend:
                 offset = offsets[position_counter % len(offsets)]
                 position = self.watchdog_position_base + offset
                 position_counter += 1
-                
+
                 # Send position command to watchdog channel using normal servo command
                 # This works alongside existing serial traffic without conflicts
                 success = await self.hardware_service.set_servo_position(
-                    self.watchdog_channel, 
-                    position, 
+                    self.watchdog_channel,
+                    position,
                     priority="realtime"
                 )
-                
+
                 if success:
                     heartbeat_count += 1
                     # Log first few heartbeats for debugging
@@ -414,28 +422,28 @@ class WALLEBackend:
                         logger.info(f"   Watchdog beat #{heartbeat_count}: sent position {position}us to {self.watchdog_channel}")
                 else:
                     logger.warning(f"   Watchdog heartbeat failed to send position {position}us")
-                
+
                 # Log status every 30 seconds
                 current_time = time.time()
                 if current_time - last_log_time >= 30.0:
                     logger.debug(f"Watchdog heartbeat: {heartbeat_count} beats in last 30s")
                     heartbeat_count = 0
                     last_log_time = current_time
-                
+
                 # Sleep for watchdog interval (500ms by default)
                 await asyncio.sleep(self.watchdog_interval)
-                
+
             except Exception as e:
                 logger.error(f"Maestro watchdog error: {e}")
                 await asyncio.sleep(0.5)
-        
+
         logger.warning("Maestro watchdog heartbeat stopped")
 
     async def broadcast_websocket_message(self, message: dict):
         """Broadcast message to all connected WebSocket clients"""
         if hasattr(self, 'broadcast_message'):
             await self.broadcast_message(message)
-    
+
     def setup_callbacks(self):
         """Setup callbacks between components"""
         try:
@@ -445,24 +453,24 @@ class WALLEBackend:
                 logger.info("Emergency stop callback registered")
             else:
                 logger.warning("Emergency stop callback method not available")
-                
+
             if hasattr(self.hardware_service, 'register_hardware_status_callback'):
                 self.hardware_service.register_hardware_status_callback(self.handle_hardware_status_change)
                 logger.info("Hardware status callback registered")
             else:
                 logger.warning("Hardware status callback method not available")
 
-            
+
             # Scene engine callbacks
             self.scene_engine.set_scene_started_callback(self.handle_scene_started)
             self.scene_engine.set_scene_completed_callback(self.handle_scene_completed)
             self.scene_engine.set_scene_error_callback(self.handle_scene_error)
-            
+
             # Audio controller callbacks
             self.audio_controller.set_track_started_callback(self.handle_track_started)
             self.audio_controller.set_track_finished_callback(self.handle_track_finished)
             self.audio_controller.set_volume_changed_callback(self.handle_volume_changed)
-            
+
             # Wire stepper position updates to WebSocket broadcast
             if self.hardware_service.stepper_interface:
                 # Wrap async broadcast_message in a sync function for the callback
@@ -480,10 +488,10 @@ class WALLEBackend:
                         logger.error(f"Error scheduling broadcast: {e}")
                 self.hardware_service.stepper_interface.websocket_broadcast_callback = sync_broadcast_wrapper
             logger.info("Component callbacks configured")
-            
+
         except Exception as e:
             logger.error(f"Failed to setup callbacks: {e}")
-    
+
 
     async def start_bluetooth_controller(self):
         """Start the bluetooth controller service"""
@@ -492,7 +500,7 @@ class WALLEBackend:
             if await self.bluetooth_controller.initialize_controller_with_calibration():
                 controller_type = self.bluetooth_controller.controller_type
                 logger.info(f"Detected controller type: {controller_type}")
-                
+
                 # Load appropriate configuration based on controller type
                 success = self.controller_input_processor.load_controller_config_by_type(controller_type)
                 if success:
@@ -503,25 +511,25 @@ class WALLEBackend:
                 logger.warning("No controller detected, will retry periodically")
                 # Still load Xbox config as fallback
                 self.controller_input_processor.load_controller_config_by_type("steam_deck")
-            
+
             # Alternatively, try loading from config file if it exists
             controller_config_path = "configs/controller_config.json"
             if os.path.exists(controller_config_path):
                 try:
                     with open(controller_config_path, 'r') as f:
                         controller_config = json.load(f)
-                        
+
                     # Load config into controller processor
                     if hasattr(self.controller_input_processor, 'load_controller_config'):
                         success = self.controller_input_processor.load_controller_config(controller_config)
                         logger.info(f"Manual controller config loaded: {success}")
                 except Exception as e:
                     logger.warning(f"Failed to load manual controller config: {e}")
-            
+
             # Start bluetooth controller service
             self.bluetooth_controller.start()
             logger.info("Bluetooth controller service started")
-            
+
         except Exception as e:
             logger.error(f"Failed to start bluetooth controller: {e}")
 
@@ -531,7 +539,7 @@ class WALLEBackend:
             if os.path.exists("camera_proxy.pid"):
                 with open("camera_proxy.pid", "r") as f:
                     self.camera_proxy_pid = int(f.read().strip())
-                    
+
                 # Check if process is still running
                 try:
                     os.kill(self.camera_proxy_pid, 0)
@@ -558,17 +566,17 @@ class WALLEBackend:
             except ProcessLookupError:
                 self.camera_proxy_pid = None
                 return {"running": False}
-        
+
         return {"running": False}
 
     async def broadcast_message(self, message: Dict[str, Any]):
         """Broadcast message to all connected clients (both WebSocket and Web Server)"""
-        
+
         # Broadcast to WebSocket clients (PyQt app)
         if self.connected_clients:
             message_json = json.dumps(message)
             disconnected_clients = set()
-            
+
             for websocket in list(self.connected_clients):
                 try:
                     await websocket.send(message_json)
@@ -577,14 +585,14 @@ class WALLEBackend:
                 except Exception as e:
                     logger.debug(f"Error broadcasting to client: {e}")
                     disconnected_clients.add(websocket)
-            
+
             # Remove disconnected clients
             for websocket in disconnected_clients:
                 self.connected_clients.discard(websocket)
-            
+
             if disconnected_clients:
                 logger.debug(f"Removed {len(disconnected_clients)} disconnected clients")
-        
+
         # Also broadcast to web server (Socket.IO clients)
         if hasattr(self, 'web_server') and self.web_server:
             try:
@@ -596,32 +604,32 @@ class WALLEBackend:
         """Setup graceful shutdown signal handlers"""
         def signal_handler(signum, frame):
             logger.info(f"Received signal {signum}, starting graceful shutdown...")
-            
+
             if not self.running:
                 logger.info("Already shutting down, ignoring additional signals")
                 return
-                
+
             # Set running to False immediately to stop main loop
             self.running = False
-            
+
             if self.loop and self.loop.is_running():
                 # Create shutdown task and wait for it
                 shutdown_task = self.loop.create_task(self.shutdown())
-                
+
                 # Don't set a timeout callback that calls os._exit immediately
                 # Instead, let the main loop handle the shutdown gracefully
-                
+
             else:
                 # If no event loop, force exit
                 logger.warning("No event loop running, forcing immediate exit")
                 os._exit(1)
-        
+
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
-    
+
     # ==================== WEBSOCKET CONNECTION HANDLER ====================
-    
+
     async def websocket_connection_handler(self, websocket):
         """Handle WebSocket connections - compatible with websockets 15.0.1"""
         client_info = None
@@ -632,13 +640,13 @@ class WALLEBackend:
                 client_info = f"{remote_addr[0]}:{remote_addr[1]}"
             else:
                 client_info = "unknown_client"
-            
+
             logger.info(f"Client connected: {client_info}")
             self.connected_clients.add(websocket)
-            
+
             # Send initial system status
             await self.send_initial_status(websocket)
-            
+
             # Handle messages from this client
             while True:
                 try:
@@ -650,7 +658,7 @@ class WALLEBackend:
                 except Exception as e:
                     logger.error(f"Error handling message from {client_info}: {e}")
                     break
-                
+
         except Exception as e:
             logger.error(f"WebSocket connection error for {client_info}: {e}")
         finally:
@@ -658,7 +666,7 @@ class WALLEBackend:
             if websocket in self.connected_clients:
                 self.connected_clients.remove(websocket)
                 logger.info(f"Client {client_info} removed from connected clients")
-    
+
     async def send_initial_status(self, websocket):
         """Send initial system status to newly connected client"""
         try:
@@ -675,42 +683,37 @@ class WALLEBackend:
         try:
             config_updates = data.get("config", {})
             logger.info(f"Updating camera config: {list(config_updates.keys())}")
-            
-            # Send settings to camera proxy - the blocking HTTP call runs in
-            # the executor so the event loop (and servo motion) never stalls
+
+            # Send settings to camera proxy first
             import requests
-            loop = asyncio.get_running_loop()
             try:
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: requests.post(
-                        f"{self.camera_proxy_url}/camera/settings",
-                        json=config_updates,
-                        timeout=5
-                    )
+                response = requests.post(
+                    f"{self.camera_proxy_url}/camera/settings",
+                    json=config_updates,
+                    timeout=5
                 )
-                
+
                 if response.status_code == 200:
                     result = response.json()
                     updated_settings = result.get("settings", config_updates)
-                    
+
                     # Save to local config file
                     camera_config_path = Path("configs/camera_config.json")
-                    
+
                     if camera_config_path.exists():
                         with open(camera_config_path, "r") as f:
                             current_config = json.load(f)
                     else:
                         current_config = {}
-                    
+
                     # Update local configuration
                     current_config.update(updated_settings)
-                    
-                    # Save updated configuration atomically
-                    await loop.run_in_executor(
-                        None, save_json_atomic, camera_config_path, current_config
-                    )
-                    
+
+                    # Save updated configuration
+                    camera_config_path.parent.mkdir(exist_ok=True)
+                    with open(camera_config_path, "w") as f:
+                        json.dump(current_config, f, indent=2)
+
                     # Broadcast successful update to all clients
                     await self.broadcast_message({
                         "type": "camera_config_updated",
@@ -719,14 +722,14 @@ class WALLEBackend:
                         "message": result.get("message", "Settings updated successfully"),
                         "timestamp": time.time()
                     })
-                    
+
                     logger.info("Camera configuration updated successfully")
                     return True
-                    
+
                 elif response.status_code == 206:  # Partial success
                     result = response.json()
                     updated_settings = result.get("settings", config_updates)
-                    
+
                     # Still save partial updates to local config
                     camera_config_path = Path("configs/camera_config.json")
                     if camera_config_path.exists():
@@ -734,12 +737,12 @@ class WALLEBackend:
                             current_config = json.load(f)
                     else:
                         current_config = {}
-                    
+
                     current_config.update(updated_settings)
-                    await loop.run_in_executor(
-                        None, save_json_atomic, camera_config_path, current_config
-                    )
-                    
+                    camera_config_path.parent.mkdir(exist_ok=True)
+                    with open(camera_config_path, "w") as f:
+                        json.dump(current_config, f, indent=2)
+
                     # Broadcast partial success
                     await self.broadcast_message({
                         "type": "camera_config_updated",
@@ -749,10 +752,10 @@ class WALLEBackend:
                         "message": result.get("message", "Some settings failed to update"),
                         "timestamp": time.time()
                     })
-                    
+
                     logger.warning(f"Camera config partially updated: {result.get('message')}")
                     return False
-                    
+
                 else:
                     logger.error(f"Camera proxy returned HTTP {response.status_code}")
                     await self.broadcast_message({
@@ -761,7 +764,7 @@ class WALLEBackend:
                         "timestamp": time.time()
                     })
                     return False
-                    
+
             except requests.exceptions.RequestException as e:
                 logger.error(f"Failed to connect to camera proxy: {e}")
                 await self.broadcast_message({
@@ -770,7 +773,7 @@ class WALLEBackend:
                     "timestamp": time.time()
                 })
                 return False
-                
+
         except Exception as e:
             logger.error(f"Failed to update camera config: {e}")
             await self.broadcast_message({
@@ -784,10 +787,10 @@ class WALLEBackend:
     async def telemetry_loop(self):
         """Background telemetry data collection and broadcasting - OPTIMIZED"""
         logger.info("Starting optimized telemetry loop")
-        
+
         # Get telemetry interval from config - now uses longer interval
         telemetry_interval = self.config.get("hardware", {}).get("timing", {}).get("telemetry_interval", 1.0)
-        
+
         logger.info(f"Telemetry running at {telemetry_interval}s intervals (optimized for controller responsiveness)")
 
         async def _do_telemetry_update():
@@ -873,7 +876,7 @@ class WALLEBackend:
                 "uptime": time.time() - self.start_time,
                 "connected_clients": len(self.connected_clients),
             }
-            
+
             # Add controller optimization stats if available
             if hasattr(self.bluetooth_controller, 'dpad_update_rate'):
                 base_stats["controller_optimization"] = {
@@ -888,15 +891,15 @@ class WALLEBackend:
                     "enabled": False,
                     "legacy_mode": True
                 }
-                
+
             return base_stats
-            
+
         except Exception as e:
             logger.error(f"Failed to get performance stats: {e}")
             return {"error": str(e)}
-        
+
     # ==================== SYSTEM STATUS & CONTROL ====================
-    
+
     async def get_system_status(self) -> Dict[str, Any]:
         """Get comprehensive system status"""
         try:
@@ -906,7 +909,7 @@ class WALLEBackend:
             scene_stats = self.scene_engine.get_engine_stats()
             controller_info = self.bluetooth_controller.get_controller_info()
             controller_stats = self.controller_input_processor.get_controller_stats()
-            
+
             return {
                 "system_state": self.state.value,
                 "uptime": time.time() - self.start_time,
@@ -933,21 +936,21 @@ class WALLEBackend:
         except Exception as e:
             logger.error(f"Failed to get system status: {e}")
             return {"error": str(e)}
-    
+
     async def set_failsafe_mode(self, enabled: bool):
         """
         Set system failsafe mode (wrapper for toggle_failsafe)
-        
+
         This method is called by websocket handlers and web interface.
         It delegates to toggle_failsafe which handles watchdog control.
         """
         # Call the comprehensive toggle_failsafe method
         result = await self.toggle_failsafe(enable=enabled)
-        
+
         # Stop current scene if enabling failsafe
         if enabled:
             await self.scene_engine.stop_current_scene()
-        
+
         # Broadcast state change
         await self.broadcast_message({
             "type": "system_state_changed",
@@ -975,7 +978,7 @@ class WALLEBackend:
         self.start_time = time.time()
         self.running = True
         self.loop = asyncio.get_running_loop()
-                
+
         self.web_server.start()
         logger.info("Web interface available at: http://0.0.0.0:5000")
 
@@ -1005,7 +1008,7 @@ class WALLEBackend:
 
         try:
             logger.info("Starting WALL-E Backend System")
-            
+
             # Start motion mixer tick loop (50Hz servo blending)
             self.motion_mixer.start()
 
@@ -1031,16 +1034,16 @@ class WALLEBackend:
                 logger.info("Thread executor pre-warmed")
             except Exception:
                 pass
-            
+
             # Start bluetooth controller
             await self.start_bluetooth_controller()
-            
+
             # Start telemetry loop
             self.telemetry_task = asyncio.create_task(self.telemetry_loop())
-            
+
             # Start WebSocket server with version-appropriate method
             logger.info("Starting WebSocket server on port 8766")
-            
+
             if WEBSOCKETS_MAJOR >= 13:
                 # websockets 13+ (including 15.0.1)
                 self.websocket_server = await websockets.server.serve(
@@ -1061,12 +1064,12 @@ class WALLEBackend:
                     ping_timeout=10,
                     close_timeout=5
                 )
-            
+
             # Get network info for logging
             import socket
             hostname = socket.gethostname()
             ip = socket.gethostbyname(hostname)
-            
+
             logger.info(f"WALL-E Backend ready!")
             logger.info(f"WebSocket: ws://{ip}:8766")
             logger.info(f"Camera: http://{ip}:8081/stream")
@@ -1075,33 +1078,19 @@ class WALLEBackend:
                 bottango_host = self.config.get("bottango", {}).get("host", "10.1.1.5")
                 logger.info(f"Bottango live driver: connecting to {bottango_host}:{BOTTANGO_LIVE_PORT}")
 
-            # Signal systemd that startup is complete, then start the
-            # periodic WATCHDOG=1 pings on this event loop. If the loop
-            # ever wedges, the pings stop and systemd restarts the service.
-            # No-op when not running under systemd (development runs).
+            # Backend is fully up and serving - tell systemd startup is
+            # complete (Type=notify) and start the periodic watchdog pings
             self.sd_watchdog.notify_ready()
-            asyncio.create_task(self.sd_watchdog.run())
-
-            # Internal health supervisor - watches mixer ticks, serial bus,
-            # telemetry freshness and the Bottango thread, broadcasting
-            # system_health to all clients every 10 seconds
-            self.health_supervisor = HealthSupervisor(
-                motion_mixer=self.motion_mixer,
-                serial_manager=self.hardware_service.shared_managers.get("maestro_port"),
-                telemetry_system=self.telemetry_system,
-                bottango_driver=self.bottango_live_driver,
-                broadcast=self.broadcast_message,
-            )
-            asyncio.create_task(self.health_supervisor.run())
+            self.sd_watchdog_task = asyncio.create_task(self.sd_watchdog.run())
 
             # Keep running until shutdown - this will exit when running becomes False
             while self.running:
                 await asyncio.sleep(0.1)  # Reduced from 1 second for faster shutdown response
-                
+
             # When we exit the loop, shutdown was triggered
             logger.info("Main loop exited, running shutdown...")
             await self.shutdown()
-                
+
         except Exception as e:
             logger.error(f"Failed to start backend system: {e}")
             raise
@@ -1111,17 +1100,23 @@ class WALLEBackend:
         if hasattr(self, '_shutdown_started') and self._shutdown_started:
             logger.info("Shutdown already in progress, skipping duplicate call")
             return
-            
+
         self._shutdown_started = True
         logger.info("Shutting down WALL-E Backend...")
 
-        # Tell systemd we are stopping so the watchdog doesn't fire mid-shutdown
-        self.sd_watchdog.notify_stopping()
-
         self.running = False
 
-        if self.health_supervisor:
-            self.health_supervisor.stop()
+        # Tell systemd we're stopping and stop the watchdog pings so it
+        # doesn't race a slow shutdown against the WatchdogSec window
+        if hasattr(self, 'sd_watchdog') and self.sd_watchdog:
+            self.sd_watchdog.notify_stopping()
+            if self.sd_watchdog_task and not self.sd_watchdog_task.done():
+                self.sd_watchdog_task.cancel()
+                try:
+                    await asyncio.wait_for(self.sd_watchdog_task, timeout=1.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+            self.sd_watchdog.stop()
 
         if hasattr(self, 'web_server'):
             self.web_server.stop()
@@ -1131,26 +1126,26 @@ class WALLEBackend:
 
         if hasattr(self, 'bottango_live_driver') and self.bottango_live_driver:
             self.bottango_live_driver.stop()
-        
+
         try:
             # 1. First notify clients BEFORE closing connections
             logger.info("Notifying clients of shutdown...")
             try:
                 await asyncio.wait_for(self.broadcast_message({
-                    "type": "system_shutdown", 
+                    "type": "system_shutdown",
                     "timestamp": time.time()
                 }), timeout=1.0)
             except asyncio.TimeoutError:
                 logger.warning("Timeout notifying clients of shutdown")
-            
+
             # Give clients time to receive the message
             await asyncio.sleep(0.5)
-            
+
             # Stop bluetooth controller
             if hasattr(self, 'bluetooth_controller'):
                 logger.info("Stopping bluetooth controller...")
                 self.bluetooth_controller.stop()
-            
+
             # 2. Stop telemetry loop
             if self.telemetry_task:
                 logger.info("Stopping telemetry task...")
@@ -1159,7 +1154,7 @@ class WALLEBackend:
                     await asyncio.wait_for(self.telemetry_task, timeout=2.0)
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     logger.info("Telemetry task stopped")
-            
+
             # 3. Close client connections
             if self.connected_clients:
                 logger.info(f"Closing {len(self.connected_clients)} client connections...")
@@ -1169,18 +1164,18 @@ class WALLEBackend:
                         close_tasks.append(asyncio.create_task(client.close()))
                     except Exception as e:
                         logger.debug(f"Error creating close task for client: {e}")
-                
+
                 if close_tasks:
                     try:
                         await asyncio.wait_for(
-                            asyncio.gather(*close_tasks, return_exceptions=True), 
+                            asyncio.gather(*close_tasks, return_exceptions=True),
                             timeout=2.0
                         )
                     except asyncio.TimeoutError:
                         logger.warning("Timeout closing client connections")
-                
+
                 self.connected_clients.clear()
-            
+
             # 4. Close WebSocket server
             if self.websocket_server:
                 logger.info("Shutting down WebSocket server...")
@@ -1190,7 +1185,7 @@ class WALLEBackend:
                     logger.info("WebSocket server closed")
                 except asyncio.TimeoutError:
                     logger.warning("WebSocket server close timeout")
-            
+
             # 5. Stop motion mixer and scene engine
             logger.info("Stopping motion mixer...")
             try:
@@ -1198,19 +1193,19 @@ class WALLEBackend:
                     self.motion_mixer.cleanup()
             except Exception as e:
                 logger.error(f"Motion mixer cleanup error: {e}")
-            
+
             logger.info("Stopping scene engine...")
             try:
                 await asyncio.wait_for(self.scene_engine.stop_current_scene(), timeout=2.0)
             except asyncio.TimeoutError:
                 logger.warning("Scene engine stop timeout")
-            
+
             logger.info("Cleaning up audio controller...")
             try:
                 self.audio_controller.cleanup()
             except Exception as e:
                 logger.error(f"Audio cleanup error: {e}")
-            
+
             # 6. Cleanup hardware (this should be fast but might involve serial communication)
             logger.info("Cleaning up hardware service...")
             try:
@@ -1220,25 +1215,24 @@ class WALLEBackend:
                 )
             except Exception as e:
                 logger.error(f"Hardware cleanup error: {e}")
-            
+
             # 7. Cleanup telemetry
             logger.info("Cleaning up telemetry system...")
             try:
                 self.telemetry_system.cleanup()
             except Exception as e:
                 logger.error(f"Telemetry cleanup error: {e}")
-            
+
             logger.info("WALL-E Backend shutdown complete")
-            
+
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
         finally:
-            self.sd_watchdog.stop()
             # Ensure we exit cleanly
             logger.info("Final cleanup complete")
 
     # ==================== CALLBACK HANDLERS ====================
-    
+
     async def handle_telemetry_alert(self, alert, reading):
         """Handle telemetry alerts"""
         # Build reading data safely with proper attribute names
@@ -1249,7 +1243,7 @@ class WALLEBackend:
             "current_tracks": reading.current_tracks,
             "current_total": reading.current_total,
         }
-        
+
         await self.broadcast_message({
             "type": "telemetry_alert",
             "alert": {
@@ -1261,17 +1255,17 @@ class WALLEBackend:
             "reading": reading_data,
             "timestamp": time.time()
         })
-    
+
     async def handle_emergency_stop_event(self):
         """Handle emergency stop events from hardware"""
         self.state = SystemState.EMERGENCY
-        
+
         await self.broadcast_message({
             "type": "emergency_stop",
             "source": "hardware_interrupt",
             "timestamp": time.time()
         })
-    
+
     async def handle_hardware_status_change(self, component: str, status: Dict[str, Any]):
         """Handle hardware status changes"""
         await self.broadcast_message({
@@ -1280,7 +1274,7 @@ class WALLEBackend:
             "status": status,
             "timestamp": time.time()
         })
-    
+
     async def handle_scene_started(self, scene_name: str, scene_data: Dict[str, Any]):
         """Handle scene started event"""
         try:
@@ -1293,7 +1287,7 @@ class WALLEBackend:
             }))
         except Exception as e:
             logger.error(f"Scene started broadcast error: {e}")
-    
+
     async def handle_scene_completed(self, scene_name: str, scene_data: Dict[str, Any], success: bool):
         """Handle scene completed event"""
         try:
@@ -1305,7 +1299,7 @@ class WALLEBackend:
             }))
         except Exception as e:
             logger.error(f"Scene completed broadcast error: {e}")
-        
+
     async def handle_scene_error(self, scene_name: str, scene_data: Dict[str, Any], error: str):
         """Handle scene error event"""
         try:
@@ -1317,7 +1311,7 @@ class WALLEBackend:
             }))
         except Exception as e:
             logger.error(f"Scene error broadcast error: {e}")
-    
+
     async def handle_track_started(self, track_name: str, track_path: str):
         """Handle audio track started"""
         await self.broadcast_message({
@@ -1325,7 +1319,7 @@ class WALLEBackend:
             "track_name": track_name,
             "timestamp": time.time()
         })
-    
+
     async def handle_track_finished(self, track_name: str):
         """Handle audio track finished"""
         await self.broadcast_message({
@@ -1333,7 +1327,7 @@ class WALLEBackend:
             "track_name": track_name,
             "timestamp": time.time()
         })
-    
+
     async def handle_volume_changed(self, volume: float):
         """Handle volume change"""
         await self.broadcast_message({
@@ -1348,7 +1342,7 @@ class WALLEBackend:
 def load_system_configuration() -> Dict[str, Any]:
     """Load system configuration from files"""
     config = {}
-    
+
     try:
         # Load hardware configuration
         hardware_config_path = Path("configs/hardware_config.json")
@@ -1371,7 +1365,7 @@ def load_system_configuration() -> Dict[str, Any]:
                     "acceleration": 3200
                 }
             }
-        
+
         # Load camera configuration
         camera_config_path = Path("configs/camera_config.json")
         if camera_config_path.exists():
@@ -1384,10 +1378,10 @@ def load_system_configuration() -> Dict[str, Any]:
                 "proxy_url": "http://10.1.1.230:8081",
                 "esp32_url": "http://esp32.local:81/stream"
             }
-            
+
         logger.info("System configuration loaded")
         return config
-        
+
     except Exception as e:
         logger.error(f"Failed to load configuration: {e}")
         return {"hardware": {}}
@@ -1399,25 +1393,25 @@ def setup_logging():
     """Setup comprehensive logging with improved formatting, module identification, and proper UTF-8 emoji support"""
     import warnings
     import sys
-    
+
     # Ensure UTF-8 encoding for stdout/stderr
     if sys.stdout.encoding != 'utf-8':
         sys.stdout.reconfigure(encoding='utf-8')
     if sys.stderr.encoding != 'utf-8':
         sys.stderr.reconfigure(encoding='utf-8')
-    
+
     # Suppress specific warnings
     warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
     warnings.filterwarnings("ignore", message=".*pkg_resources is deprecated.*")
-    
+
     # Create logs directory
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
-    
+
     # Custom formatter with module identification and emojis
     class ModuleFormatter(logging.Formatter):
         """Custom formatter that includes module/component identification with pretty emojis"""
-        
+
         # Module name mappings for cleaner display
         MODULE_NAMES = {
             'modules.shared_serial_manager': 'SerialMgr',
@@ -1433,7 +1427,7 @@ def setup_logging():
             '__main__': 'Main',
             'bottango_converter': 'Bottango',
         }
-        
+
         def format(self, record):
             # Get clean module name
             module = record.name
@@ -1441,46 +1435,39 @@ def setup_logging():
                 if module.startswith(full_name):
                     module = short_name
                     break
-            
+
             # If module name is still long, just take last part
             if '.' in module and len(module) > 15:
                 module = module.split('.')[-1]
-            
+
             # Get the message
             message = record.getMessage()
-            
+
             # Build formatted string with emojis preserved
             timestamp = self.formatTime(record, '%H:%M:%S')
             module_padded = f"{module:12s}"  # Pad to 12 characters for alignment
             level_padded = f"{record.levelname:8s}"  # Pad level to 8 characters
-            
+
             return f"{timestamp} - [{module_padded}] {level_padded}: {message}"
-    
+
     # Configure root logger
     formatter = ModuleFormatter()
-    
-    # Rotating file handler with UTF-8 encoding - 5MB per file, 5 backups,
-    # so a full event day of logs survives without filling the SD card
-    from logging.handlers import RotatingFileHandler
-    file_handler = RotatingFileHandler(
-        logs_dir / "walle_backend.log",
-        maxBytes=5 * 1024 * 1024,
-        backupCount=5,
-        encoding='utf-8'
-    )
+
+    # File handler with UTF-8 encoding
+    file_handler = logging.FileHandler(logs_dir / "walle_backend.log", encoding='utf-8')
     file_handler.setFormatter(formatter)
-    
+
     # Console handler with UTF-8 encoding
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
-    
+
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     root_logger.handlers.clear()  # Remove any existing handlers
     root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
-    
+
     # Set module-specific log levels
     logging.getLogger("websockets").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
@@ -1488,7 +1475,7 @@ def setup_logging():
     logging.getLogger("modules.shared_serial_manager").setLevel(logging.INFO)
     logging.getLogger("modules.motion_system").setLevel(logging.DEBUG)
     logging.getLogger("__main__").setLevel(logging.INFO)
-    
+
     # Suppress GPIO warning on RPi5
     logging.getLogger("modules.gpio_compat").setLevel(logging.ERROR)
 
@@ -1611,38 +1598,38 @@ async def announce_network_info(backend):
 async def process_bottango_imports_on_startup():
     """
     Process any Bottango imports in the bottango_imports folder on startup
-    
+
     This runs automatically when the backend starts up
     """
     if not BOTTANGO_AVAILABLE:
         logger.info("Bottango converter not available - skipping import processing")
         return
-    
+
     try:
         # Define directories
         project_root = Path(__file__).parent
         import_dir = project_root / 'bottango_imports'
         scenes_dir = project_root / 'scenes'
-        
+
         logger.info("🎬 Checking for Bottango imports...")
-        
+
         # Create watchdog and process imports
         watchdog = BottangoImportWatchdog(
             import_dir=import_dir,
             scenes_dir=scenes_dir,
             delete_after_conversion=True  # Delete imports after processing
         )
-        
+
         converted_files = watchdog.process_imports()
-        
+
         if converted_files:
             logger.info(f"✅ Processed {len(converted_files)} Bottango import(s)")
-            
+
             # Update scene registry
             await update_scene_registry(scenes_dir)
         else:
             logger.info("ℹ️  No Bottango imports to process")
-            
+
     except Exception as e:
         logger.error(f"Error processing Bottango imports: {e}")
         import traceback
@@ -1652,25 +1639,25 @@ async def process_bottango_imports_on_startup():
 async def update_scene_registry(scenes_dir: Path):
     """
     Scan scenes directory and update scene registry
-    
+
     Creates/updates scenes_registry.json in configs/ folder with all available scenes
     """
     try:
         scenes_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Find all scene files
         scene_files = list(scenes_dir.glob("*.json"))
-        
+
         registry = {}
-        
+
         for scene_file in scene_files:
             try:
                 # Load scene to extract metadata
                 with open(scene_file, 'r') as f:
                     scene = json.load(f)
-                
+
                 scene_name = scene.get('name', scene_file.stem)
-                
+
                 registry[scene_name] = {
                     'file': str(scene_file.relative_to(scenes_dir.parent)),
                     'name': scene_name,
@@ -1680,19 +1667,20 @@ async def update_scene_registry(scenes_dir: Path):
                     'locked_channels': scene.get('locked_channels', []),
                     'metadata': scene.get('metadata', {})
                 }
-                
+
             except Exception as e:
                 logger.warning(f"Failed to process scene {scene_file.name}: {e}")
-        
-        # Save registry to configs folder atomically
+
+        # Save registry to configs folder
         configs_dir = Path("configs")
         configs_dir.mkdir(parents=True, exist_ok=True)
         registry_path = configs_dir / 'scenes_registry.json'
-        
-        save_json_atomic(registry_path, registry)
-        
+
+        with open(registry_path, 'w') as f:
+            json.dump(registry, f, indent=2)
+
         logger.info(f"📋 Scene registry updated: {len(registry)} scene(s) -> {registry_path}")
-        
+
     except Exception as e:
         logger.error(f"Failed to update scene registry: {e}")
 
@@ -1702,19 +1690,19 @@ async def update_scene_registry(scenes_dir: Path):
 async def main():
     """Main entry point with proper error handling and cleanup"""
     backend = None
-    
+
     try:
         # Load configuration
         config = load_system_configuration()
-        
+
         # Create and start backend
         backend = WALLEBackend(config)
-        
+
         # Start audio and backend
         asyncio.create_task(play_startup_track(backend))
         asyncio.create_task(announce_network_info(backend))
         await backend.start()
-        
+
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt")
     except Exception as e:
@@ -1731,14 +1719,14 @@ async def main():
                 logger.warning("Final cleanup timeout")
             except Exception as e:
                 logger.error(f"Error in final cleanup: {e}")
-        
+
         # Final log message
         logger.info("WALL-E Backend exit complete")
 
 if __name__ == "__main__":
     # Setup logging first
     setup_logging()
-    
+
     try:
         # Run the main coroutine
         asyncio.run(main())

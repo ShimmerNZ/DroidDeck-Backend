@@ -438,7 +438,7 @@ class SceneCurvePlayer:
 # ============================================================================
 
 class ConstraintPipeline:
-    """ 
+    """
     Enforces position limits, velocity limits, acceleration limits,
     and deadband filtering on every output command.
 
@@ -642,12 +642,12 @@ class CommandDispatcher:
     """
     Batches and sends servo commands to hardware at a fixed tick rate.
     Collects per-Maestro command groups and sends efficiently.
-    
+
     For scene-animated channels: uses servo_config speed as a cap but keeps acceleration unlimited (0)
     so motion stays smooth without per-step accel/decel shaping.
     For joystick channels: sends the speed/accel from servo_config.json so the
     Maestro provides hardware-level smoothing between input updates.
-    
+
     On scene completion, restores each channel's configured speed/acceleration
     from servo_config.json so joystick smoothing resumes normally.
     """
@@ -890,6 +890,35 @@ class MotionMixer:
         self._overlay_hold_seconds = 0.35  # seconds
         self._overlay_last_active: Dict[str, float] = {}
 
+        # --- Joystick input watchdog ---
+        # Tracks when each joystick-driven channel last received a fresh command.
+        # A channel only appears here once set_joystick_channel() has been called for it.
+        self._joystick_last_update: Dict[str, float] = {}
+        # Channels already forced to home by the watchdog, so we don't re-log every tick.
+        self._joystick_stale_channels: Set[str] = set()
+        # How long a protected channel can go without a fresh command before the
+        # watchdog forces it back to home. Chosen to comfortably clear normal
+        # websocket/controller jitter while still catching a dead or disconnected
+        # controller well within a second.
+        self.joystick_timeout_seconds: float = 0.4
+        # Channels the watchdog actively protects (e.g. the drive tracks). Empty
+        # until the backend registers them via set_protected_channels() — a
+        # channel with no continuous-drive hardware behind it (a servo simply
+        # holds its last position when input stops) doesn't need this.
+        self._protected_channels: Set[str] = set()
+        # Mirrors the backend's failsafe_active flag. While True, joystick
+        # updates to protected channels are ignored and those channels are
+        # held at home, so failsafe stops track movement immediately instead
+        # of waiting for the joystick value to go stale.
+        self._failsafe_active: bool = False
+        # Protected channels are continuous-rotation drive channels (tracks),
+        # not position-holding servos, so their "stop" is always the standard
+        # RC-PWM neutral pulse - independent of each channel's configurable
+        # home_position (which is for servos and can legitimately differ from
+        # neutral, e.g. Head Tilt's home is 1261). Using a fixed constant here
+        # means a misconfigured/edited home value for a track channel can
+        # never cause the failsafe/disconnect/staleness paths to drive it.
+        self._protected_channel_stop_pulse: float = 1500.0
 
         # Tick loop state
         self._running = False
@@ -901,6 +930,7 @@ class MotionMixer:
         self._load_servo_config(servo_config_path)
 
         # Stats
+        self._init_time = time.monotonic()
         self.stats = {
             "ticks": 0,
             "active_layers": 0,
@@ -952,15 +982,72 @@ class MotionMixer:
 
     # ---- Joystick Input ----
 
+    def set_protected_channels(self, channels: Set[str]):
+        """Register channels that should auto-return to home if joystick input
+        goes stale (see _decay_stale_joystick_channels). Intended for channels
+        that drive continuous motion — like the Sabertooth tracks — where a
+        stuck last-commanded value means the hardware keeps moving rather than
+        just holding position."""
+        self._protected_channels = set(channels)
+        logger.info(f"Motion mixer joystick watchdog protecting: {sorted(self._protected_channels)}")
+
+    def set_failsafe_state(self, active: bool):
+        """Sync the mixer's failsafe state with the backend's toggle_failsafe().
+
+        While active, joystick updates to protected channels are ignored
+        (see set_joystick_channel) so a joystick held over during failsafe
+        can't move a track. Engaging also immediately forces every protected
+        channel to home, so movement stops as soon as failsafe is toggled on
+        rather than continuing until the last commanded value happens to go
+        stale.
+        """
+        self._failsafe_active = active
+        if active and self.joystick_layer and self._protected_channels:
+            now = time.monotonic()
+            stop = self._protected_channel_stop_pulse
+            for channel_id in self._protected_channels:
+                self.joystick_layer.set_channel(channel_id, stop)
+                self._joystick_last_update[channel_id] = now
+                self._joystick_stale_channels.discard(channel_id)
+            logger.info(
+                f"Motion mixer failsafe engaged - protected channels forced to stop ({stop}): "
+                f"{sorted(self._protected_channels)}"
+            )
+
+    def force_protected_channels_home(self, reason: str = "input source disconnected"):
+        """Immediately force every protected channel to home.
+
+        Called when the input source (e.g. the Bluetooth controller) is
+        detected as disconnected, so a track doesn't keep driving on the last
+        commanded value for however long it takes the passive staleness
+        watchdog (_decay_stale_joystick_channels) to notice. Unlike
+        set_failsafe_state(), this doesn't block future joystick updates -
+        once the controller reconnects, driving resumes normally.
+        """
+        if not self.joystick_layer or not self._protected_channels:
+            return
+        now = time.monotonic()
+        stop = self._protected_channel_stop_pulse
+        for channel_id in self._protected_channels:
+            self.joystick_layer.set_channel(channel_id, stop)
+            self._joystick_last_update[channel_id] = now
+            self._joystick_stale_channels.add(channel_id)
+        logger.warning(
+            f"Motion mixer: protected channels forced to stop ({stop}) ({reason}): "
+            f"{sorted(self._protected_channels)}"
+        )
+
     def set_joystick_channel(self, channel_id: str, position: float):
         """
         Set a joystick channel value. Called from controller input handlers.
         This is the primary interface for live puppeteering input.
-    
+
         Robustness: re-enforce that the joystick layer remains ACTIVE + ADDITIVE
         and fully weighted, so joystick input always blends on top of any scene layers.
         """
         if not self.joystick_layer:
+            return
+        if self._failsafe_active and channel_id in self._protected_channels:
             return
         # Guard against accidental mode/weight changes during refactors
         try:
@@ -971,9 +1058,45 @@ class MotionMixer:
                 self.joystick_layer.set_immediate(1.0)
             if self.joystick_layer.state != LayerState.ACTIVE:
                 self.joystick_layer.state = LayerState.ACTIVE
-        except Exception as e:
-            logger.debug(f"Joystick layer guard error: {e}")
+        except Exception:
+            pass
         self.joystick_layer.set_channel(channel_id, position)
+        self._joystick_last_update[channel_id] = time.monotonic()
+        self._joystick_stale_channels.discard(channel_id)
+
+    def _decay_stale_joystick_channels(self, now: float):
+        """Watchdog: force a protected channel back to home if it hasn't
+        received a fresh joystick command within joystick_timeout_seconds.
+
+        The joystick layer otherwise has no concept of "stale" — once a value
+        is written it sits there and gets re-dispatched every tick until
+        something explicitly changes it. For a servo that just means it holds
+        position, which is harmless. For a continuously-driving channel like a
+        track, it means the hardware keeps driving at the last commanded speed
+        indefinitely if the input source (controller, app) disappears — this
+        closes that gap independently of whatever is or isn't sending input.
+        """
+        if not self.joystick_layer or not self._protected_channels:
+            return
+        for channel_id in self._protected_channels:
+            last_update = self._joystick_last_update.get(channel_id)
+            if last_update is None or channel_id in self._joystick_stale_channels:
+                continue
+            if now - last_update > self.joystick_timeout_seconds:
+                stop = self._protected_channel_stop_pulse
+                current = self.joystick_layer.channel_values.get(channel_id, stop)
+                self.joystick_layer.set_channel(channel_id, stop)
+                self._joystick_stale_channels.add(channel_id)
+                # Only worth a log line when this actually cut off real motion -
+                # a centered/idle stick goes "stale" every cycle too since it
+                # stops sending once it reaches home, but forcing it to a stop
+                # value it's already at is a no-op, not a safety event.
+                if abs(current - stop) > 1.0:
+                    logger.warning(
+                        f"Joystick input stale for {channel_id} "
+                        f"(no update in {now - last_update:.2f}s) - forcing to stop ({stop})"
+                    )
+
     async def play_scene(self, scene_name: str, scene_data: Dict[str, Any],
                          crossfade_in: float = 0.3, crossfade_out: float = 0.5,
                          blend_mode: BlendMode = BlendMode.OVERRIDE,
@@ -1152,6 +1275,9 @@ class MotionMixer:
     async def _tick(self, dt: float):
         """Single tick: update layers, blend, constrain, dispatch"""
         blend_start = time.monotonic()
+
+        # 0. Watchdog: force any protected channel with stale joystick input back to home
+        self._decay_stale_joystick_channels(blend_start)
 
         # 1. Update timeline players
         dead_players = []
