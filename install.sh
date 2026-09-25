@@ -334,12 +334,21 @@ EOF
 setup_systemd_service() {
     print_step "Setting up DroidDeck backend systemd service..."
 
-    # Find python path inside venv
-    PYTHON_PATH="$BACKEND_DIR/venv/bin/python"
-    if [ ! -f "$PYTHON_PATH" ]; then
+    # Sanity-check the venv exists (DroidDeck.sh itself activates it and
+    # runs "python", so there's no separate python path to point systemd at)
+    if [ ! -f "$BACKEND_DIR/venv/bin/python" ]; then
         print_warning "venv not found at expected path - service may need manual adjustment"
-        PYTHON_PATH=$(which python3)
     fi
+
+    # DroidDeck.sh (not main.py directly) is what the service runs, since
+    # it's the only thing that starts the camera proxy alongside the
+    # backend - main.py on its own never launches modules/camera_proxy.py.
+    LAUNCH_SCRIPT="$BACKEND_DIR/DroidDeck.sh"
+    if [ ! -f "$LAUNCH_SCRIPT" ]; then
+        print_error "DroidDeck.sh not found at $LAUNCH_SCRIPT - clone the complete repository"
+        return 1
+    fi
+    chmod +x "$LAUNCH_SCRIPT"
 
     sudo tee /etc/systemd/system/${SERVICE_NAME}.service << EOF
 [Unit]
@@ -352,7 +361,7 @@ Type=notify
 NotifyAccess=main
 User=$CURRENT_USER
 WorkingDirectory=$BACKEND_DIR
-ExecStart=$PYTHON_PATH main.py
+ExecStart=$LAUNCH_SCRIPT
 Restart=on-failure
 RestartSec=5
 WatchdogSec=30

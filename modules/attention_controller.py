@@ -13,7 +13,7 @@ should react:
     LOST     the focused person left the frame: hold and search briefly
     REST     nobody seen for a long time: centre the head and watch quietly,
              waking immediately if someone appears
-    STANDBY  observations are stale, or failsafe is active: do nothing
+    STANDBY  observations are stale: do nothing
 
 Pan positions are normalised to -1.0 (full left) .. +1.0 (full right). All
 head and eye movement goes through a GazeOutput, and reactions are played as
@@ -29,6 +29,17 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
+
+# Only needed by MotionMixerGazeOutput, which drives the real servos. Kept
+# optional so this module still imports (for dry-run/log-only use, or unit
+# tests) without the motion system available.
+try:
+    from modules.motion_system import BlendMode, LayerState, MotionLayer
+except ImportError:
+    try:
+        from motion_system import BlendMode, LayerState, MotionLayer
+    except ImportError:
+        BlendMode = LayerState = MotionLayer = None
 
 logger = logging.getLogger(__name__)
 
@@ -74,12 +85,21 @@ class AttentionConfig:
     size_reference: float = 0.3
 
     # Scan stop spacing, as a fraction of the normalised -1..+1 pan range
-    scan_step: float = 0.4
-    scan_first_travel: float = 1.5
+    scan_step: float = 0.2
+    # How far either side of centre scanning is allowed to go - well short
+    # of full pan authority (which is reserved for actually looking at
+    # someone off to the side), so scanning doesn't read as a full 90
+    # degree sweep each way
+    scan_pan_limit: float = 0.5
     scan_travel: float = 0.6
-    scan_pause_min: float = 0.8
-    scan_pause_max: float = 1.6
+    # Wide, irregular spacing between steps so scanning doesn't read as
+    # a metronome
+    scan_pause_min: float = 1.5
+    scan_pause_max: float = 4.0
     scan_reverse_chance: float = 0.25
+    # Chance of holding still for a beat instead of stepping, so movement
+    # comes in irregular bursts rather than every single cycle
+    scan_hold_chance: float = 0.3
 
     rest_after: float = 40.0
     rest_duration: float = 30.0
@@ -87,10 +107,44 @@ class AttentionConfig:
     reaction_min_gap: float = 4.0
     reaction_interval_min: float = 3.0
     reaction_interval_max: float = 7.0
+    # A short random pause before a reaction actually fires, so the sound
+    # doesn't land in perfect lockstep with the moment that triggered it -
+    # doesn't change how often reactions happen, just when exactly
+    reaction_delay_min: float = 0.0
+    reaction_delay_max: float = 0.4
+    # Scene choice normally avoids repeating anything in _recent_scenes,
+    # which for a small category can itself become an obvious, mechanical
+    # alternation (A, B, A, B, ...). This is the chance of ignoring that
+    # and allowing a repeat through anyway, like a real reaction would
+    # occasionally not bother varying itself.
+    reaction_repeat_chance: float = 0.2
     acquire_categories: Tuple[str, ...] = ("Curious", "Greeting")
     dwell_categories: Tuple[str, ...] = ("Curious",)
     wake_categories: Tuple[str, ...] = ("Surprise",)
     lost_categories: Tuple[str, ...] = ()
+
+    # Head-only tracking while focused: a person can drift within this dead
+    # zone (fraction of half-frame, so 0..0.5) with no head movement at all -
+    # only once they cross it does the head do a slow correction, all the way
+    # back to dead centre. First-guess values, meant to be tuned live.
+    gaze_pan_deadband: float = 0.16
+    gaze_tilt_deadband: float = 0.14
+    # Correction stops once the error is back within this much smaller band
+    gaze_settle_threshold: float = 0.04
+    # Proportion of the measured error corrected in one commanded move -
+    # deliberately under 1.0 so a miscalibrated mapping undercorrects
+    # rather than overshoots; a second smaller correction follows if needed
+    gaze_pan_gain: float = 0.8
+    gaze_tilt_gain: float = 0.8
+    # Hard cap on the size of a single correction, in the same -1..+1 units
+    # as pan_to(), regardless of gain or how large the measured error is
+    gaze_max_correction: float = 0.5
+    # After issuing a correction, how long to wait before checking again -
+    # gives the head time to physically get there before the next
+    # observation's error is trusted. Without this, a correction is judged
+    # against an error that hasn't caught up yet and keeps piling more
+    # correction on top (integrator windup) rather than converging.
+    gaze_correction_cooldown: float = 1.2
 
 
 class GazeOutput:
@@ -102,7 +156,7 @@ class GazeOutput:
     def pan_to(self, pan: float) -> None:
         pass
 
-    def track(self, person: Person) -> None:
+    def track(self, person: Person, now: float) -> None:
         pass
 
     def glance_away(self) -> None:
@@ -112,31 +166,263 @@ class GazeOutput:
         pass
 
 
-class LoggingGazeOutput(GazeOutput):
+class _HeadOnlyGaze:
+    """Shared head-only tracking state machine: a dead zone the person can
+    drift within with no head movement at all, and once they leave it, one
+    corrective move all the way back to dead centre followed by a cooldown
+    before the next observation's error is trusted again.
+
+    The cooldown exists because the error is measured live from the camera,
+    which only reflects reality once the head has physically caught up to
+    the last correction. Without it, an error that hasn't caught up yet
+    reads as "still off centre" and gets corrected again on top of the
+    correction already in flight - the settled value only ever grows
+    (integrator windup) instead of converging. Subclasses provide _apply()
+    to act on the computed pan/tilt and _log() to report transitions.
+    """
+
+    def __init__(self, config: "AttentionConfig"):
+        self._config = config
+        self._tracked_id: Optional[int] = None
+        self._pan = 0.0
+        self._tilt = 0.0
+        self._holding = False
+        self._acquiring = False
+        self._next_correction_at = 0.0
+
+    def _reset(self, now: float) -> None:
+        self._pan = 0.0
+        self._tilt = 0.0
+        self._holding = False
+        self._acquiring = False
+        self._next_correction_at = now
+
+    def _update(self, person: Person, now: float) -> None:
+        cfg = self._config
+
+        if person.id != self._tracked_id:
+            self._tracked_id = person.id
+            self._reset(now)
+            self._acquiring = True
+            self._log(f"gaze: person {person.id} is now the focus, centering head")
+
+        if now < self._next_correction_at:
+            return
+
+        err_x = person.cx - 0.5
+        err_y = person.cy - 0.5
+
+        if self._acquiring:
+            # First fix on a newly-focused person: go straight to the real
+            # position in one continuous ease, not the incremental
+            # capped/cooled-down steps below. Those exist to keep ongoing
+            # drift-following lazy; a first look at someone isn't drift,
+            # it's just turning to face them - one smooth turn, however far.
+            self._acquiring = False
+            self._pan = max(-1.0, min(1.0, err_x * cfg.gaze_pan_gain))
+            self._tilt = max(-1.0, min(1.0, err_y * cfg.gaze_tilt_gain))
+            self._next_correction_at = now + cfg.gaze_correction_cooldown
+            self._apply()
+            if abs(err_x) <= cfg.gaze_settle_threshold and abs(err_y) <= cfg.gaze_settle_threshold:
+                self._holding = True
+                self._next_correction_at = now
+                self._log(f"gaze: person {person.id} back dead centre, holding "
+                          f"(pan {self._pan:+.2f}, tilt {self._tilt:+.2f})")
+            else:
+                self._log(f"gaze: acquiring person {person.id} -> "
+                          f"pan {self._pan:+.2f} tilt {self._tilt:+.2f} "
+                          f"(dx={err_x:+.2f}, dy={err_y:+.2f})")
+            return
+
+        if self._holding and abs(err_x) <= cfg.gaze_pan_deadband and abs(err_y) <= cfg.gaze_tilt_deadband:
+            return
+
+        if self._holding:
+            self._holding = False
+            self._log(f"gaze: person {person.id} left the dead zone "
+                      f"(dx={err_x:+.2f}, dy={err_y:+.2f}), head re-centering")
+
+        step_x = max(-cfg.gaze_max_correction, min(cfg.gaze_max_correction, err_x * cfg.gaze_pan_gain))
+        step_y = max(-cfg.gaze_max_correction, min(cfg.gaze_max_correction, err_y * cfg.gaze_tilt_gain))
+        self._pan = max(-1.0, min(1.0, self._pan + step_x))
+        self._tilt = max(-1.0, min(1.0, self._tilt + step_y))
+        self._next_correction_at = now + cfg.gaze_correction_cooldown
+        self._apply()
+
+        if abs(err_x) <= cfg.gaze_settle_threshold and abs(err_y) <= cfg.gaze_settle_threshold:
+            self._holding = True
+            self._next_correction_at = now
+            self._log(f"gaze: person {person.id} back dead centre, holding "
+                      f"(pan {self._pan:+.2f}, tilt {self._tilt:+.2f})")
+        else:
+            self._log(f"gaze: correcting toward person {person.id} -> "
+                      f"pan {self._pan:+.2f} tilt {self._tilt:+.2f} "
+                      f"(dx={err_x:+.2f}, dy={err_y:+.2f}), next check in {cfg.gaze_correction_cooldown:.1f}s")
+
+    def _apply(self) -> None:
+        """Act on self._pan/self._tilt. Overridden by subclasses."""
+
+    def _log(self, message: str) -> None:
+        """Report a transition. Overridden by subclasses."""
+
+
+class LoggingGazeOutput(GazeOutput, _HeadOnlyGaze):
     """Gaze output that only reports what it would have done."""
 
-    def __init__(self, emit: Callable[[str], None]):
+    def __init__(self, emit: Callable[[str], None], config: Optional[AttentionConfig] = None):
+        _HeadOnlyGaze.__init__(self, config or AttentionConfig())
         self._emit = emit
-        self._tracked_id: Optional[int] = None
 
     def center(self) -> None:
         self._tracked_id = None
+        self._reset(0.0)
         self._emit("gaze: centre head")
 
     def pan_to(self, pan: float) -> None:
         self._tracked_id = None
         self._emit(f"gaze: scan to pan {pan:+.2f}")
 
-    def track(self, person: Person) -> None:
-        if person.id != self._tracked_id:
-            self._tracked_id = person.id
-            self._emit(f"gaze: track person {person.id} at ({person.cx:.2f}, {person.cy:.2f})")
+    def track(self, person: Person, now: float) -> None:
+        self._update(person, now)
 
     def glance_away(self) -> None:
         self._emit("gaze: glance away and back")
 
     def release(self) -> None:
         self._tracked_id = None
+        self._reset(0.0)
+        self._emit("gaze: released")
+
+    def _log(self, message: str) -> None:
+        self._emit(message)
+
+
+class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
+    """Gaze output that drives the real Head Pan/Head Tilt servos through
+    the motion mixer, as a persistent override layer sitting above the
+    (additive) joystick layer and below scene playback - so a scene still
+    fades in from wherever the head is currently held, and an idle,
+    centred joystick can never fight the held look direction.
+
+    Uses the same _HeadOnlyGaze state machine as LoggingGazeOutput, so
+    behaviour already checked in dry-run carries over unchanged; only
+    _apply() differs, writing real microsecond targets instead of logging.
+    """
+
+    LAYER_NAME = "attention_gaze"
+    # Deliberately 0, not 1: the mixer treats any layer with priority > 0
+    # as a "scene" for dispatch purposes, which skips resending the
+    # configured speed/accel from servo_config.json every tick (real
+    # scenes rely on their own flash-stored smoothing instead). At
+    # priority 0 these channels are dispatched the same way the joystick
+    # is - configured speed/accel resent every command - which is what
+    # actually lets servo_config.json's speed/accel produce eased,
+    # non-jerky motion here. Still comfortably below scenes (priority 10),
+    # so a scene fading in still overrides it correctly; joystick being
+    # additive means the tie in priority value doesn't matter to it.
+    LAYER_PRIORITY = 0
+
+    def __init__(self, mixer: Any, emit: Callable[[str], None],
+                 config: Optional[AttentionConfig] = None,
+                 pan_channel: str = "m1_ch1", tilt_channel: str = "m1_ch0"):
+        if BlendMode is None:
+            raise RuntimeError("motion_system is not importable - cannot drive real servos")
+        _HeadOnlyGaze.__init__(self, config or AttentionConfig())
+        self._mixer = mixer
+        self._emit = emit
+        self._pan_channel = pan_channel
+        self._tilt_channel = tilt_channel
+
+        self._layer = MotionLayer(
+            name=self.LAYER_NAME,
+            priority=self.LAYER_PRIORITY,
+            blend_mode=BlendMode.OVERRIDE,
+            weight=1.0,
+            target_weight=1.0,
+            auto_remove=False,
+        )
+        self._layer.state = LayerState.ACTIVE
+        asyncio.ensure_future(mixer.add_layer(self._layer))
+
+        # The values _pan/_tilt hold are targets, not what's actually sent -
+        # _interp_loop eases the real commanded position toward them a
+        # little at a time. Sending the full move in one command left the
+        # servo doing move-then-stop-then-move: it would ease smoothly
+        # between two commands (accel/decel from servo_config.json does
+        # work), but then just sit there until the next one arrived, since
+        # scan/tracking only issue a new command every second or more. This
+        # closes that gap independently of any config, hence hardcoded here
+        # rather than added as more servo_config fields.
+        self._applied_pan = 0.0
+        self._applied_tilt = 0.0
+        asyncio.ensure_future(self._interp_loop())
+
+    _INTERP_INTERVAL = 0.02  # 50Hz - matches the motion mixer's own tick rate
+    # Deliberately well under joystick's configured speed (a joystick
+    # command can legitimately need to move fast) - attention behaviour
+    # should never look like it's racing to a point, always a deliberate,
+    # unhurried turn
+    _MAX_RATE = 0.35  # normalised units per second
+
+    async def _interp_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._INTERP_INTERVAL)
+            max_delta = self._MAX_RATE * self._INTERP_INTERVAL
+            moved = False
+            if abs(self._pan - self._applied_pan) > 1e-6:
+                self._applied_pan = self._step_toward(self._applied_pan, self._pan, max_delta)
+                moved = True
+            if abs(self._tilt - self._applied_tilt) > 1e-6:
+                self._applied_tilt = self._step_toward(self._applied_tilt, self._tilt, max_delta)
+                moved = True
+            if moved:
+                self._layer.set_channel(self._pan_channel, self._pulse_for(self._pan_channel, self._applied_pan))
+                self._layer.set_channel(self._tilt_channel, self._pulse_for(self._tilt_channel, self._applied_tilt))
+
+    @staticmethod
+    def _step_toward(current: float, target: float, max_delta: float) -> float:
+        if abs(target - current) <= max_delta:
+            return target
+        return current + (max_delta if target > current else -max_delta)
+
+    def _pulse_for(self, channel_id: str, normalized: float) -> float:
+        """Map -1..+1 to this channel's configured microsecond range,
+        scaled asymmetrically around home since home is not always in the
+        middle of the range (e.g. Head Tilt). Always lands within min/max
+        at normalized's own -1/+1 endpoints; the mixer's constraint
+        pipeline clamps again regardless, as a second, independent check."""
+        c = self._mixer.constraints.get_constraints(channel_id)
+        normalized = max(-1.0, min(1.0, normalized))
+        if normalized >= 0:
+            return c.home_position + normalized * (c.max_position - c.home_position)
+        return c.home_position + normalized * (c.home_position - c.min_position)
+
+    def _apply(self) -> None:
+        pass  # _interp_loop is what actually writes to the layer, gradually
+
+    def _log(self, message: str) -> None:
+        self._emit(message)
+
+    def center(self) -> None:
+        self._tracked_id = None
+        self._reset(0.0)
+        self._emit("gaze: centre head")
+
+    def pan_to(self, pan: float) -> None:
+        self._tracked_id = None
+        self._pan = max(-1.0, min(1.0, pan))
+        self._tilt = 0.0
+        self._emit(f"gaze: scan to pan {pan:+.2f}")
+
+    def track(self, person: Person, now: float) -> None:
+        self._update(person, now)
+
+    def glance_away(self) -> None:
+        self._emit("gaze: glance away and back")
+
+    def release(self) -> None:
+        self._tracked_id = None
+        self._reset(0.0)
         self._emit("gaze: released")
 
 
@@ -176,7 +462,7 @@ class AttentionController:
         self.rng = rng or random.Random()
         self.clock = clock
         self.events: Deque[str] = deque(maxlen=200)
-        self.output = output if output is not None else LoggingGazeOutput(self._event)
+        self.output = output if output is not None else LoggingGazeOutput(self._event, self.config)
 
         self.state = AttentionState.OFF
         self._enabled = False
@@ -240,6 +526,8 @@ class AttentionController:
         if now - self._last_publish >= STATUS_HEARTBEAT_SECONDS:
             self._publish()
 
+        self._fire_pending_reaction(now)
+
         reason = self._standby_reason(now)
         if reason is not None:
             if self.state is not AttentionState.STANDBY:
@@ -290,7 +578,7 @@ class AttentionController:
             self._enter(AttentionState.LOST, f"person {self._focus_id} out of view")
             return
 
-        self.output.track(person)
+        self.output.track(person, now)
         self._last_focus_time[person.id] = now
 
         if now >= self._next_reaction:
@@ -355,7 +643,7 @@ class AttentionController:
         self._last_focus_time[person.id] = now
         self._prune_focus_history(now)
         self._enter(AttentionState.FOCUS, f"person {person.id}, dwell {dwell:.1f}s")
-        self.output.track(person)
+        self.output.track(person, now)
         self._react(categories, "acquire", now)
 
     def _switch_focus(self, now: float) -> None:
@@ -372,28 +660,37 @@ class AttentionController:
 
     def _scan_step(self, now: float) -> None:
         cfg = self.config
+
         if self._scan_first:
-            self._scan_pan = -1.0
-            self._scan_dir = 1.0
+            # Start from centre and ease into scanning rather than snapping
+            # straight out to an extreme - that first jump read as a jerk
+            self._scan_pan = 0.0
+            self._scan_dir = -1.0 if self.rng.random() < 0.5 else 1.0
             self._scan_first = False
-            travel = cfg.scan_first_travel
-        else:
-            if self.rng.random() < cfg.scan_reverse_chance:
+
+        if self.rng.random() < cfg.scan_hold_chance:
+            # Hold still for a beat instead of stepping - keeps scanning
+            # from reading as constant, evenly-spaced motion
+            self._scan_next = now + self.rng.uniform(cfg.scan_pause_min, cfg.scan_pause_max)
+            return
+
+        if self.rng.random() < cfg.scan_reverse_chance:
+            self._scan_dir = -self._scan_dir
+
+        pan_limit = cfg.scan_pan_limit
+        limit = pan_limit if self._scan_dir > 0 else -pan_limit
+        target = self._scan_pan + self._scan_dir * cfg.scan_step
+        beyond = target > pan_limit if self._scan_dir > 0 else target < -pan_limit
+        if beyond:
+            if abs(self._scan_pan - limit) > 1e-6:
+                target = limit
+            else:
                 self._scan_dir = -self._scan_dir
-            limit = 1.0 if self._scan_dir > 0 else -1.0
-            target = self._scan_pan + self._scan_dir * cfg.scan_step
-            beyond = target > 1.0 if self._scan_dir > 0 else target < -1.0
-            if beyond:
-                if abs(self._scan_pan - limit) > 1e-6:
-                    target = limit
-                else:
-                    self._scan_dir = -self._scan_dir
-                    target = self._scan_pan + self._scan_dir * cfg.scan_step
-            self._scan_pan = max(-1.0, min(1.0, target))
-            travel = cfg.scan_travel
+                target = self._scan_pan + self._scan_dir * cfg.scan_step
+        self._scan_pan = max(-pan_limit, min(pan_limit, target))
 
         self.output.pan_to(self._scan_pan)
-        self._scan_next = now + travel + self.rng.uniform(cfg.scan_pause_min, cfg.scan_pause_max)
+        self._scan_next = now + cfg.scan_travel + self.rng.uniform(cfg.scan_pause_min, cfg.scan_pause_max)
 
     # ---- helpers ----
 
@@ -402,8 +699,6 @@ class AttentionController:
             return "waiting for observations"
         if now - self._last_update > self.config.stale_timeout:
             return "observation feed stale"
-        if not self.config.dry_run and bool(getattr(self.backend, "failsafe_active", True)):
-            return "failsafe active"
         return None
 
     def _confirmed(self, now: float) -> List[Person]:
@@ -436,8 +731,24 @@ class AttentionController:
             del self._last_focus_time[person_id]
 
     def _react(self, categories: Sequence[str], reason: str, now: float) -> None:
-        if not categories:
+        if not categories or self._pending_reaction is not None:
             return
+        cfg = self.config
+        delay = self.rng.uniform(cfg.reaction_delay_min, cfg.reaction_delay_max)
+        self._pending_reaction = (list(categories), reason, now + delay)
+
+    def _fire_pending_reaction(self, now: float) -> None:
+        """Resolve a reaction scheduled by _react() once its randomised delay
+        has passed. The min-gap/scene-playing checks are deliberately done
+        here rather than at schedule time, since either can change during
+        the delay."""
+        if self._pending_reaction is None:
+            return
+        categories, reason, fire_at = self._pending_reaction
+        if now < fire_at:
+            return
+        self._pending_reaction = None
+
         if now - self._last_reaction < self.config.reaction_min_gap:
             return
         if getattr(self.scene_engine, "scene_playing", False):
@@ -470,9 +781,11 @@ class AttentionController:
             except Exception:
                 continue
             names = [s.get("name") for s in scenes if s.get("name")]
+            if not names:
+                continue
             fresh = [n for n in names if n not in self._recent_scenes]
-            if fresh or names:
-                return self.rng.choice(fresh or names)
+            use_fresh = fresh and self.rng.random() >= self.config.reaction_repeat_chance
+            return self.rng.choice(fresh if use_fresh else names)
         return None
 
     async def _play_scene(self, name: str) -> None:
@@ -522,6 +835,7 @@ class AttentionController:
         self._scan_next = 0.0
         self._standby_note = ""
         self._last_publish = float("-inf")
+        self._pending_reaction: Optional[Tuple[List[str], str, float]] = None
 
     async def _run(self) -> None:
         while True:

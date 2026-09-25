@@ -12,7 +12,7 @@ import time
 import os
 from typing import Dict, Any, Optional, Callable
 
-from modules.attention_controller import AttentionController
+from modules.attention_controller import AttentionController, MotionMixerGazeOutput as AttentionMotionMixerGazeOutput
 from modules.config_store import ConfigStore
 from modules.file_utils import save_json_atomic
 
@@ -38,6 +38,22 @@ class WebSocketMessageHandler:
         self.config_store = ConfigStore()
         self.attention = AttentionController(
             scene_engine, backend_ref, status_callback=self._broadcast_attention_status)
+
+        # Wire the attention controller to the real head servos when the
+        # motion mixer is available. This is also what switches dry_run
+        # off, which matters beyond just the gaze output: it's what makes
+        # the failsafe check in the controller's standby logic actually
+        # apply, and what lets reactions play real scenes instead of only
+        # logging what they would have played. Falling back to LoggingGazeOutput
+        # (dry-run, log-only) if the mixer isn't available for any reason.
+        motion_mixer = getattr(scene_engine, "motion_mixer", None)
+        if motion_mixer is not None:
+            self.attention.output = AttentionMotionMixerGazeOutput(
+                motion_mixer, self.attention._event, self.attention.config)
+            self.attention.config.dry_run = False
+            logger.info("[ATTN] wired to motion mixer - head tracking and reactions are live")
+        else:
+            logger.warning("[ATTN] motion mixer not available - attention controller stays dry-run")
         # Message type routing table
         self.handlers = {
             # Servo control

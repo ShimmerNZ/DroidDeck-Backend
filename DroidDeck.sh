@@ -222,4 +222,4 @@ sudo modprobe joydev
 sudo modprobe uinput
 
 # Start main WALL-E system (this will block until stopped)
-python main.py
+exec python main.py
