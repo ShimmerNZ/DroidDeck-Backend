@@ -12,6 +12,7 @@ import time
 import os
 from typing import Dict, Any, Optional, Callable
 
+from modules.attention_controller import AttentionController
 from modules.config_store import ConfigStore
 from modules.file_utils import save_json_atomic
 
@@ -35,6 +36,8 @@ class WebSocketMessageHandler:
         self._imu_active = False  # tracks whether frontend is streaming IMU data
         self._prev_buttons: Dict[str, bool] = {}  # last seen button state for delta filtering
         self.config_store = ConfigStore()
+        self.attention = AttentionController(
+            scene_engine, backend_ref, status_callback=self._broadcast_attention_status)
         # Message type routing table
         self.handlers = {
             # Servo control
@@ -88,6 +91,7 @@ class WebSocketMessageHandler:
             # Gesture detection
             "gesture": self._handle_gesture,
             "tracking": self._handle_tracking,
+            "people": self._handle_people,
             "get_gesture_stats": self._handle_get_gesture_stats,
             
             # Heartbeat
@@ -1631,14 +1635,33 @@ class WebSocketMessageHandler:
         """Handle tracking enable/disable"""
         state = data.get("state", False)
         logger.info(f"[SERVO] Tracking {'enabled' if state else 'disabled'}")
-        
+
+        self.attention.set_enabled(bool(state))
+
         # Broadcast tracking state to all clients
         await self.backend.broadcast_message({
             "type": "tracking_state_changed",
             "enabled": state,
             "timestamp": time.time()
         })
-    
+
+    def _broadcast_attention_status(self, status: Dict[str, Any]) -> None:
+        """Send the attention state to all clients so the frontend can highlight the focus."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.backend.broadcast_message({
+            "type": "attention_state",
+            **status,
+            "timestamp": time.time()
+        }))
+
+    async def _handle_people(self, websocket, data: Dict[str, Any]):
+        """Feed the people list from the frontend into the attention controller.
+        Sent at about 10Hz, so no response is returned."""
+        self.attention.update_people(data)
+
     # ==================== UTILITY HANDLERS ====================
     
     async def _handle_heartbeat(self, websocket, data: Dict[str, Any]):
