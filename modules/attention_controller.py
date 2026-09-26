@@ -15,6 +15,11 @@ should react:
              waking immediately if someone appears
     STANDBY  observations are stale: do nothing
 
+A person can also be manually selected (e.g. by tapping their box on the
+frontend), which locks attention onto them until they leave view, someone
+else is selected, or the selection is cleared - overriding the automatic
+dwell-based switching in FOCUS.
+
 Pan positions are normalised to -1.0 (full left) .. +1.0 (full right). All
 head and eye movement goes through a GazeOutput, and reactions are played as
 existing scenes picked by category. With dry_run set, nothing is driven: the
@@ -509,11 +514,34 @@ class AttentionController:
         self._people = people
         self._last_update = now
 
+    def select_person(self, person_id: Optional[int]) -> None:
+        """Manually lock attention onto a specific tracked person (by id),
+        overriding the automatic dwell-based switching in FOCUS until they
+        leave view, a different person is selected, or the lock is cleared
+        by passing None. Used when the frontend reports a tap on someone's
+        box in the camera view."""
+        if not self._enabled:
+            return
+
+        self._manual_focus_id = person_id
+        if person_id is None:
+            self._event("manual selection cleared, returning to automatic")
+            return
+
+        self._event(f"manual selection: person {person_id}")
+        now = self.clock()
+        person = self._find(person_id)
+        if person is not None:
+            self._start_focus(person, now, self.config.acquire_categories)
+        # If they're not visible right now, _pick() prefers this id as soon
+        # as they're confirmed again, from whichever state we're currently in.
+
     def get_status(self) -> Dict[str, Any]:
         return {
             "enabled": self._enabled,
             "state": self.state.value,
             "focus_id": self._focus_id,
+            "manual_focus_id": self._manual_focus_id,
             "people": [p.id for p in self._people],
             "dry_run": self.config.dry_run,
         }
@@ -585,6 +613,9 @@ class AttentionController:
             self._react(cfg.dwell_categories, "dwell", now)
             self._next_reaction = now + self.rng.uniform(cfg.reaction_interval_min,
                                                          cfg.reaction_interval_max)
+
+        if self._manual_focus_id is not None and self._focus_id == self._manual_focus_id:
+            return  # manually locked - stay put until they leave view or the lock changes
 
         if now >= self._dwell_until:
             self._switch_focus(now)
@@ -714,6 +745,11 @@ class AttentionController:
     def _pick(self, people: List[Person], now: float) -> Person:
         cfg = self.config
 
+        if self._manual_focus_id is not None:
+            manual = next((p for p in people if p.id == self._manual_focus_id), None)
+            if manual is not None:
+                return manual
+
         def score(person: Person) -> float:
             size = min(1.0, person.h / cfg.size_reference)
             central = 1.0 - min(1.0, abs(person.cx - 0.5) * 2.0)
@@ -823,6 +859,7 @@ class AttentionController:
         self._last_update: Optional[float] = None
         self._last_focus_time: Dict[int, float] = {}
         self._focus_id: Optional[int] = None
+        self._manual_focus_id: Optional[int] = None
         self._dwell_until = 0.0
         self._next_reaction = 0.0
         self._last_reaction = float("-inf")

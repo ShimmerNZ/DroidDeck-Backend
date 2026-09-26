@@ -108,6 +108,7 @@ class WebSocketMessageHandler:
             "gesture": self._handle_gesture,
             "tracking": self._handle_tracking,
             "people": self._handle_people,
+            "select_person": self._handle_select_person,
             "get_gesture_stats": self._handle_get_gesture_stats,
             
             # Heartbeat
@@ -1412,7 +1413,7 @@ class WebSocketMessageHandler:
             logger.info(f"📄 Sent refresh response: {len(audio_files)} audio files, {len(bottango_scenes)} Bottango scenes")
             
         except Exception as e:
-            logger.error(f"âŒ Error handling refresh_backend: {e}")
+            logger.error(f"âŒ Error handling refresh_backend: {e}")
             await self._send_websocket_message(websocket, {
                 "type": "backend_refresh_response",
                 "audio_files": [],
@@ -1678,6 +1679,13 @@ class WebSocketMessageHandler:
         Sent at about 10Hz, so no response is returned."""
         self.attention.update_people(data)
 
+    async def _handle_select_person(self, websocket, data: Dict[str, Any]):
+        """Manually lock the attention controller onto one tracked person, or
+        clear the lock (id omitted/None) to return to automatic selection.
+        Sent when the frontend reports a tap on someone's box in the camera view."""
+        person_id = data.get("id")
+        self.attention.select_person(int(person_id) if person_id is not None else None)
+
     # ==================== UTILITY HANDLERS ====================
     
     async def _handle_heartbeat(self, websocket, data: Dict[str, Any]):
@@ -1723,7 +1731,7 @@ class WebSocketMessageHandler:
                 # Toggle idle mode in scene engine
                 if hasattr(self.scene_engine, 'set_idle_mode'):
                     self.scene_engine.set_idle_mode(state)
-                    logger.info(f"ðŸŒ™ Idle mode {'ENABLED' if state else 'DISABLED'} via frontend")
+                    logger.info(f"🌙 Idle mode {'ENABLED' if state else 'DISABLED'} via frontend")
                     
                     # Send confirmation back to frontend
                     await self._send_response(websocket, {
