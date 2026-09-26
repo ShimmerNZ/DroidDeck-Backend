@@ -128,22 +128,50 @@ class AttentionConfig:
     wake_categories: Tuple[str, ...] = ("Surprise",)
     lost_categories: Tuple[str, ...] = ()
 
-    # Head-only tracking while focused: a person can drift within this dead
-    # zone (fraction of half-frame, so 0..0.5) with no head movement at all -
-    # only once they cross it does the head resume tracking. First-guess
-    # values, meant to be tuned live.
-    gaze_pan_deadband: float = 0.16
+    # Head-only tracking while focused. All errors are the person's offset
+    # from frame centre as a fraction of the frame (so -0.5..+0.5).
+    #
+    # A person can drift within this dead zone with no head movement at
+    # all; only once they cross it does that axis resume correcting. Pan
+    # and tilt are held independently.
+    gaze_pan_deadband: float = 0.12
     gaze_tilt_deadband: float = 0.14
-    # Correction stops once the error is back within this much smaller band
-    gaze_settle_threshold: float = 0.04
-    # Proportion of the measured error the head aims for on each observation -
-    # deliberately under 1.0 so a miscalibrated mapping undercorrects rather
-    # than overshoots. The target is recomputed directly from the live error
-    # every observation (not accumulated), and MotionMixerGazeOutput's own
-    # interpolation loop is what limits how fast the head can actually move
-    # toward it, so this alone can't cause overshoot or windup.
-    gaze_pan_gain: float = 0.8
-    gaze_tilt_gain: float = 0.8
+    # An axis stops correcting once its error is within this band. Kept
+    # generous because slop in the head/body linkage means the head rarely
+    # sits at exactly zero error.
+    gaze_settle_threshold: float = 0.08
+    # Corrections smaller than this (in -1..+1 servo units) are skipped
+    gaze_min_update: float = 0.03
+    # Settle time after a correction's glide finishes before the camera is
+    # trusted again: covers body sway once the head stops, plus the
+    # camera -> ESP32 -> proxy -> Steam Deck -> MediaPipe -> backend
+    # latency. Tilt and pan respectively; when both axes move, the longer
+    # of the two waits applies.
+    gaze_correction_pause: float = 0.6
+    gaze_pan_correction_pause: float = 0.6
+    # Pan glide rate (-1..+1 units per second) while tracking. Slower than
+    # the scan rate because swinging the heavy head quickly sways the body.
+    gaze_track_pan_rate: float = 0.15
+    # Tilt glide rate (-1..+1 units per second), scanning or tracking
+    gaze_tilt_rate: float = 0.35
+    # How far the head moves per unit of frame error (servo units per
+    # frame fraction). The camera is in the head, so an error of dx means
+    # "turn by dx * gain from where you are now", not "turn to dx * gain".
+    # Deliberately set a little below the real frame-to-servo ratio, so a
+    # correction stops just short of centre instead of crossing over it:
+    # below the real ratio it undershoots slightly and settles; above it,
+    # it overshoots; at twice it or more, it oscillates. Measured from
+    # hardware logs at roughly 1.0-1.8 for pan and about 1.25 for tilt.
+    gaze_pan_gain: float = 1.2
+    gaze_tilt_gain: float = 1.1
+    # Number of consecutive camera frames, all captured with the head
+    # still, averaged into one error reading before a correction is made.
+    # Smooths detection jitter without mixing in frames from before a move.
+    gaze_error_samples: int = 2
+    # How far down from the top of the detected body box to aim, as a
+    # fraction of the box height. 0.0 is the very top edge of the box and
+    # 0.5 its centre, which sits around the stomach for a whole-body box.
+    gaze_target_height_fraction: float = 0.125
 
 
 class GazeOutput:
@@ -166,19 +194,32 @@ class GazeOutput:
 
 
 class _HeadOnlyGaze:
-    """Shared head-only tracking state machine: continuous proportional
-    pursuit of the tracked person, held still within a dead zone so small
-    drift doesn't cause constant micro-movement.
+    """Shared head-only tracking: keeps the top of the tracked person's body
+    box (roughly head height) centred in the camera view.
 
-    The target pan/tilt is set directly from the live error on every
-    observation, not accumulated step by step - MotionMixerGazeOutput's own
-    interpolation loop is what limits how fast the physical head can move
-    toward whatever target this sets, so there's no need to also cap or
-    space out corrections here. That keeps ongoing tracking a smooth,
-    continuous pursuit rather than a jump followed by a pause, while a dead
-    zone still stops small, noisy drift from causing constant micro-movement
-    once the head has settled on someone. Subclasses provide _apply() to act
-    on the computed pan/tilt and _log() to report transitions.
+    The camera is mounted in the head, so a person's position in frame is
+    already relative to where the head is pointing. Each correction
+    therefore moves the head BY an amount proportional to the error, from
+    where it is now (target += error * gain), rather than TO a position
+    derived from the error. With the gain a little under the real
+    frame-to-servo ratio, one correction lands just short of centre and the
+    head settles without crossing over.
+
+    Tracking runs as a look, move, wait cycle:
+      look  average the error over gaze_error_samples camera frames, all
+            captured while the head was still
+      move  correct pan and/or tilt, one continuous glide per axis
+      wait  ignore frames until the glide has finished (distance / glide
+            rate) plus a settle margin for body sway and pipeline latency,
+            then look again
+    Frames captured while the head is moving show the camera's own motion
+    rather than the person's, so they are never used.
+
+    Pan and tilt hold independently: an axis stops correcting once its
+    error is within gaze_settle_threshold and resumes only when the error
+    leaves that axis's dead zone. Subclasses provide _apply() to act on the
+    computed pan/tilt, _log() to report transitions, and
+    _remaining_travel_time() when the physical head lags behind the target.
     """
 
     def __init__(self, config: "AttentionConfig"):
@@ -186,12 +227,28 @@ class _HeadOnlyGaze:
         self._tracked_id: Optional[int] = None
         self._pan = 0.0
         self._tilt = 0.0
-        self._holding = False
+        self._pan_holding = False
+        self._tilt_holding = False
+        self._measure_from = 0.0
+        self._samples: Deque[Tuple[float, float]] = deque(maxlen=max(1, int(config.gaze_error_samples)))
+        self._last_raw_sample: Optional[Tuple[float, float]] = None
 
     def _reset(self, now: float) -> None:
-        self._pan = 0.0
-        self._tilt = 0.0
-        self._holding = False
+        """Clear tracking state without moving the head. If a glide is still
+        in progress, frames are ignored until it has finished and settled."""
+        self._pan_holding = False
+        self._tilt_holding = False
+        self._samples.clear()
+        self._last_raw_sample = None
+        remaining = self._remaining_travel_time()
+        if remaining > 0.0:
+            self._measure_from = now + remaining + self._config.gaze_pan_correction_pause
+        else:
+            self._measure_from = now
+
+    def _remaining_travel_time(self) -> float:
+        """Seconds until the physical head reaches the current target."""
+        return 0.0
 
     def _update(self, person: Person, now: float) -> None:
         cfg = self._config
@@ -201,29 +258,71 @@ class _HeadOnlyGaze:
             self._reset(now)
             self._log(f"gaze: person {person.id} is now the focus, centering head")
 
-        err_x = person.cx - 0.5
-        err_y = person.cy - 0.5
+        # Aim at the top of the box (head height) rather than its vertical
+        # centre, which sits around the stomach for a whole-body box
+        target_cy = person.cy - person.h * (0.5 - cfg.gaze_target_height_fraction)
+        target_cy = max(0.0, min(1.0, target_cy))
 
-        if self._holding and abs(err_x) <= cfg.gaze_pan_deadband and abs(err_y) <= cfg.gaze_tilt_deadband:
+        # The same detection is seen on several controller ticks between
+        # camera frames; only a new frame counts as a new sample
+        raw_sample = (person.cx, target_cy)
+        if raw_sample == self._last_raw_sample:
+            return
+        self._last_raw_sample = raw_sample
+
+        if now < self._measure_from:
+            return
+        self._samples.append((person.cx - 0.5, target_cy - 0.5))
+        if len(self._samples) < self._samples.maxlen:
             return
 
-        if self._holding:
-            self._holding = False
-            self._log(f"gaze: person {person.id} left the dead zone "
-                      f"(dx={err_x:+.2f}, dy={err_y:+.2f}), tracking resumed")
+        err_x = sum(s[0] for s in self._samples) / len(self._samples)
+        err_y = sum(s[1] for s in self._samples) / len(self._samples)
+        was_settled = self._pan_holding and self._tilt_holding
 
-        self._pan = max(-1.0, min(1.0, err_x * cfg.gaze_pan_gain))
-        self._tilt = max(-1.0, min(1.0, err_y * cfg.gaze_tilt_gain))
-        self._apply()
+        if self._pan_holding and abs(err_x) > cfg.gaze_pan_deadband:
+            self._pan_holding = False
+            self._log(f"gaze: person {person.id} left the pan dead zone "
+                      f"(dx={err_x:+.2f}), pan tracking resumed")
+        if self._tilt_holding and abs(err_y) > cfg.gaze_tilt_deadband:
+            self._tilt_holding = False
+            self._log(f"gaze: person {person.id} left the tilt dead zone "
+                      f"(dy={err_y:+.2f}), tilt tracking resumed")
 
-        if abs(err_x) <= cfg.gaze_settle_threshold and abs(err_y) <= cfg.gaze_settle_threshold:
-            self._holding = True
-            self._log(f"gaze: person {person.id} back dead centre, holding "
-                      f"(pan {self._pan:+.2f}, tilt {self._tilt:+.2f})")
-        else:
+        if not self._pan_holding and abs(err_x) <= cfg.gaze_settle_threshold:
+            self._pan_holding = True
+        if not self._tilt_holding and abs(err_y) <= cfg.gaze_settle_threshold:
+            self._tilt_holding = True
+
+        wait: Optional[float] = None
+
+        if not self._pan_holding:
+            new_pan = max(-1.0, min(1.0, self._pan + err_x * cfg.gaze_pan_gain))
+            distance = abs(new_pan - self._pan)
+            if distance >= cfg.gaze_min_update:
+                self._pan = new_pan
+                pan_wait = distance / max(cfg.gaze_track_pan_rate, 0.01) + cfg.gaze_pan_correction_pause
+                wait = pan_wait if wait is None else max(wait, pan_wait)
+
+        if not self._tilt_holding:
+            new_tilt = max(-1.0, min(1.0, self._tilt + err_y * cfg.gaze_tilt_gain))
+            distance = abs(new_tilt - self._tilt)
+            if distance >= cfg.gaze_min_update:
+                self._tilt = new_tilt
+                tilt_wait = distance / max(cfg.gaze_tilt_rate, 0.01) + cfg.gaze_correction_pause
+                wait = tilt_wait if wait is None else max(wait, tilt_wait)
+
+        if wait is not None:
+            self._apply()
+            self._samples.clear()
+            self._measure_from = now + wait
             self._log(f"gaze: tracking person {person.id} -> "
                       f"pan {self._pan:+.2f} tilt {self._tilt:+.2f} "
-                      f"(dx={err_x:+.2f}, dy={err_y:+.2f})")
+                      f"(dx={err_x:+.2f}, dy={err_y:+.2f}, next look in {wait:.1f}s)")
+        elif self._pan_holding and self._tilt_holding and not was_settled:
+            self._log(f"gaze: person {person.id} settled, holding "
+                      f"(pan {self._pan:+.2f}, tilt {self._tilt:+.2f}, "
+                      f"dx={err_x:+.2f}, dy={err_y:+.2f})")
 
     def _apply(self) -> None:
         """Act on self._pan/self._tilt. Overridden by subclasses."""
@@ -241,6 +340,8 @@ class LoggingGazeOutput(GazeOutput, _HeadOnlyGaze):
 
     def center(self) -> None:
         self._tracked_id = None
+        self._pan = 0.0
+        self._tilt = 0.0
         self._reset(0.0)
         self._emit("gaze: centre head")
 
@@ -256,6 +357,8 @@ class LoggingGazeOutput(GazeOutput, _HeadOnlyGaze):
 
     def release(self) -> None:
         self._tracked_id = None
+        self._pan = 0.0
+        self._tilt = 0.0
         self._reset(0.0)
         self._emit("gaze: released")
 
@@ -321,25 +424,34 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
         # rather than added as more servo_config fields.
         self._applied_pan = 0.0
         self._applied_tilt = 0.0
+        # Which rate pan glides at right now - swapped between the fast
+        # scan sweep rate and the slower tracking rate depending on
+        # whether the head is scanning or actively centering on someone
+        # (see pan_to()/track()/center() below). Tilt has no such split:
+        # nodding up/down doesn't sway the body the way panning does, so
+        # it always uses cfg.gaze_tilt_rate.
+        self._pan_max_rate = self._MAX_RATE
         asyncio.ensure_future(self._interp_loop())
 
     _INTERP_INTERVAL = 0.02  # 50Hz - matches the motion mixer's own tick rate
     # Deliberately well under joystick's configured speed (a joystick
     # command can legitimately need to move fast) - attention behaviour
     # should never look like it's racing to a point, always a deliberate,
-    # unhurried turn
+    # unhurried turn. Used for pan while scanning (see pan_to()/center());
+    # tilt always glides at cfg.gaze_tilt_rate instead (see _interp_loop).
     _MAX_RATE = 0.35  # normalised units per second
 
     async def _interp_loop(self) -> None:
         while True:
             await asyncio.sleep(self._INTERP_INTERVAL)
-            max_delta = self._MAX_RATE * self._INTERP_INTERVAL
+            pan_max_delta = self._pan_max_rate * self._INTERP_INTERVAL
+            tilt_max_delta = self._config.gaze_tilt_rate * self._INTERP_INTERVAL
             moved = False
             if abs(self._pan - self._applied_pan) > 1e-6:
-                self._applied_pan = self._step_toward(self._applied_pan, self._pan, max_delta)
+                self._applied_pan = self._step_toward(self._applied_pan, self._pan, pan_max_delta)
                 moved = True
             if abs(self._tilt - self._applied_tilt) > 1e-6:
-                self._applied_tilt = self._step_toward(self._applied_tilt, self._tilt, max_delta)
+                self._applied_tilt = self._step_toward(self._applied_tilt, self._tilt, tilt_max_delta)
                 moved = True
             if moved:
                 self._layer.set_channel(self._pan_channel, self._pulse_for(self._pan_channel, self._applied_pan))
@@ -366,21 +478,32 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
     def _apply(self) -> None:
         pass  # _interp_loop is what actually writes to the layer, gradually
 
+    def _remaining_travel_time(self) -> float:
+        pan_rate = max(self._pan_max_rate, 0.01)
+        tilt_rate = max(self._config.gaze_tilt_rate, 0.01)
+        return max(abs(self._pan - self._applied_pan) / pan_rate,
+                   abs(self._tilt - self._applied_tilt) / tilt_rate)
+
     def _log(self, message: str) -> None:
         self._emit(message)
 
     def center(self) -> None:
         self._tracked_id = None
+        self._pan = 0.0
+        self._tilt = 0.0
         self._reset(0.0)
+        self._pan_max_rate = self._MAX_RATE
         self._emit("gaze: centre head")
 
     def pan_to(self, pan: float) -> None:
         self._tracked_id = None
+        self._pan_max_rate = self._MAX_RATE
         self._pan = max(-1.0, min(1.0, pan))
         self._tilt = 0.0
         self._emit(f"gaze: scan to pan {pan:+.2f}")
 
     def track(self, person: Person, now: float) -> None:
+        self._pan_max_rate = self._config.gaze_track_pan_rate
         self._update(person, now)
 
     def glance_away(self) -> None:
@@ -388,6 +511,8 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
 
     def release(self) -> None:
         self._tracked_id = None
+        self._pan = 0.0
+        self._tilt = 0.0
         self._reset(0.0)
         self._emit("gaze: released")
 
