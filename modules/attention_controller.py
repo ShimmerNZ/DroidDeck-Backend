@@ -130,26 +130,20 @@ class AttentionConfig:
 
     # Head-only tracking while focused: a person can drift within this dead
     # zone (fraction of half-frame, so 0..0.5) with no head movement at all -
-    # only once they cross it does the head do a slow correction, all the way
-    # back to dead centre. First-guess values, meant to be tuned live.
+    # only once they cross it does the head resume tracking. First-guess
+    # values, meant to be tuned live.
     gaze_pan_deadband: float = 0.16
     gaze_tilt_deadband: float = 0.14
     # Correction stops once the error is back within this much smaller band
     gaze_settle_threshold: float = 0.04
-    # Proportion of the measured error corrected in one commanded move -
-    # deliberately under 1.0 so a miscalibrated mapping undercorrects
-    # rather than overshoots; a second smaller correction follows if needed
+    # Proportion of the measured error the head aims for on each observation -
+    # deliberately under 1.0 so a miscalibrated mapping undercorrects rather
+    # than overshoots. The target is recomputed directly from the live error
+    # every observation (not accumulated), and MotionMixerGazeOutput's own
+    # interpolation loop is what limits how fast the head can actually move
+    # toward it, so this alone can't cause overshoot or windup.
     gaze_pan_gain: float = 0.8
     gaze_tilt_gain: float = 0.8
-    # Hard cap on the size of a single correction, in the same -1..+1 units
-    # as pan_to(), regardless of gain or how large the measured error is
-    gaze_max_correction: float = 0.5
-    # After issuing a correction, how long to wait before checking again -
-    # gives the head time to physically get there before the next
-    # observation's error is trusted. Without this, a correction is judged
-    # against an error that hasn't caught up yet and keeps piling more
-    # correction on top (integrator windup) rather than converging.
-    gaze_correction_cooldown: float = 1.2
 
 
 class GazeOutput:
@@ -172,18 +166,19 @@ class GazeOutput:
 
 
 class _HeadOnlyGaze:
-    """Shared head-only tracking state machine: a dead zone the person can
-    drift within with no head movement at all, and once they leave it, one
-    corrective move all the way back to dead centre followed by a cooldown
-    before the next observation's error is trusted again.
+    """Shared head-only tracking state machine: continuous proportional
+    pursuit of the tracked person, held still within a dead zone so small
+    drift doesn't cause constant micro-movement.
 
-    The cooldown exists because the error is measured live from the camera,
-    which only reflects reality once the head has physically caught up to
-    the last correction. Without it, an error that hasn't caught up yet
-    reads as "still off centre" and gets corrected again on top of the
-    correction already in flight - the settled value only ever grows
-    (integrator windup) instead of converging. Subclasses provide _apply()
-    to act on the computed pan/tilt and _log() to report transitions.
+    The target pan/tilt is set directly from the live error on every
+    observation, not accumulated step by step - MotionMixerGazeOutput's own
+    interpolation loop is what limits how fast the physical head can move
+    toward whatever target this sets, so there's no need to also cap or
+    space out corrections here. That keeps ongoing tracking a smooth,
+    continuous pursuit rather than a jump followed by a pause, while a dead
+    zone still stops small, noisy drift from causing constant micro-movement
+    once the head has settled on someone. Subclasses provide _apply() to act
+    on the computed pan/tilt and _log() to report transitions.
     """
 
     def __init__(self, config: "AttentionConfig"):
@@ -192,15 +187,11 @@ class _HeadOnlyGaze:
         self._pan = 0.0
         self._tilt = 0.0
         self._holding = False
-        self._acquiring = False
-        self._next_correction_at = 0.0
 
     def _reset(self, now: float) -> None:
         self._pan = 0.0
         self._tilt = 0.0
         self._holding = False
-        self._acquiring = False
-        self._next_correction_at = now
 
     def _update(self, person: Person, now: float) -> None:
         cfg = self._config
@@ -208,36 +199,10 @@ class _HeadOnlyGaze:
         if person.id != self._tracked_id:
             self._tracked_id = person.id
             self._reset(now)
-            self._acquiring = True
             self._log(f"gaze: person {person.id} is now the focus, centering head")
-
-        if now < self._next_correction_at:
-            return
 
         err_x = person.cx - 0.5
         err_y = person.cy - 0.5
-
-        if self._acquiring:
-            # First fix on a newly-focused person: go straight to the real
-            # position in one continuous ease, not the incremental
-            # capped/cooled-down steps below. Those exist to keep ongoing
-            # drift-following lazy; a first look at someone isn't drift,
-            # it's just turning to face them - one smooth turn, however far.
-            self._acquiring = False
-            self._pan = max(-1.0, min(1.0, err_x * cfg.gaze_pan_gain))
-            self._tilt = max(-1.0, min(1.0, err_y * cfg.gaze_tilt_gain))
-            self._next_correction_at = now + cfg.gaze_correction_cooldown
-            self._apply()
-            if abs(err_x) <= cfg.gaze_settle_threshold and abs(err_y) <= cfg.gaze_settle_threshold:
-                self._holding = True
-                self._next_correction_at = now
-                self._log(f"gaze: person {person.id} back dead centre, holding "
-                          f"(pan {self._pan:+.2f}, tilt {self._tilt:+.2f})")
-            else:
-                self._log(f"gaze: acquiring person {person.id} -> "
-                          f"pan {self._pan:+.2f} tilt {self._tilt:+.2f} "
-                          f"(dx={err_x:+.2f}, dy={err_y:+.2f})")
-            return
 
         if self._holding and abs(err_x) <= cfg.gaze_pan_deadband and abs(err_y) <= cfg.gaze_tilt_deadband:
             return
@@ -245,24 +210,20 @@ class _HeadOnlyGaze:
         if self._holding:
             self._holding = False
             self._log(f"gaze: person {person.id} left the dead zone "
-                      f"(dx={err_x:+.2f}, dy={err_y:+.2f}), head re-centering")
+                      f"(dx={err_x:+.2f}, dy={err_y:+.2f}), tracking resumed")
 
-        step_x = max(-cfg.gaze_max_correction, min(cfg.gaze_max_correction, err_x * cfg.gaze_pan_gain))
-        step_y = max(-cfg.gaze_max_correction, min(cfg.gaze_max_correction, err_y * cfg.gaze_tilt_gain))
-        self._pan = max(-1.0, min(1.0, self._pan + step_x))
-        self._tilt = max(-1.0, min(1.0, self._tilt + step_y))
-        self._next_correction_at = now + cfg.gaze_correction_cooldown
+        self._pan = max(-1.0, min(1.0, err_x * cfg.gaze_pan_gain))
+        self._tilt = max(-1.0, min(1.0, err_y * cfg.gaze_tilt_gain))
         self._apply()
 
         if abs(err_x) <= cfg.gaze_settle_threshold and abs(err_y) <= cfg.gaze_settle_threshold:
             self._holding = True
-            self._next_correction_at = now
             self._log(f"gaze: person {person.id} back dead centre, holding "
                       f"(pan {self._pan:+.2f}, tilt {self._tilt:+.2f})")
         else:
-            self._log(f"gaze: correcting toward person {person.id} -> "
+            self._log(f"gaze: tracking person {person.id} -> "
                       f"pan {self._pan:+.2f} tilt {self._tilt:+.2f} "
-                      f"(dx={err_x:+.2f}, dy={err_y:+.2f}), next check in {cfg.gaze_correction_cooldown:.1f}s")
+                      f"(dx={err_x:+.2f}, dy={err_y:+.2f})")
 
     def _apply(self) -> None:
         """Act on self._pan/self._tilt. Overridden by subclasses."""
