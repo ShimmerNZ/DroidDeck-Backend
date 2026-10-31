@@ -635,7 +635,14 @@ class DifferentialTracksHandler(BehaviorHandler):
                 self.last_turn, self.last_forward
             )
 
-            has_mixer = ((self.processor and hasattr(self.processor, 'motion_mixer') and self.processor.motion_mixer) or (self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer))
+            # Compensate for motor wiring polarity after mixing so steering
+            # stays correct and neutral is unchanged
+            if config.get('invert_left', False):
+                left_speed = -left_speed
+            if config.get('invert_right', False):
+                right_speed = -right_speed
+
+            has_mixer =((self.processor and hasattr(self.processor, 'motion_mixer') and self.processor.motion_mixer) or (self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer))
 
             # Change threshold only applies to direct hardware commands. When
             # routing through the mixer the tracks must always be re-sent on

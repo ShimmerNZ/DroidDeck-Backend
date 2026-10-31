@@ -63,6 +63,41 @@ def _save_json_atomic(path, data, indent=4):
         return False
 
 
+def _read_mjpeg_part(raw):
+    """
+    Read the next part of a multipart MJPEG stream and return its JPEG bytes,
+    or None when the stream ends.
+
+    Parts are read by their Content-Length so each frame is returned as soon
+    as it has fully arrived. Reading fixed-size chunks instead blocks until
+    the chunk is full, which holds frames back and hands several over at once.
+    """
+    content_length = None
+    while True:
+        line = raw.readline()
+        if not line:
+            return None
+        line = line.strip()
+        if not line:
+            if content_length is not None:
+                break
+            continue
+        name, _, value = line.partition(b':')
+        if name.strip().lower() == b'content-length':
+            try:
+                content_length = int(value.strip())
+            except ValueError:
+                content_length = None
+
+    data = bytearray()
+    while len(data) < content_length:
+        chunk = raw.read(content_length - len(data))
+        if not chunk:
+            return None
+        data.extend(chunk)
+    return bytes(data)
+
+
 class CameraProxy:
     def __init__(self):
         self.load_config()
@@ -366,7 +401,6 @@ class CameraProxy:
         dropouts spread across a long session can never accumulate into a
         permanent stream shutdown.
         """
-        bytes_buffer = bytearray()
         last_fps_check = time.time()
         frames_this_second = 0
 
@@ -404,40 +438,23 @@ class CameraProxy:
 
                 logger.info("Connected to ESP32 camera stream")
 
-                bytes_buffer.clear()
-
-                for chunk in stream.iter_content(chunk_size=self.chunk_size):
-                    if not self.streaming_enabled or not self.running:
+                while self.streaming_enabled and self.running:
+                    jpeg_frame = _read_mjpeg_part(stream.raw)
+                    if jpeg_frame is None:
                         break
 
-                    bytes_buffer.extend(chunk)
+                    current_time = time.time()
 
-                    # Process frames as they arrive
-                    while True:
-                        start_marker = bytes_buffer.find(b'\xff\xd8')  # JPEG start
-                        if start_marker == -1:
-                            break
+                    # Smart frame processing - prevent accumulation
+                    if self._process_frame_smart(jpeg_frame, current_time):
+                        frames_this_second += 1
 
-                        end_marker = bytes_buffer.find(b'\xff\xd9', start_marker)  # JPEG end
-                        if end_marker == -1:
-                            break
-
-                        # Extract JPEG frame
-                        jpeg_frame = bytes_buffer[start_marker:end_marker + 2]
-                        del bytes_buffer[:end_marker + 2]
-
-                        current_time = time.time()
-
-                        # Smart frame processing - prevent accumulation
-                        if self._process_frame_smart(jpeg_frame, current_time):
-                            frames_this_second += 1
-
-                        # FPS monitoring
-                        if current_time - last_fps_check >= 1.0:
-                            if frames_this_second > 0:
-                                logger.debug(f"Processing FPS: {frames_this_second}")
-                            last_fps_check = current_time
-                            frames_this_second = 0
+                    # FPS monitoring
+                    if current_time - last_fps_check >= 1.0:
+                        if frames_this_second > 0:
+                            logger.debug(f"Processing FPS: {frames_this_second}")
+                        last_fps_check = current_time
+                        frames_this_second = 0
 
             except requests.exceptions.RequestException as e:
                 delay = self._record_connection_failure(e)

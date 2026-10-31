@@ -10,7 +10,10 @@ should react:
     SCAN     nobody in view: sweep the head left to right looking for people
     FOCUS    hold attention on one person for a randomised dwell time, then
              move to someone else if there is anyone else to look at
-    LOST     the focused person left the frame: hold and search briefly
+    LOST     the focused person left the frame: if they were last seen near
+             the left or right edge, keep turning that way to the end of the
+             pan range and pause there before scanning back; otherwise hold
+             and search briefly
     REST     nobody seen for a long time: centre the head and watch quietly,
              waking immediately if someone appears
     STANDBY  observations are stale: do nothing
@@ -28,6 +31,7 @@ decisions are only logged, so the behaviour can be watched on the bench first.
 
 import asyncio
 import logging
+import math
 import random
 import time
 from collections import deque
@@ -51,6 +55,11 @@ logger = logging.getLogger(__name__)
 # The current state is re-published this often so a frontend that connects
 # late, or reconnects, learns it without waiting for the next state change
 STATUS_HEARTBEAT_SECONDS = 2.0
+
+# How often a summary of camera frame ages is logged, and the oldest age (in
+# seconds) a reading may report before it is treated as bad data and ignored
+LATENCY_REPORT_SECONDS = 5.0
+LATENCY_MAX_AGE_SECONDS = 10.0
 
 
 class AttentionState(Enum):
@@ -89,6 +98,15 @@ class AttentionConfig:
     # Face height (fraction of frame height) treated as "as close as it gets"
     size_reference: float = 0.3
 
+    # When the focused person is lost, how far from frame centre (as a
+    # fraction of the frame, 0..0.5) they must last have been seen for the
+    # head to keep turning after them - someone who walked off faster than
+    # tracking could follow is last seen near the edge they left by
+    chase_edge_offset: float = 0.25
+    # How far the head turns when chasing, in normalised pan (full range,
+    # unlike scanning, since the person was heading that way)
+    chase_pan_limit: float = 1.0
+
     # Scan stop spacing, as a fraction of the normalised -1..+1 pan range
     scan_step: float = 0.2
     # How far either side of centre scanning is allowed to go - well short
@@ -96,6 +114,8 @@ class AttentionConfig:
     # someone off to the side), so scanning doesn't read as a full 90
     # degree sweep each way
     scan_pan_limit: float = 0.5
+    # Least time allowed for a step's glide before the pause after it
+    # starts; a slower glide than this is waited out in full
     scan_travel: float = 0.6
     # Wide, irregular spacing between steps so scanning doesn't read as
     # a metronome
@@ -142,18 +162,30 @@ class AttentionConfig:
     gaze_settle_threshold: float = 0.08
     # Corrections smaller than this (in -1..+1 servo units) are skipped
     gaze_min_update: float = 0.03
-    # Settle time after a correction's glide finishes before the camera is
-    # trusted again: covers body sway once the head stops, plus the
-    # camera -> ESP32 -> proxy -> Steam Deck -> MediaPipe -> backend
-    # latency. Tilt and pan respectively; when both axes move, the longer
-    # of the two waits applies.
-    gaze_correction_pause: float = 0.6
-    gaze_pan_correction_pause: float = 0.6
+    # Settle time, counted from when the head is within about a degree of
+    # its target, before the camera is trusted again: covers body sway once
+    # the head stops, plus the camera -> ESP32 -> proxy -> Steam Deck ->
+    # MediaPipe -> backend latency (about a quarter of a second). Tilt and
+    # pan respectively; when both axes move, the longer of the two waits
+    # applies.
+    gaze_correction_pause: float = 0.3
+    gaze_pan_correction_pause: float = 0.3
     # Pan glide rate (-1..+1 units per second) while tracking. Slower than
     # the scan rate because swinging the heavy head quickly sways the body.
-    gaze_track_pan_rate: float = 0.15
+    gaze_track_pan_rate: float = 0.30
     # Tilt glide rate (-1..+1 units per second), scanning or tracking
     gaze_tilt_rate: float = 0.35
+    # How quickly each axis speeds up and slows down, in -1..+1 units per
+    # second squared. The head eases into and out of every glide instead of
+    # starting and stopping at full speed, so a stop doesn't jolt the body.
+    # Lower is gentler but makes every move take longer, since a short move
+    # never reaches its full glide rate. Pan has one value for tracking
+    # someone, one for scanning and centring, and a quicker one for turning
+    # after someone who has left view. 0 turns easing off.
+    gaze_pan_accel: float = 0.375
+    gaze_scan_pan_accel: float = 0.375
+    gaze_chase_pan_accel: float = 0.875
+    gaze_tilt_accel: float = 1.4
     # How far the head moves per unit of frame error (servo units per
     # frame fraction). The camera is in the head, so an error of dx means
     # "turn by dx * gain from where you are now", not "turn to dx * gain".
@@ -167,7 +199,7 @@ class AttentionConfig:
     # Number of consecutive camera frames, all captured with the head
     # still, averaged into one error reading before a correction is made.
     # Smooths detection jitter without mixing in frames from before a move.
-    gaze_error_samples: int = 2
+    gaze_error_samples: int = 1
     # How far down from the top of the detected body box to aim, as a
     # fraction of the box height. 0.0 is the very top edge of the box and
     # 0.5 its centre, which sits around the stomach for a whole-body box.
@@ -180,7 +212,7 @@ class GazeOutput:
     def center(self) -> None:
         pass
 
-    def pan_to(self, pan: float) -> None:
+    def pan_to(self, pan: float, level_tilt: bool = True) -> None:
         pass
 
     def track(self, person: Person, now: float) -> None:
@@ -191,6 +223,18 @@ class GazeOutput:
 
     def release(self) -> None:
         pass
+
+    def stop(self, now: float) -> None:
+        """Halt any glide in progress where the head is now."""
+        pass
+
+    def current_pan(self) -> float:
+        """Pan the head is at, or gliding towards."""
+        return 0.0
+
+    def remaining_travel_time(self) -> float:
+        """Seconds until the head reaches its current target."""
+        return 0.0
 
 
 class _HeadOnlyGaze:
@@ -209,9 +253,9 @@ class _HeadOnlyGaze:
       look  average the error over gaze_error_samples camera frames, all
             captured while the head was still
       move  correct pan and/or tilt, one continuous glide per axis
-      wait  ignore frames until the glide has finished (distance / glide
-            rate) plus a settle margin for body sway and pipeline latency,
-            then look again
+      wait  ignore frames until the glide has finished (its travel time at
+            the glide rate, including any easing) plus a settle margin for
+            body sway and pipeline latency, then look again
     Frames captured while the head is moving show the camera's own motion
     rather than the person's, so they are never used.
 
@@ -230,6 +274,10 @@ class _HeadOnlyGaze:
         self._pan_holding = False
         self._tilt_holding = False
         self._measure_from = 0.0
+        # Frames are ignored until at least this time after a glide is
+        # halted part way, since frames from mid-glide are still in the
+        # camera pipeline
+        self._hold_until = 0.0
         self._samples: Deque[Tuple[float, float]] = deque(maxlen=max(1, int(config.gaze_error_samples)))
         self._last_raw_sample: Optional[Tuple[float, float]] = None
 
@@ -240,15 +288,29 @@ class _HeadOnlyGaze:
         self._tilt_holding = False
         self._samples.clear()
         self._last_raw_sample = None
-        remaining = self._remaining_travel_time()
-        if remaining > 0.0:
-            self._measure_from = now + remaining + self._config.gaze_pan_correction_pause
+        if self._remaining_travel_time() > 0.0:
+            self._measure_from = (now + self._remaining_look_time()
+                                  + self._config.gaze_pan_correction_pause)
         else:
             self._measure_from = now
+        self._measure_from = max(self._measure_from, self._hold_until)
 
     def _remaining_travel_time(self) -> float:
         """Seconds until the physical head reaches the current target."""
         return 0.0
+
+    def _remaining_look_time(self) -> float:
+        """Seconds until the physical head is close enough to the current
+        target for the pause before the next look to start counting."""
+        return self._remaining_travel_time()
+
+    def _pan_move_time(self, distance: float) -> float:
+        """Seconds a pan correction of this size takes, starting from rest."""
+        return distance / max(self._config.gaze_track_pan_rate, 0.01)
+
+    def _tilt_move_time(self, distance: float) -> float:
+        """Seconds a tilt correction of this size takes, starting from rest."""
+        return distance / max(self._config.gaze_tilt_rate, 0.01)
 
     def _update(self, person: Person, now: float) -> None:
         cfg = self._config
@@ -301,7 +363,7 @@ class _HeadOnlyGaze:
             distance = abs(new_pan - self._pan)
             if distance >= cfg.gaze_min_update:
                 self._pan = new_pan
-                pan_wait = distance / max(cfg.gaze_track_pan_rate, 0.01) + cfg.gaze_pan_correction_pause
+                pan_wait = self._pan_move_time(distance) + cfg.gaze_pan_correction_pause
                 wait = pan_wait if wait is None else max(wait, pan_wait)
 
         if not self._tilt_holding:
@@ -309,7 +371,7 @@ class _HeadOnlyGaze:
             distance = abs(new_tilt - self._tilt)
             if distance >= cfg.gaze_min_update:
                 self._tilt = new_tilt
-                tilt_wait = distance / max(cfg.gaze_tilt_rate, 0.01) + cfg.gaze_correction_pause
+                tilt_wait = self._tilt_move_time(distance) + cfg.gaze_correction_pause
                 wait = tilt_wait if wait is None else max(wait, tilt_wait)
 
         if wait is not None:
@@ -345,9 +407,14 @@ class LoggingGazeOutput(GazeOutput, _HeadOnlyGaze):
         self._reset(0.0)
         self._emit("gaze: centre head")
 
-    def pan_to(self, pan: float) -> None:
+    def pan_to(self, pan: float, level_tilt: bool = True) -> None:
         self._tracked_id = None
-        self._emit(f"gaze: scan to pan {pan:+.2f}")
+        self._pan = max(-1.0, min(1.0, pan))
+        if level_tilt:
+            self._tilt = 0.0
+            self._emit(f"gaze: scan to pan {pan:+.2f}")
+        else:
+            self._emit(f"gaze: turn to pan {pan:+.2f}, tilt held at {self._tilt:+.2f}")
 
     def track(self, person: Person, now: float) -> None:
         self._update(person, now)
@@ -361,6 +428,15 @@ class LoggingGazeOutput(GazeOutput, _HeadOnlyGaze):
         self._tilt = 0.0
         self._reset(0.0)
         self._emit("gaze: released")
+
+    def stop(self, now: float) -> None:
+        self._emit(f"gaze: stop turning at pan {self._pan:+.2f}")
+
+    def current_pan(self) -> float:
+        return self._pan
+
+    def remaining_travel_time(self) -> float:
+        return self._remaining_travel_time()
 
     def _log(self, message: str) -> None:
         self._emit(message)
@@ -424,16 +500,42 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
         # rather than added as more servo_config fields.
         self._applied_pan = 0.0
         self._applied_tilt = 0.0
-        # Which rate pan glides at right now - swapped between the fast
-        # scan sweep rate and the slower tracking rate depending on
-        # whether the head is scanning or actively centering on someone
-        # (see pan_to()/track()/center() below). Tilt has no such split:
+        # How fast each axis is gliding right now (normalised units per
+        # second, signed). The glide ramps this up and down rather than
+        # jumping between standstill and full rate.
+        self._pan_vel = 0.0
+        self._tilt_vel = 0.0
+        # Which rate and acceleration pan glides at right now - swapped
+        # between the scan sweep values and the tracking values depending
+        # on whether the head is scanning, turning after someone or
+        # actively centering on someone (see pan_to()/track()/center()
+        # below). Tilt has no such split:
         # nodding up/down doesn't sway the body the way panning does, so
-        # it always uses cfg.gaze_tilt_rate.
+        # it always uses cfg.gaze_tilt_rate and cfg.gaze_tilt_accel.
         self._pan_max_rate = self._MAX_RATE
+        self._pan_accel = self._config.gaze_scan_pan_accel
         asyncio.ensure_future(self._interp_loop())
 
     _INTERP_INTERVAL = 0.02  # 50Hz - matches the motion mixer's own tick rate
+    # Longest time one interpolation step is allowed to cover, so a stalled
+    # event loop can't turn into a lurch when it resumes
+    _MAX_STEP_TIME = 0.1
+    # Share of an axis's acceleration that a glide plans to brake with
+    _BRAKE_FRACTION = 0.8
+    # Within this distance of its target a glide slows more gently than a
+    # constant-deceleration stop would, so the head eases onto the target
+    # instead of stopping hard. The slow-down is a power of the remaining
+    # distance; a higher exponent gives a softer, longer landing
+    _LANDING_DISTANCE = 0.05
+    _LANDING_EXPONENT = 0.85
+    # A glide this close to its target is treated as having arrived
+    _ARRIVE_WITHIN = 0.001
+    # The pause before the next look starts counting once the head is this
+    # close to its target (about 1 degree of pan), which is within the dead
+    # zone, rather than waiting out the last of the landing
+    _LOOK_WITHIN = 0.011
+    # Longest glide the travel time prediction will step through
+    _MAX_GLIDE_STEPS = 1500
     # Deliberately well under joystick's configured speed (a joystick
     # command can legitimately need to move fast) - attention behaviour
     # should never look like it's racing to a point, always a deliberate,
@@ -442,20 +544,107 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
     _MAX_RATE = 0.35  # normalised units per second
 
     async def _interp_loop(self) -> None:
+        last = time.monotonic()
         while True:
             await asyncio.sleep(self._INTERP_INTERVAL)
-            pan_max_delta = self._pan_max_rate * self._INTERP_INTERVAL
-            tilt_max_delta = self._config.gaze_tilt_rate * self._INTERP_INTERVAL
+            now = time.monotonic()
+            dt = min(now - last, self._MAX_STEP_TIME)
+            last = now
+            cfg = self._config
             moved = False
-            if abs(self._pan - self._applied_pan) > 1e-6:
-                self._applied_pan = self._step_toward(self._applied_pan, self._pan, pan_max_delta)
+            if self._pan_vel != 0.0 or abs(self._pan - self._applied_pan) > 1e-6:
+                self._applied_pan, self._pan_vel = self._advance(
+                    self._applied_pan, self._pan_vel, self._pan,
+                    self._pan_max_rate, self._pan_accel, dt)
                 moved = True
-            if abs(self._tilt - self._applied_tilt) > 1e-6:
-                self._applied_tilt = self._step_toward(self._applied_tilt, self._tilt, tilt_max_delta)
+            if self._tilt_vel != 0.0 or abs(self._tilt - self._applied_tilt) > 1e-6:
+                self._applied_tilt, self._tilt_vel = self._advance(
+                    self._applied_tilt, self._tilt_vel, self._tilt,
+                    cfg.gaze_tilt_rate, cfg.gaze_tilt_accel, dt)
                 moved = True
             if moved:
                 self._layer.set_channel(self._pan_channel, self._pulse_for(self._pan_channel, self._applied_pan))
                 self._layer.set_channel(self._tilt_channel, self._pulse_for(self._tilt_channel, self._applied_tilt))
+
+    @staticmethod
+    def _advance(pos: float, vel: float, target: float, max_rate: float,
+                 accel: float, dt: float) -> Tuple[float, float]:
+        """Move one axis a single step toward its target, returning the new
+        position and velocity. The axis accelerates at accel until it
+        reaches max_rate and begins braking early enough to come to rest on
+        the target, easing down over the last stretch. An accel of 0 or less
+        glides at a constant max_rate with no ramps."""
+        max_rate = max(max_rate, 0.01)
+        dist = target - pos
+
+        if accel <= 0.0:
+            step = max_rate * dt
+            if abs(dist) <= step:
+                return target, 0.0
+            return pos + math.copysign(step, dist), 0.0
+
+        if abs(dist) < 1e-6 and abs(vel) < 1e-6:
+            return target, 0.0
+
+        # Fastest speed from which braking still stops on target. Braking is
+        # planned at a fraction of the available deceleration so the speed
+        # can follow the plan right down to the target
+        cls = MotionMixerGazeOutput
+        brake = accel * cls._BRAKE_FRACTION
+        away = abs(dist)
+        speed = min(max_rate, math.sqrt(2.0 * brake * away))
+        if away < cls._LANDING_DISTANCE:
+            landing_gain = math.sqrt(2.0 * brake) * cls._LANDING_DISTANCE ** (0.5 - cls._LANDING_EXPONENT)
+            speed = min(speed, landing_gain * away ** cls._LANDING_EXPONENT)
+        desired = math.copysign(speed, dist)
+        max_dv = accel * dt
+        vel += max(-max_dv, min(max_dv, desired - vel))
+        new_pos = pos + vel * dt
+
+        if (dist > 0.0 and new_pos >= target) or (dist < 0.0 and new_pos <= target):
+            return target, 0.0
+        if abs(target - new_pos) <= cls._ARRIVE_WITHIN:
+            return target, 0.0
+        return new_pos, vel
+
+    @staticmethod
+    def _glide_times(dist: float, vel: float, max_rate: float, accel: float) -> Tuple[float, float]:
+        """Seconds until an axis at velocity vel, with a target dist away,
+        first gets within _LOOK_WITHIN of it and until it has arrived.
+        Steps the same motion _interp_loop applies, so the prediction
+        matches what the head does."""
+        cls = MotionMixerGazeOutput
+        max_rate = max(max_rate, 0.01)
+        if accel <= 0.0:
+            return max(0.0, abs(dist) - cls._LOOK_WITHIN) / max_rate, abs(dist) / max_rate
+
+        dt = cls._INTERP_INTERVAL
+        pos = 0.0
+        elapsed = 0.0
+        look: Optional[float] = None
+        for _ in range(cls._MAX_GLIDE_STEPS):
+            if look is None and abs(dist - pos) <= cls._LOOK_WITHIN:
+                look = elapsed
+            if pos == dist and vel == 0.0:
+                break
+            pos, vel = cls._advance(pos, vel, dist, max_rate, accel, dt)
+            elapsed += dt
+        return (elapsed if look is None else look), elapsed
+
+    @staticmethod
+    def _axis_travel_time(dist: float, vel: float, max_rate: float, accel: float) -> float:
+        return MotionMixerGazeOutput._glide_times(dist, vel, max_rate, accel)[1]
+
+    @staticmethod
+    def _axis_look_time(dist: float, vel: float, max_rate: float, accel: float) -> float:
+        return MotionMixerGazeOutput._glide_times(dist, vel, max_rate, accel)[0]
+
+    @staticmethod
+    def _coast_target(pos: float, vel: float, accel: float) -> float:
+        """Where an axis moving at vel comes to rest if it brakes now."""
+        if accel <= 0.0:
+            return pos
+        return max(-1.0, min(1.0, pos + math.copysign(vel * vel / (2.0 * accel), vel)))
 
     @staticmethod
     def _step_toward(current: float, target: float, max_delta: float) -> float:
@@ -479,10 +668,28 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
         pass  # _interp_loop is what actually writes to the layer, gradually
 
     def _remaining_travel_time(self) -> float:
-        pan_rate = max(self._pan_max_rate, 0.01)
-        tilt_rate = max(self._config.gaze_tilt_rate, 0.01)
-        return max(abs(self._pan - self._applied_pan) / pan_rate,
-                   abs(self._tilt - self._applied_tilt) / tilt_rate)
+        cfg = self._config
+        return max(
+            self._axis_travel_time(self._pan - self._applied_pan, self._pan_vel,
+                                   self._pan_max_rate, self._pan_accel),
+            self._axis_travel_time(self._tilt - self._applied_tilt, self._tilt_vel,
+                                   cfg.gaze_tilt_rate, cfg.gaze_tilt_accel))
+
+    def _remaining_look_time(self) -> float:
+        cfg = self._config
+        return max(
+            self._axis_look_time(self._pan - self._applied_pan, self._pan_vel,
+                                 self._pan_max_rate, self._pan_accel),
+            self._axis_look_time(self._tilt - self._applied_tilt, self._tilt_vel,
+                                 cfg.gaze_tilt_rate, cfg.gaze_tilt_accel))
+
+    def _pan_move_time(self, distance: float) -> float:
+        cfg = self._config
+        return self._axis_look_time(distance, 0.0, cfg.gaze_track_pan_rate, cfg.gaze_pan_accel)
+
+    def _tilt_move_time(self, distance: float) -> float:
+        cfg = self._config
+        return self._axis_look_time(distance, 0.0, cfg.gaze_tilt_rate, cfg.gaze_tilt_accel)
 
     def _log(self, message: str) -> None:
         self._emit(message)
@@ -493,17 +700,33 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
         self._tilt = 0.0
         self._reset(0.0)
         self._pan_max_rate = self._MAX_RATE
+        self._pan_accel = self._config.gaze_scan_pan_accel
         self._emit("gaze: centre head")
 
-    def pan_to(self, pan: float) -> None:
+    def pan_to(self, pan: float, level_tilt: bool = True) -> None:
         self._tracked_id = None
         self._pan_max_rate = self._MAX_RATE
+        self._pan_accel = (self._config.gaze_scan_pan_accel if level_tilt
+                           else self._config.gaze_chase_pan_accel)
         self._pan = max(-1.0, min(1.0, pan))
-        self._tilt = 0.0
-        self._emit(f"gaze: scan to pan {pan:+.2f}")
+        if level_tilt:
+            self._tilt = 0.0
+            self._emit(f"gaze: scan to pan {pan:+.2f}")
+        else:
+            self._emit(f"gaze: turn to pan {pan:+.2f}, tilt held at {self._tilt:+.2f}")
+
+    def stop(self, now: float) -> None:
+        cfg = self._config
+        moving = self._remaining_travel_time() > 0.0
+        self._pan = self._coast_target(self._applied_pan, self._pan_vel, self._pan_accel)
+        self._tilt = self._coast_target(self._applied_tilt, self._tilt_vel, cfg.gaze_tilt_accel)
+        if moving:
+            self._hold_until = now + self._remaining_look_time() + cfg.gaze_pan_correction_pause
+        self._emit(f"gaze: stop turning at pan {self._pan:+.2f}")
 
     def track(self, person: Person, now: float) -> None:
         self._pan_max_rate = self._config.gaze_track_pan_rate
+        self._pan_accel = self._config.gaze_pan_accel
         self._update(person, now)
 
     def glance_away(self) -> None:
@@ -515,6 +738,12 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
         self._tilt = 0.0
         self._reset(0.0)
         self._emit("gaze: released")
+
+    def current_pan(self) -> float:
+        return self._pan
+
+    def remaining_travel_time(self) -> float:
+        return self._remaining_travel_time()
 
 
 def _ascii(text: str) -> str:
@@ -599,6 +828,45 @@ class AttentionController:
 
         self._people = people
         self._last_update = now
+        self._note_frame_age(message.get("frame_time"), message.get("deck_ms"), now)
+
+    def _note_frame_age(self, frame_time: Any, deck_ms: Any, now: float) -> None:
+        """Record how old a reading's camera frame was when it reached the
+        backend, and log a summary every LATENCY_REPORT_SECONDS. frame_time
+        is the camera proxy's monotonic arrival time for the frame, which
+        shares a clock with this process; deck_ms is how long the frontend
+        held the frame before sending the reading."""
+        if frame_time is None:
+            return
+        try:
+            age = time.monotonic() - float(frame_time)
+            deck = None if deck_ms is None else float(deck_ms) / 1000.0
+        except (TypeError, ValueError):
+            return
+        if not 0.0 <= age <= LATENCY_MAX_AGE_SECONDS:
+            return
+
+        if self._latency_window_start is None:
+            self._latency_window_start = now
+        self._frame_ages.append((age, deck))
+        if now - self._latency_window_start >= LATENCY_REPORT_SECONDS:
+            self._report_latency(now)
+
+    def _report_latency(self, now: float) -> None:
+        ages = sorted(age for age, _ in self._frame_ages)
+        decks = [deck for _, deck in self._frame_ages if deck is not None]
+        count = len(ages)
+        mean = sum(ages) / count
+        p90 = ages[int(0.9 * (count - 1))]
+        text = (f"latency: frame age at backend avg {mean * 1000:.0f}ms, "
+                f"p90 {p90 * 1000:.0f}ms, max {ages[-1] * 1000:.0f}ms over {count} readings")
+        if decks:
+            deck_mean = sum(decks) / len(decks)
+            text += (f"; frontend {deck_mean * 1000:.0f}ms, "
+                     f"network {max(mean - deck_mean, 0.0) * 1000:.0f}ms")
+        self._event(text)
+        self._frame_ages.clear()
+        self._latency_window_start = now
 
     def select_person(self, person_id: Optional[int]) -> None:
         """Manually lock attention onto a specific tracked person (by id),
@@ -690,10 +958,12 @@ class AttentionController:
         if person is None:
             self._lost_at = now
             self._enter(AttentionState.LOST, f"person {self._focus_id} out of view")
+            self._start_chase()
             return
 
         self.output.track(person, now)
         self._last_focus_time[person.id] = now
+        self._last_focus_cx = person.cx
 
         if now >= self._next_reaction:
             self._react(cfg.dwell_categories, "dwell", now)
@@ -708,21 +978,50 @@ class AttentionController:
 
     def _tick_lost(self, now: float) -> None:
         cfg = self.config
+        chasing = self._chase_dir != 0.0
+
         if self._find(self._focus_id) is not None:
+            if chasing:
+                self._end_chase(now)
             self._enter(AttentionState.FOCUS, f"person {self._focus_id} back in view")
             return
+
+        # While turning after someone, anyone confirmed in view is taken
+        # straight away rather than after the grace period - most likely the
+        # same person, picked up under a new id - so the head stops instead of
+        # turning on past them
+        if chasing or now - self._lost_at >= cfg.lost_grace:
+            candidates = self._confirmed(now)
+            if candidates:
+                if chasing:
+                    self._end_chase(now)
+                self._start_focus(self._pick(candidates, now), now, cfg.acquire_categories)
+                return
 
         if now - self._lost_at < cfg.lost_grace:
             return
 
-        candidates = self._confirmed(now)
-        if candidates:
-            self._start_focus(self._pick(candidates, now), now, cfg.acquire_categories)
-            return
+        if chasing:
+            # Finish turning after them, then pause at the end of the turn
+            if self.output.remaining_travel_time() > 0.0:
+                return
+            if self._chase_pause_until is None:
+                self._chase_pause_until = now + self.rng.uniform(cfg.scan_pause_min,
+                                                                 cfg.scan_pause_max)
+            if now < self._chase_pause_until:
+                return
 
         self._react(cfg.lost_categories, "lost", now)
         self._focus_id = None
-        self._enter_scan(now, "focus lost, nobody else in view")
+
+        if self._chase_dir != 0.0:
+            # Nobody found that way: scan back across, starting from here
+            self._scan_dir = -self._chase_dir
+            self._scan_first = False
+            self._chase_dir = 0.0
+            self._enter_scan(now, "focus lost, nobody found after turning, scanning back")
+        else:
+            self._enter_scan(now, "focus lost, nobody else in view")
 
     def _tick_rest(self, now: float) -> None:
         candidates = self._confirmed(now)
@@ -740,6 +1039,10 @@ class AttentionController:
     def _enter_scan(self, now: float, note: str) -> None:
         self._empty_since = now
         self._scan_next = now
+        # Scanning carries on from wherever the head actually is, which after
+        # tracking or turning after someone can be well away from the last
+        # scan stop
+        self._scan_pan = self.output.current_pan()
         self._enter(AttentionState.SCAN, note)
 
     def _enter_rest(self, now: float) -> None:
@@ -758,10 +1061,41 @@ class AttentionController:
         self._next_reaction = now + self.rng.uniform(cfg.reaction_interval_min,
                                                      cfg.reaction_interval_max)
         self._last_focus_time[person.id] = now
+        self._last_focus_cx = person.cx
         self._prune_focus_history(now)
         self._enter(AttentionState.FOCUS, f"person {person.id}, dwell {dwell:.1f}s")
         self.output.track(person, now)
         self._react(categories, "acquire", now)
+
+    def _start_chase(self) -> None:
+        """If the focused person was last seen near the left or right edge of
+        the frame, keep turning the head that way to the end of the pan range,
+        on the assumption they moved off faster than tracking could follow.
+        Someone lost mid-frame (blocked from view, or a missed detection) gives
+        no direction, so the head holds as before."""
+        cfg = self.config
+        self._chase_dir = 0.0
+        self._chase_pause_until = None
+        if self._last_focus_cx is None:
+            return
+
+        offset = self._last_focus_cx - 0.5
+        if abs(offset) < cfg.chase_edge_offset:
+            return
+
+        self._chase_dir = 1.0 if offset > 0 else -1.0
+        side = "right" if self._chase_dir > 0 else "left"
+        self._event(f"person {self._focus_id} left view to the {side}, turning after them")
+        # Tilt stays where it was while turning after them; it only levels
+        # off once scanning resumes
+        self.output.pan_to(self._chase_dir * cfg.chase_pan_limit, level_tilt=False)
+
+    def _end_chase(self, now: float) -> None:
+        """Someone was seen while turning: stop the head where it is so
+        tracking can take over from there."""
+        self._chase_dir = 0.0
+        self._chase_pause_until = None
+        self.output.stop(now)
 
     def _switch_focus(self, now: float) -> None:
         cfg = self.config
@@ -807,7 +1141,8 @@ class AttentionController:
         self._scan_pan = max(-pan_limit, min(pan_limit, target))
 
         self.output.pan_to(self._scan_pan)
-        self._scan_next = now + cfg.scan_travel + self.rng.uniform(cfg.scan_pause_min, cfg.scan_pause_max)
+        travel = max(cfg.scan_travel, self.output.remaining_travel_time())
+        self._scan_next = now + travel + self.rng.uniform(cfg.scan_pause_min, cfg.scan_pause_max)
 
     # ---- helpers ----
 
@@ -950,6 +1285,9 @@ class AttentionController:
         self._next_reaction = 0.0
         self._last_reaction = float("-inf")
         self._lost_at = 0.0
+        self._last_focus_cx: Optional[float] = None
+        self._chase_dir = 0.0
+        self._chase_pause_until: Optional[float] = None
         self._rest_until = 0.0
         self._empty_since = 0.0
         self._scan_first = True
@@ -959,6 +1297,8 @@ class AttentionController:
         self._standby_note = ""
         self._last_publish = float("-inf")
         self._pending_reaction: Optional[Tuple[List[str], str, float]] = None
+        self._frame_ages: List[Tuple[float, Optional[float]]] = []
+        self._latency_window_start: Optional[float] = None
 
     async def _run(self) -> None:
         while True:
