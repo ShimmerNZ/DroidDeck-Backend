@@ -753,6 +753,28 @@ class HardwareService:
             logger.error(f"Get Maestro info error: {e}")
             return None
 
+    async def get_maestro_errors(self) -> Dict[str, Any]:
+        """Read both Maestro error registers and return the latched error state"""
+        loop = asyncio.get_running_loop()
+        result = {}
+        for key, maestro in (("maestro1", self.maestro1), ("maestro2", self.maestro2)):
+            if not maestro or not hasattr(maestro, "read_errors"):
+                result[key] = {"code": None, "errors": [], "last_error_time": None}
+                continue
+            try:
+                await loop.run_in_executor(None, maestro.read_errors)
+            except Exception as e:
+                logger.debug(f"Maestro error read failed for {key}: {e}")
+            result[key] = maestro.get_error_status()
+        return result
+
+    async def clear_maestro_errors(self):
+        """Clear both Maestro error registers and their latched codes"""
+        loop = asyncio.get_running_loop()
+        for maestro in (self.maestro1, self.maestro2):
+            if maestro and hasattr(maestro, "clear_errors"):
+                await loop.run_in_executor(None, maestro.clear_errors)
+
     async def restart_maestro_script(self, maestro_id: str, script_number: int) -> bool:
         """Restart a script at the specified subroutine number on a Maestro controller"""
         try:

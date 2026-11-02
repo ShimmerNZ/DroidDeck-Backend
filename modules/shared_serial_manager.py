@@ -34,6 +34,25 @@ CMD_GET_POSITION       = 0x10  # channel -> 2 byte response (quarter-us)
 CMD_SET_MULTIPLE       = 0x1F  # count, first channel, then low7/high7 pairs
 CMD_GET_FIRMWARE       = 0x21  # -> firmware/device info response
 CMD_RESTART_SCRIPT     = 0xA7  # subroutine low7, subroutine high7
+CMD_GET_ERRORS         = 0x21  # -> 2 byte error register; reading it clears the errors
+
+# Maestro error register bits (https://www.pololu.com/docs/0J40 section 4.e)
+MAESTRO_ERROR_NAMES = (
+    "Serial signal",      # bit 0
+    "Serial overrun",     # bit 1
+    "RX buffer full",     # bit 2
+    "Serial CRC",         # bit 3
+    "Serial protocol",    # bit 4
+    "Serial timeout",     # bit 5
+    "Script stack",       # bit 6
+    "Script call stack",  # bit 7
+    "Script PC",          # bit 8
+)
+
+
+def maestro_error_names(code: int) -> List[str]:
+    """Names of the error bits set in a Maestro error code"""
+    return [name for bit, name in enumerate(MAESTRO_ERROR_NAMES) if code & (1 << bit)]
 
 # Queue and timing tuning
 COMMAND_QUEUE_MAXSIZE  = 200    # ~4 seconds of 50Hz mixer output
@@ -740,6 +759,12 @@ class EnhancedMaestroControllerShared:
         self.connected = False
         self.channel_count = 0
 
+        # Reading the Maestro's error register clears it, so every error code
+        # read is latched here until the operator clears it
+        self.latched_error_code = 0
+        self.last_error_time: Optional[float] = None
+        self.errors_read = False
+
         # Register with shared manager
         if self.shared_manager.register_device(device_id, device_number, self):
             logger.info(f"Maestro controller created: {device_id} (device #{device_number})")
@@ -816,6 +841,10 @@ class EnhancedMaestroControllerShared:
                         detected_channels = None
 
                         if len(response) >= 2:
+                            # This query is the Get Errors command and clears the
+                            # Maestro's error register, so keep what it returned
+                            self._record_error_code(response[0] | (response[1] << 8))
+
                             device_info = response.hex()
                             logger.debug(f"  Device info: {device_info}")
 
@@ -1034,6 +1063,62 @@ class EnhancedMaestroControllerShared:
             expects_response=True
         )
         return self.shared_manager.send_command(command)
+
+    def _record_error_code(self, code: int):
+        """Latch an error code read from the Maestro"""
+        self.errors_read = True
+        if code:
+            self.latched_error_code |= code
+            self.last_error_time = time.time()
+            logger.warning(f"{self.device_id} reported errors 0x{code:04X}: "
+                           f"{', '.join(maestro_error_names(code))}")
+
+    def read_errors(self) -> Optional[int]:
+        """Read (and so clear) the Maestro error register; the result is latched.
+
+        Blocking serial I/O - call from a worker thread, not the event loop.
+        Returns the code read, or None if the Maestro did not answer.
+        """
+        if not self.connected:
+            return None
+
+        manager = self.shared_manager
+        response = b""
+        try:
+            with manager.connection_lock:
+                conn = manager.serial_conn
+                if not manager.connected or not conn or not conn.is_open:
+                    return None
+                # Clear stale bytes so the response pairs with this request
+                conn.reset_input_buffer()
+                conn.write(bytes([POLOLU_START_BYTE, self.device_number, CMD_GET_ERRORS]))
+                response = conn.read(2)
+        except (serial.SerialException, OSError) as e:
+            manager._handle_connection_loss(e)
+            return None
+
+        if len(response) != 2:
+            logger.debug(f"{self.device_id} gave no error register response ({len(response)} bytes)")
+            return None
+
+        code = response[0] | (response[1] << 8)
+        self._record_error_code(code)
+        return code
+
+    def clear_errors(self):
+        """Clear the Maestro error register and the latched error code"""
+        self.read_errors()
+        self.latched_error_code = 0
+        self.last_error_time = None
+        logger.info(f"{self.device_id} errors cleared")
+
+    def get_error_status(self) -> Dict[str, Any]:
+        """Latched error state for the frontend; code is None until a read succeeds"""
+        return {
+            "code": self.latched_error_code if self.errors_read else None,
+            "errors": maestro_error_names(self.latched_error_code),
+            "last_error_time": self.last_error_time,
+        }
 
     def get_status_dict(self) -> Dict[str, Any]:
         """Get controller status as dictionary"""

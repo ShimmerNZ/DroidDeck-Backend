@@ -14,6 +14,7 @@ from typing import Dict, Any, Optional, Callable
 
 from modules.attention_controller import AttentionController, MotionMixerGazeOutput as AttentionMotionMixerGazeOutput
 from modules.config_store import ConfigStore
+from modules.pi_status import PiStatusMonitor
 from modules.file_utils import save_json_atomic
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class WebSocketMessageHandler:
         self._imu_active = False  # tracks whether frontend is streaming IMU data
         self._prev_buttons: Dict[str, bool] = {}  # last seen button state for delta filtering
         self.config_store = ConfigStore()
+        self.pi_status = PiStatusMonitor()
         self.attention = AttentionController(
             scene_engine, backend_ref, status_callback=self._broadcast_attention_status)
 
@@ -131,6 +133,7 @@ class WebSocketMessageHandler:
             "failsafe": self._handle_failsafe,
             "get_failsafe_state": self._handle_get_failsafe_state,
             "mode": self._handle_mode_control,
+            "clear_maestro_errors": self._handle_clear_maestro_errors,
 
             # Remote update
             "server_update": self._handle_server_update,
@@ -1576,6 +1579,21 @@ class WebSocketMessageHandler:
             except Exception:
                 pass
 
+            # Health screen: Maestro error registers, Pi supply flags and how
+            # the requesting Deck looks from the hotspot
+            try:
+                if hasattr(self.hardware_service, "get_maestro_errors"):
+                    status["maestro_errors"] = await self.hardware_service.get_maestro_errors()
+            except Exception as e:
+                logger.debug(f"Maestro error read failed: {e}")
+            try:
+                status["pi_power"] = await self.pi_status.get_power()
+                remote = getattr(websocket, "remote_address", None)
+                client_ip = remote[0] if remote else None
+                status["hotspot_station"] = await self.pi_status.get_hotspot_station(client_ip)
+            except Exception as e:
+                logger.debug(f"Pi status read failed: {e}")
+
             await self._send_websocket_message(websocket, status)
             
         except Exception as e:
@@ -1733,6 +1751,19 @@ class WebSocketMessageHandler:
             "type": "failsafe_state",
             "failsafe_active": state
         })
+
+    async def _handle_clear_maestro_errors(self, websocket, data: Dict[str, Any]):
+        """Clear both Maestro error registers and reply with the fresh state"""
+        try:
+            await self.hardware_service.clear_maestro_errors()
+            await self._send_websocket_message(websocket, {
+                "type": "maestro_errors_cleared",
+                "maestro_errors": await self.hardware_service.get_maestro_errors(),
+                "timestamp": time.time()
+            })
+        except Exception as e:
+            logger.error(f"Clear Maestro errors failed: {e}")
+            await self._send_error_response(websocket, f"Clear Maestro errors failed: {str(e)}")
 
     async def _handle_mode_control(self, websocket, data: Dict[str, Any]):
         """Handle system mode control (idle, demo, etc.)"""
