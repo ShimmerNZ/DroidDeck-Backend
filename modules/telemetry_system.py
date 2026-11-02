@@ -289,11 +289,12 @@ class SafeTelemetrySystem:
         self.setup_adc()
 
         # Hardware calibration constants
-        # Both current sensors are ACS758LCB-100B: 20 mV/A with a VCC/2 zero
-        # at VCC = 5.0V, scaled ratiometrically to the measured 5.235V rail
+        # Both current sensors are ACS758LCB-100B: 20 mV/A at VCC = 5.0V,
+        # scaled ratiometrically to the measured 5.235V rail. The zero is the
+        # ADC reading of A1 with the tracks stopped, not VCC/2 from a meter.
         self.VOLTAGE_DIVIDER_RATIO = 4.025
         self.ADC_REFERENCE_VOLTAGE = 5.235
-        self.ZERO_CURRENT_VOLTAGE = 2.6175
+        self.ZERO_CURRENT_VOLTAGE = 2.569
         self.CURRENT_SENSITIVITY = 0.02094
 
         # Simulation parameters for fallback
