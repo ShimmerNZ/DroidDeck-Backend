@@ -289,10 +289,12 @@ class SafeTelemetrySystem:
         self.setup_adc()
 
         # Hardware calibration constants
+        # Both current sensors are ACS758LCB-100B: 20 mV/A with a VCC/2 zero
+        # at VCC = 5.0V, scaled ratiometrically to the measured 5.235V rail
         self.VOLTAGE_DIVIDER_RATIO = 4.025
-        self.ADC_REFERENCE_VOLTAGE = 5.21
-        self.ZERO_CURRENT_VOLTAGE = 2.598
-        self.CURRENT_SENSITIVITY = 0.0297
+        self.ADC_REFERENCE_VOLTAGE = 5.235
+        self.ZERO_CURRENT_VOLTAGE = 2.6175
+        self.CURRENT_SENSITIVITY = 0.02094
 
         # Simulation parameters for fallback
         self.start_time = time.time()
@@ -626,9 +628,9 @@ class SafeTelemetrySystem:
             self.reading_history.append(reading)
             self.last_reading = reading
 
-            # Update battery run-time estimator
+            # Update battery run-time estimator from the battery-lead sensor (A2)
             self.battery_estimator.update(
-                current_amps=current_tracks,
+                current_amps=current_total,
                 voltage=battery_voltage,
                 timestamp=reading.timestamp,
             )
