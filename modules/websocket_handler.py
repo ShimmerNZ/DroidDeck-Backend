@@ -85,6 +85,7 @@ class WebSocketMessageHandler:
             
             # Scene management
             "scene": self._handle_scene_command,
+            "scene_stop": self._handle_scene_stop,
             "get_scenes": self._handle_get_scenes,
             "save_scenes": self._handle_save_scenes,
             "test_scene": self._handle_test_scene,
@@ -1260,6 +1261,14 @@ class WebSocketMessageHandler:
         })
 
     
+    async def _handle_scene_stop(self, websocket, data: Dict[str, Any]):
+        """Stop the playing scene (audio stops, servos return to neutral)"""
+        try:
+            await self.scene_engine.stop_current_scene()
+        except Exception as e:
+            logger.error(f"Scene stop error: {e}")
+            await self._send_error_response(websocket, f"Scene stop error: {str(e)}")
+
     async def _handle_get_scenes(self, websocket, data: Dict[str, Any]):
         """Handle request for scene list"""
         try:
@@ -1305,6 +1314,8 @@ class WebSocketMessageHandler:
                 "success": success,
                 "count": len(scenes) if success else 0,
                 "message": "Scenes saved successfully" if success else "Failed to save scenes",
+                # Saved scenes carry their calculated durations back to the frontend
+                "scenes": scenes if success else [],
                 "timestamp": time.time()
             }
             
@@ -1597,8 +1608,9 @@ class WebSocketMessageHandler:
                 self.scene_engine.scene_completed_callback = None
                 self.scene_engine.scene_error_callback = None
                 
-                # Play scene without any callbacks
-                success = await self.scene_engine.play_scene(scene_name)
+                # Play scene without any callbacks. Gestures are automatic,
+                # so they never interrupt a scene the operator started
+                success = await self.scene_engine.play_scene(scene_name, auto_triggered=True)
                 
                 # Restore callbacks immediately
                 self.scene_engine.scene_started_callback = original_started

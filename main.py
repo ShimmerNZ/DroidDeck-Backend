@@ -284,7 +284,7 @@ class WALLEBackend:
         try:
             if enable:
                 # ENABLE FAILSAFE - Disable all motors
-                logger.warning("🛡️ ENABLING FAILSAFE MODE")
+                logger.warning("ENABLING FAILSAFE MODE")
 
                 # Stop watchdog heartbeat (Maestro script will auto-center tracks)
                 self.watchdog_enabled = False
@@ -310,7 +310,7 @@ class WALLEBackend:
                 if hasattr(self, 'motion_mixer') and self.motion_mixer:
                     self.motion_mixer.set_failsafe_state(True)
                 gpio_ok = set_output(self.failsafe_indicator_pin, False)
-                logger.info(f"Failsafe indicator GPIO {self.failsafe_indicator_pin} → LOW (safe): {'OK' if gpio_ok else 'FAILED'}")
+                logger.info(f"Failsafe indicator GPIO {self.failsafe_indicator_pin} -> LOW (safe): {'OK' if gpio_ok else 'FAILED'}")
 
                 return {
                     "success": True,
@@ -321,7 +321,7 @@ class WALLEBackend:
                 }
             else:
                 # DISABLE FAILSAFE - Enable motors
-                logger.info("✅ DISABLING FAILSAFE MODE - Enabling motors")
+                logger.info("DISABLING FAILSAFE MODE - Enabling motors")
 
                 nema_status = {"enabled": False, "homed": False, "error": None}
 
@@ -339,20 +339,20 @@ class WALLEBackend:
                         try:
                             success = await stepper.home_motor()
                             if success:
-                                logger.info("✅ NEMA homing successful")
+                                logger.info("NEMA homing successful")
                                 nema_status["enabled"] = True
                                 nema_status["homed"] = True
                             else:
-                                logger.warning("⚠️ NEMA homing failed - motor remains disabled")
+                                logger.warning("NEMA homing failed - motor remains disabled")
                                 nema_status["error"] = "Homing failed"
                         except Exception as e:
-                            logger.error(f"❌ NEMA homing error: {e}")
+                            logger.error(f"NEMA homing error: {e}")
                             nema_status["error"] = str(e)
 
                 self.failsafe_active = False
                 self.state = SystemState.NORMAL
                 gpio_ok = set_output(self.failsafe_indicator_pin, True)
-                logger.info(f"Failsafe indicator GPIO {self.failsafe_indicator_pin} → HIGH (active): {'OK' if gpio_ok else 'FAILED'}")
+                logger.info(f"Failsafe indicator GPIO {self.failsafe_indicator_pin} -> HIGH (active): {'OK' if gpio_ok else 'FAILED'}")
 
                 # Allow the motion mixer's joystick layer to drive tracks again
                 if hasattr(self, 'motion_mixer') and self.motion_mixer:
@@ -364,7 +364,7 @@ class WALLEBackend:
                     self.watchdog_task = asyncio.create_task(
                         self.start_maestro_watchdog()
                     )
-                    logger.info("✅ Maestro watchdog ENABLED (channel-based approach)")
+                    logger.info("Maestro watchdog ENABLED (channel-based approach)")
 
                 return {
                     "success": True,
@@ -387,7 +387,7 @@ class WALLEBackend:
         for 4 consecutive checks (requires ~2.4 seconds of no updates).
         This approach uses normal servo commands alongside existing traffic.
         """
-        logger.info(f"🐕 Starting channel-based Maestro watchdog ({int(self.watchdog_interval*1000)}ms interval)")
+        logger.info(f"Starting channel-based Maestro watchdog ({int(self.watchdog_interval*1000)}ms interval)")
         logger.info(f"   Watchdog channel: {self.watchdog_channel}")
         logger.info(f"   Monitoring Maestro {self.maestro_for_tracks} for track safety")
         logger.info(f"   Position range: {self.watchdog_position_base - self.watchdog_position_toggle}us <-> {self.watchdog_position_base + self.watchdog_position_toggle}us")
@@ -1295,6 +1295,7 @@ class WALLEBackend:
                 "type": "scene_completed",
                 "scene_name": scene_name,
                 "success": success,
+                "interrupted": bool(scene_data.get("interrupted", False)),
                 "timestamp": time.time()
             }))
         except Exception as e:
@@ -1611,7 +1612,7 @@ async def process_bottango_imports_on_startup():
         import_dir = project_root / 'bottango_imports'
         scenes_dir = project_root / 'scenes'
 
-        logger.info("🎬 Checking for Bottango imports...")
+        logger.info("Checking for Bottango imports...")
 
         # Create watchdog and process imports
         watchdog = BottangoImportWatchdog(
@@ -1623,12 +1624,12 @@ async def process_bottango_imports_on_startup():
         converted_files = watchdog.process_imports()
 
         if converted_files:
-            logger.info(f"✅ Processed {len(converted_files)} Bottango import(s)")
+            logger.info(f"Processed {len(converted_files)} Bottango import(s)")
 
             # Update scene registry
             await update_scene_registry(scenes_dir)
         else:
-            logger.info("ℹ️  No Bottango imports to process")
+            logger.info("No Bottango imports to process")
 
     except Exception as e:
         logger.error(f"Error processing Bottango imports: {e}")
@@ -1679,7 +1680,7 @@ async def update_scene_registry(scenes_dir: Path):
         with open(registry_path, 'w') as f:
             json.dump(registry, f, indent=2)
 
-        logger.info(f"📋 Scene registry updated: {len(registry)} scene(s) -> {registry_path}")
+        logger.info(f"Scene registry updated: {len(registry)} scene(s) -> {registry_path}")
 
     except Exception as e:
         logger.error(f"Failed to update scene registry: {e}")
