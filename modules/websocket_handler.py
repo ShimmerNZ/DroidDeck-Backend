@@ -1342,19 +1342,24 @@ class WebSocketMessageHandler:
     
     async def _handle_test_scene(self, websocket, data: Dict[str, Any]):
         """Handle scene testing request"""
+        scene = data.get("scene", {})
+        if not isinstance(scene, dict):
+            await self._send_error_response(websocket, "Error testing scene: invalid scene data")
+            return
+        # Runs as a task so the handler stays free for control frames while the scene plays
+        asyncio.create_task(self._run_scene_test(websocket, scene))
+
+    async def _run_scene_test(self, websocket, scene: Dict[str, Any]):
+        """Play an unsaved scene and report the result to the requesting client"""
+        scene_name = scene.get("label", "Test Scene")
         try:
-            scene = data.get("scene", {})
-            scene_name = scene.get("label", "Test Scene")
-            
             success = await self.scene_engine.test_scene(scene)
-            
             await self._send_websocket_message(websocket, {
                 "type": "scene_tested",
                 "scene_name": scene_name,
                 "success": success,
                 "timestamp": time.time()
             })
-            
         except Exception as e:
             logger.error(f"Failed to test scene: {e}")
             await self._send_error_response(websocket, f"Error testing scene: {str(e)}")

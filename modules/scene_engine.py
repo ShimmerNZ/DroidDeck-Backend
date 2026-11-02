@@ -103,6 +103,7 @@ class EnhancedSceneEngine:
         
         # Scene execution state
         self.interrupt_requested = False
+        self._audio_start_task: Optional[asyncio.Task] = None
         self.pause_requested = False
         self.scene_start_time = 0
         # Serialises scene hand-over so two quick requests cannot both start
@@ -144,7 +145,7 @@ class EnhancedSceneEngine:
     def calculate_scene_duration(self, scene_data: Dict[str, Any]) -> float:
         """
         Calculate how long a scene runs: the longer of its audio and its
-        animation (the animation starts after the scene's initial delay).
+        animation (the audio starts after the scene's delay).
 
         Scenes with neither audio nor animation keep their existing
         duration, defaulting to 2.0 seconds.
@@ -171,10 +172,9 @@ class EnhancedSceneEngine:
             existing = scene_data.get("duration", 2.0)
             return float(existing) if isinstance(existing, (int, float)) and existing > 0 else 2.0
 
-        # Animated scenes start audio first then wait the delay before the
-        # animation; audio-only scenes wait the delay before the audio
+        # The animation starts immediately; the audio starts after the delay
         if animation > 0:
-            return round(max(audio, delay + animation), 1)
+            return round(max(delay + audio, animation), 1) if audio > 0 else round(animation, 1)
         return round(delay + audio, 1)
 
     def _apply_calculated_durations(self, scenes: Dict[str, Dict[str, Any]]):
@@ -459,8 +459,10 @@ class EnhancedSceneEngine:
                 self.metrics.scenes_by_category[category] = \
                     self.metrics.scenes_by_category.get(category, 0) + 1
     
-    async def play_scene(self, scene_name: str, auto_triggered: bool = False) -> bool:
-        if scene_name not in self.scenes:
+    async def play_scene(self, scene_name: str, auto_triggered: bool = False,
+                         scene_data: Optional[Dict[str, Any]] = None) -> bool:
+        """Play a saved scene, or the unsaved scene_data when given (scene test)"""
+        if scene_data is None and scene_name not in self.scenes:
             logger.warning(f"Scene '{scene_name}' not found")
             return False
         
@@ -482,7 +484,8 @@ class EnhancedSceneEngine:
                     return False
 
             # Make a copy of the scene to avoid modifying the original
-            scene = self.scenes[scene_name].copy()
+            source = scene_data if scene_data is not None else self.scenes[scene_name]
+            scene = source.copy()
             # Calculated length of the whole scene (audio and animation);
             # "duration" below becomes the animation length for the mixer
             scene_total_duration = float(scene.get("duration", 2.0) or 2.0)
@@ -630,6 +633,7 @@ class EnhancedSceneEngine:
                 await self.unlock_channels(locked_channels)
                 logger.info(f"Unlocked {len(locked_channels)} channel(s)")
             
+            self._cancel_pending_audio()
             self.scene_playing = False
             self.current_scene = None
             self.interrupt_requested = False
@@ -644,6 +648,7 @@ class EnhancedSceneEngine:
         """
         logger.info(f"Interrupting '{self.current_scene}' to play '{next_scene}'")
         self.interrupt_requested = True
+        self._cancel_pending_audio()
 
         if self.audio_controller:
             try:
@@ -661,6 +666,41 @@ class EnhancedSceneEngine:
             return False
         return True
 
+    def _start_scene_audio(self, scene: Dict[str, Any]):
+        """Start the scene's audio, after its delay when one is set"""
+        if not scene.get("audio_enabled", False) or not self.audio_controller:
+            return
+        audio_file = scene.get("audio_file")
+        if not audio_file or not self.audio_controller.get_audio_info(audio_file):
+            return
+        try:
+            delay = max(0.0, float(scene.get("delay", 0) or 0) / 1000.0)
+        except (TypeError, ValueError):
+            delay = 0.0
+
+        self._cancel_pending_audio()
+        if delay <= 0:
+            if self.audio_controller.play_track(audio_file):
+                logger.info(f"Started audio: {audio_file}")
+            return
+        self._audio_start_task = asyncio.create_task(self._delayed_audio_start(audio_file, delay))
+
+    async def _delayed_audio_start(self, audio_file: str, delay: float):
+        await self._sleep_interruptible(delay)
+        if self.interrupt_requested or not self.scene_playing:
+            return
+        if self.audio_controller.play_track(audio_file):
+            logger.info(f"Started audio: {audio_file} (after {delay * 1000:.0f} ms)")
+        else:
+            logger.warning(f"Failed to start audio: {audio_file}")
+
+    def _cancel_pending_audio(self):
+        """Drop a delayed audio start that has not fired yet"""
+        task = self._audio_start_task
+        self._audio_start_task = None
+        if task and not task.done():
+            task.cancel()
+
     async def _wait_for_scene_audio(self, scene: Dict[str, Any], total_duration: float):
         """Keep the scene active while its audio is still playing.
 
@@ -670,6 +710,10 @@ class EnhancedSceneEngine:
         if not scene.get("audio_enabled") or not scene.get("audio_file") or not self.audio_controller:
             return
         cap = self.scene_start_time + total_duration + 3.0
+        # A delayed audio start may still be pending after the animation ends
+        task = self._audio_start_task
+        while task and not task.done() and not self.interrupt_requested and time.time() < cap:
+            await asyncio.sleep(0.05)
         while (not self.interrupt_requested and time.time() < cap
                and self.audio_controller.is_busy()):
             await asyncio.sleep(0.05)
@@ -703,20 +747,8 @@ class EnhancedSceneEngine:
                 priority = 10
             
             
-            # Start audio if enabled
-            if scene.get("audio_enabled", False):
-                audio_file = scene.get("audio_file")
-                if audio_file and self.audio_controller:
-                    if self.audio_controller.get_audio_info(audio_file):
-                        self.audio_controller.play_track(audio_file)
-                        logger.info(f"Started audio: {audio_file}")
-            
-            # Handle initial delay
-            initial_delay = scene.get("delay", 0)
-            if initial_delay > 0:
-                await self._sleep_interruptible(initial_delay / 1000.0)
-            if self.interrupt_requested:
-                return True
+            # Audio starts after the scene delay; the animation starts now
+            self._start_scene_audio(scene)
 
             # Start the scene in the motion mixer
             await self.motion_mixer.play_scene(
@@ -775,14 +807,9 @@ class EnhancedSceneEngine:
             
             logger.info(f"Playing timestep animation: {len(steps)} steps over {duration:.1f}s")
             
-            # Start audio if enabled
-            if scene.get("audio_enabled", False):
-                audio_file = scene.get("audio_file")
-                if audio_file and self.audio_controller:
-                    if self.audio_controller.get_audio_info(audio_file):
-                        self.audio_controller.play_track(audio_file)
-                        logger.info(f"Started audio: {audio_file}")
-            
+            # Audio starts after the scene delay; the animation starts now
+            self._start_scene_audio(scene)
+
             # Play through timesteps
             start_time = time.time()
             current_step_index = 0
@@ -858,39 +885,14 @@ class EnhancedSceneEngine:
         
         logger.debug("DEBUG: Starting _execute_scene_components")
 
-        # Handle initial delay
-        initial_delay = scene.get("delay", 0)
-        if initial_delay > 0:
-            await self._sleep_interruptible(initial_delay / 1000.0)
-
-        logger.debug("DEBUG: Initial delay complete")
-        
-        # Start audio if enabled
-        audio_started = False
-        if scene.get("audio_enabled", False) and not self.interrupt_requested:
-            logger.debug("DEBUG: Starting audio section")
-            audio_file = scene.get("audio_file")
-            logger.debug(f"DEBUG: Audio file: {audio_file}")
-
-            if audio_file:
-                logger.debug("DEBUG: About to call get_audio_info")
-                audio_info = self.audio_controller.get_audio_info(audio_file)
-                logger.debug(f"DEBUG: get_audio_info returned: {audio_info}")
-                # Quick validation before attempting playback
-                if not self.audio_controller.get_audio_info(audio_file):
-                    logger.warning(f"Audio file not found: {audio_file}")
-                    audio_started = False
-                    success = False
-                else:
-                    logger.debug("DEBUG: About to call play_track")
-                    audio_started = self.audio_controller.play_track(audio_file)
-                    logger.debug(f"DEBUG: play_track returned: {audio_started}")
-
-                    if audio_started:
-                        logger.info(f"Started audio: {audio_file}")
-                    else:
-                        logger.warning(f"Failed to start audio: {audio_file}")
-                        success = False
+        # Audio starts after the scene delay; servo movements start now
+        audio_file = scene.get("audio_file")
+        if scene.get("audio_enabled", False) and audio_file and not self.interrupt_requested:
+            if not self.audio_controller.get_audio_info(audio_file):
+                logger.warning(f"Audio file not found: {audio_file}")
+                success = False
+            else:
+                self._start_scene_audio(scene)
         logger.debug("DEBUG: Audio section complete")
         
         # Execute servo movements using batch commands
@@ -1519,15 +1521,18 @@ class EnhancedSceneEngine:
             scene_name = scene.get("label", "Test Scene")
             logger.info(f"Testing scene: {scene_name}")
             
-            # Validate scene first
+            # Length depends on the edited delay, audio and animation
+            scene = dict(scene)
+            scene["duration"] = self.calculate_scene_duration(scene)
+
             validation = self.validate_scene(scene, scene_name)
             if not validation.valid:
                 logger.error(f"Scene validation failed: {validation.errors}")
                 return False
-            
-            # Execute scene components
-            success = await self._execute_scene_components(scene)
-            
+
+            # Same playback path as the Home screen (audio, delay, Bottango animation)
+            success = await self.play_scene(scene_name, scene_data=scene)
+
             logger.info(f"Scene test {'passed' if success else 'failed'}: {scene_name}")
             return success
             
