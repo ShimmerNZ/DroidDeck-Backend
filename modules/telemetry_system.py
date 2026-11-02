@@ -160,7 +160,7 @@ class BatteryEstimator:
 
     ROLLING_WINDOW_SECONDS = 60
 
-    def __init__(self, capacity_mah: float = 12000):
+    def __init__(self, capacity_mah: float = 36000):
         self.capacity_mah = capacity_mah
         self.mah_consumed = 0.0
         self._last_timestamp: Optional[float] = None
@@ -434,7 +434,7 @@ class SafeTelemetrySystem:
 
     def _load_battery_config(self):
         """Load battery capacity from hardware_config.json and create estimator."""
-        capacity_mah = 12000  # Default: 4S 4P x 3000mAh
+        capacity_mah = 36000  # Default: 4S 12P x 3000mAh
         try:
             config_path = Path("configs/hardware_config.json")
             if config_path.exists():
