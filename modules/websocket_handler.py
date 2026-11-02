@@ -182,9 +182,9 @@ class WebSocketMessageHandler:
             if imu_now != self._imu_active:
                 self._imu_active = imu_now
                 if imu_now:
-                    logger.info("IMU tilt enabled — receiving imu_roll/imu_pitch data")
+                    logger.info("IMU tilt enabled - receiving imu_roll/imu_pitch data")
                 else:
-                    logger.info("IMU tilt disabled — imu_roll/imu_pitch data stopped")
+                    logger.info("IMU tilt disabled - imu_roll/imu_pitch data stopped")
             
             
             if not hasattr(self.backend, 'controller_input_processor'):
@@ -274,7 +274,7 @@ class WebSocketMessageHandler:
         if buttons:
             logger.info(f"[IMU] Frontend imu_toggle_buttons: {buttons}")
         else:
-            logger.warning("[IMU] Frontend imu_toggle_buttons is empty — no toggle button configured")
+            logger.warning("[IMU] Frontend imu_toggle_buttons is empty - no toggle button configured")
 
     async def _handle_get_controller_config(self, websocket, data: Dict[str, Any]):
         """Return the backend's controller_config.json to the requesting client"""
@@ -1387,7 +1387,7 @@ class WebSocketMessageHandler:
             }
             
             await self._send_websocket_message(websocket, response)
-            logger.info(f"🔋 Sent {len(audio_files)} audio files to client")
+            logger.info(f"Sent {len(audio_files)} audio files to client")
             
         except Exception as e:
             logger.error(f"Failed to get audio files: {e}")
@@ -1410,10 +1410,10 @@ class WebSocketMessageHandler:
             }
             
             await self._send_websocket_message(websocket, response)
-            logger.info(f"📄 Sent refresh response: {len(audio_files)} audio files, {len(bottango_scenes)} Bottango scenes")
+            logger.info(f"Sent refresh response: {len(audio_files)} audio files, {len(bottango_scenes)} Bottango scenes")
             
         except Exception as e:
-            logger.error(f"âŒ Error handling refresh_backend: {e}")
+            logger.error(f"Error handling refresh_backend: {e}")
             await self._send_websocket_message(websocket, {
                 "type": "backend_refresh_response",
                 "audio_files": [],
@@ -1489,7 +1489,7 @@ class WebSocketMessageHandler:
                 return []
     async def _handle_emergency_stop(self, websocket, data: Dict[str, Any]):
         """Handle emergency stop command"""
-        logger.critical("🚨 EMERGENCY STOP ACTIVATED via WebSocket")
+        logger.critical("EMERGENCY STOP ACTIVATED via WebSocket")
         
         # Emergency stop all systems
         await self.hardware_service.emergency_stop_all()
@@ -1698,7 +1698,7 @@ class WebSocketMessageHandler:
     async def _handle_failsafe(self, websocket, data: Dict[str, Any]):
         """Handle failsafe mode toggle"""
         state = data.get("state", False)
-        logger.info(f"⚠️ Failsafe mode {'activated' if state else 'deactivated'}")
+        logger.info(f"Failsafe mode {'activated' if state else 'deactivated'}")
         
         # Update backend state
         if hasattr(self.backend, 'set_failsafe_mode'):
@@ -1724,14 +1724,14 @@ class WebSocketMessageHandler:
             mode_name = data.get("name")
             state = data.get("state", True)
             
-            logger.info(f"📄 Mode '{mode_name}' {'activated' if state else 'deactivated'}")
+            logger.info(f"Mode '{mode_name}' {'activated' if state else 'deactivated'}")
             
             # Handle different modes
             if mode_name == "idle":
                 # Toggle idle mode in scene engine
                 if hasattr(self.scene_engine, 'set_idle_mode'):
                     self.scene_engine.set_idle_mode(state)
-                    logger.info(f"🌙 Idle mode {'ENABLED' if state else 'DISABLED'} via frontend")
+                    logger.info(f"Idle mode {'ENABLED' if state else 'DISABLED'} via frontend")
                     
                     # Send confirmation back to frontend
                     await self._send_response(websocket, {
@@ -2259,6 +2259,12 @@ class WebSocketMessageHandler:
                         if member_path.is_absolute() or ".." in member_path.parts:
                             raise RuntimeError(f"Unsafe path in archive: {name}")
                     z.extractall(extract_dir)
+                    # extractall() drops Unix permissions, so restore the
+                    # modes stored in the archive (keeps DroidDeck.sh executable)
+                    for member in z.infolist():
+                        mode = (member.external_attr >> 16) & 0o777
+                        if mode and not member.is_dir():
+                            os.chmod(extract_dir / member.filename, mode)
                 folders = list(extract_dir.iterdir())
                 if not folders:
                     raise RuntimeError("Archive is empty")
