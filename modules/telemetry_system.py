@@ -275,6 +275,8 @@ class SafeTelemetrySystem:
     Provides system monitoring, alerting, and data logging capabilities.
     """
 
+    BATTERY_ALERT_AVERAGE_SECONDS = 10.0
+
     def __init__(self, history_size: int = 1000, alert_callback: Optional[Callable] = None):
         self.history_size = history_size
         self.alert_callback = alert_callback
@@ -368,13 +370,13 @@ class SafeTelemetrySystem:
         self.alerts = {
             "low_battery": TelemetryAlert(
                 name="Low Battery",
-                condition="battery_voltage < 13.2",
+                condition="battery_voltage < 14.0",
                 level="WARNING",
                 message="Battery voltage is low - consider charging"
             ),
             "critical_battery": TelemetryAlert(
                 name="Critical Battery",
-                condition="battery_voltage < 11.0",
+                condition="battery_voltage < 13.2",
                 level="CRITICAL",
                 message="CRITICAL: Battery voltage dangerously low!"
             ),
@@ -691,9 +693,17 @@ class SafeTelemetrySystem:
         """Check all alerts against current reading"""
         current_time = time.time()
 
+        # Pack voltage is averaged over a short window so track current sag
+        # does not repeatedly trigger and resolve the battery alerts
+        cutoff = reading.timestamp - self.BATTERY_ALERT_AVERAGE_SECONDS
+        recent_voltages = [r.battery_voltage for r in self.reading_history
+                           if r.timestamp >= cutoff and r.battery_voltage > 0]
+        battery_voltage = (sum(recent_voltages) / len(recent_voltages)
+                           if recent_voltages else reading.battery_voltage)
+
         # Metric values available to alert conditions
         context = {
-            "battery_voltage": reading.battery_voltage,
+            "battery_voltage": battery_voltage,
             "temperature": reading.temperature,
             "cpu_percent": reading.cpu_percent,
             "memory_percent": reading.memory_percent,

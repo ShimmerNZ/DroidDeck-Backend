@@ -1275,8 +1275,7 @@ class DroidDeckWebServer:
                         'memory': current.get('memory_percent', 0),
                         'battery_voltage': current.get('battery_voltage', 0.0),
                         'temperature': current.get('temperature', 0),
-                        'current_left_track': current.get('current_left_track', 0.0),
-                        'current_right_track': current.get('current_right_track', 0.0),
+                        'current_tracks': current.get('current_tracks', 0.0),
                         'current_total': current.get('current_total', 0.0),
                     })
                     

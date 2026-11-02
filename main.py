@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 WALL-E Backend - Main Entry Point
 
@@ -118,6 +119,14 @@ class WALLEBackend:
         self.watchdog_position_base = 1500  # Base position in microseconds
         self.watchdog_position_toggle = 10  # ±10us variation to ensure position change
         self.watchdog_position_state = False  # Toggle between two positions
+
+        # Control link watchdog - enters failsafe when the Steam Deck goes quiet
+        # or disconnects. The Deck sends a controller frame at least once a second
+        self.control_link_timeout = 3.0
+        self.control_link_check_interval = 0.5
+        self.control_link_task = None
+        self._control_link_ws = None
+        self._control_link_last_frame = None
 
         # Camera proxy tracking
         self.camera_proxy_pid = None
@@ -278,6 +287,62 @@ class WALLEBackend:
         commanded joystick value to go stale."""
         if hasattr(self, 'motion_mixer') and self.motion_mixer:
             self.motion_mixer.force_protected_channels_home("controller disconnected")
+
+    def note_control_frame(self, websocket):
+        """Record a controller frame from the Steam Deck; arms the link watchdog"""
+        self._control_link_ws = websocket
+        self._control_link_last_frame = time.monotonic()
+
+    async def _enter_failsafe_for_link_loss(self, reason: str):
+        """Stop the robot and enter failsafe because the control link was lost"""
+        self._control_link_last_frame = None
+        if self.failsafe_active or not self.running:
+            return
+        logger.warning(f"Control link lost ({reason}) - entering failsafe")
+        await self.set_failsafe_mode(True)
+        await self.broadcast_message({
+            "type": "failsafe_state",
+            "failsafe_active": True
+        })
+
+    async def control_link_watchdog(self):
+        """Enter failsafe if controller frames stop arriving while motion is enabled.
+
+        The watchdog is only armed once a frame has been received since failsafe
+        was last released, so operating without the Deck (e.g. from the web UI)
+        never trips it. If this check itself runs late the event loop was
+        blocked (stepper moves hold the loop), so frames may be waiting unread;
+        the timer restarts instead of tripping.
+        """
+        last_check = time.monotonic()
+        while self.running:
+            try:
+                await asyncio.sleep(self.control_link_check_interval)
+                now = time.monotonic()
+                loop_stalled = now - last_check > self.control_link_check_interval * 3
+                last_check = now
+
+                if self.failsafe_active:
+                    self._control_link_last_frame = None
+                    continue
+
+                last_frame = self._control_link_last_frame
+                if last_frame is None:
+                    continue
+
+                if loop_stalled:
+                    self._control_link_last_frame = now
+                    continue
+
+                silent_for = now - last_frame
+                if silent_for > self.control_link_timeout:
+                    await self._enter_failsafe_for_link_loss(
+                        f"no controller input for {silent_for:.1f}s"
+                    )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Control link watchdog error: {e}")
 
     async def toggle_failsafe(self, enable: bool) -> Dict[str, Any]:
         """Toggle failsafe mode"""
@@ -667,6 +732,11 @@ class WALLEBackend:
                 self.connected_clients.remove(websocket)
                 logger.info(f"Client {client_info} removed from connected clients")
 
+            # Losing the client that was driving the robot stops it
+            if websocket is self._control_link_ws:
+                self._control_link_ws = None
+                await self._enter_failsafe_for_link_loss(f"Steam Deck {client_info} disconnected")
+
     async def send_initial_status(self, websocket):
         """Send initial system status to newly connected client"""
         try:
@@ -1041,6 +1111,9 @@ class WALLEBackend:
             # Start telemetry loop
             self.telemetry_task = asyncio.create_task(self.telemetry_loop())
 
+            # Start control link watchdog
+            self.control_link_task = asyncio.create_task(self.control_link_watchdog())
+
             # Start WebSocket server with version-appropriate method
             logger.info("Starting WebSocket server on port 8766")
 
@@ -1145,6 +1218,10 @@ class WALLEBackend:
             if hasattr(self, 'bluetooth_controller'):
                 logger.info("Stopping bluetooth controller...")
                 self.bluetooth_controller.stop()
+
+            # Stop control link watchdog
+            if self.control_link_task and not self.control_link_task.done():
+                self.control_link_task.cancel()
 
             # 2. Stop telemetry loop
             if self.telemetry_task:

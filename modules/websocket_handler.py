@@ -143,6 +143,8 @@ class WebSocketMessageHandler:
     async def _handle_frontend_controller(self, websocket, data: Dict[str, Any]):
         """Handle frontend controller input - same as steamdeck but different source"""
         try:
+            if hasattr(self.backend, 'note_control_frame'):
+                self.backend.note_control_frame(websocket)
             axes = data.get("axes", {})
             buttons = data.get("buttons", {})
             timestamp = data.get("timestamp", time.time())
@@ -173,6 +175,8 @@ class WebSocketMessageHandler:
     async def _handle_steamdeck_controller(self, websocket, data: Dict[str, Any]):
         """Handle steamdeck controller input"""
         try:
+            if hasattr(self.backend, 'note_control_frame'):
+                self.backend.note_control_frame(websocket)
             axes = data.get("axes", {})
             buttons = data.get("buttons", {})
 
