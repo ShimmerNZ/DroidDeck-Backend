@@ -294,6 +294,8 @@ class SafeTelemetrySystem:
         # Both current sensors are ACS758LCB-100B: 20 mV/A at VCC = 5.0V,
         # scaled ratiometrically to the measured 5.235V rail. The zero is the
         # ADC reading of A1 with the tracks stopped, not VCC/2 from a meter.
+        # ZERO_CURRENT_VOLTAGE is the fallback; calibrate_current_zero()
+        # re-measures it at startup because the sensor zero drifts.
         self.VOLTAGE_DIVIDER_RATIO = 4.025
         self.ADC_REFERENCE_VOLTAGE = 5.235
         self.ZERO_CURRENT_VOLTAGE = 2.569
@@ -456,6 +458,50 @@ class SafeTelemetrySystem:
         """Return the latest battery run-time estimate dict."""
         voltage = self.last_reading.battery_voltage if self.last_reading else 0.0
         return self.battery_estimator.get_estimate(voltage)
+
+    # Startup zero measurement for the current sensors
+    CURRENT_ZERO_SAMPLES = 20
+    CURRENT_ZERO_SAMPLE_INTERVAL = 0.02
+    CURRENT_ZERO_MIN_V = 2.3
+    CURRENT_ZERO_MAX_V = 2.9
+
+    def calibrate_current_zero(self) -> bool:
+        """Re-measure the current sensor zero from A1 while the tracks are stopped.
+
+        Call only when the tracks cannot be driven (failsafe at startup).
+        A1 sees nothing but the track motors, so its average output is the
+        zero-current voltage. A2 is on the same sensor type and 5V rail and
+        always carries load, so it shares the A1 zero. Blocking I2C - run it
+        in an executor.
+        """
+        if not self.adc_available or not self.ads:
+            return False
+
+        tracks_samples = []
+        total_samples = []
+        try:
+            for _ in range(self.CURRENT_ZERO_SAMPLES):
+                tracks_samples.append(self.tracks_channel.voltage)
+                total_samples.append(self.total_channel.voltage)
+                time.sleep(self.CURRENT_ZERO_SAMPLE_INTERVAL)
+        except Exception as e:
+            logger.warning(f"Current zero calibration failed, keeping {self.ZERO_CURRENT_VOLTAGE:.4f}V: {e}")
+            return False
+
+        zero = sum(tracks_samples) / len(tracks_samples)
+        total_v = sum(total_samples) / len(total_samples)
+
+        if not (self.CURRENT_ZERO_MIN_V <= zero <= self.CURRENT_ZERO_MAX_V):
+            logger.warning(f"Current zero reading {zero:.4f}V out of range - "
+                           f"keeping {self.ZERO_CURRENT_VOLTAGE:.4f}V")
+            return False
+
+        previous = self.ZERO_CURRENT_VOLTAGE
+        self.ZERO_CURRENT_VOLTAGE = zero
+        logger.info(f"Current sensor zero set to {zero:.4f}V from stopped tracks "
+                    f"(was {previous:.4f}V); total sensor {total_v:.4f}V = "
+                    f"{self.voltage_to_current(total_v):.2f}A idle draw")
+        return True
 
     def voltage_to_current(self, voltage: float) -> float:
         """Convert ACS758 VIOUT voltage to current in amps"""

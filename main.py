@@ -1108,6 +1108,14 @@ class WALLEBackend:
             # Start bluetooth controller
             await self.start_bluetooth_controller()
 
+            # Zero the current sensors while failsafe holds the tracks stopped
+            if self.failsafe_active:
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, self.telemetry_system.calibrate_current_zero)
+                except Exception as e:
+                    logger.warning(f"Current zero calibration skipped: {e}")
+
             # Start telemetry loop
             self.telemetry_task = asyncio.create_task(self.telemetry_loop())
 

@@ -32,7 +32,6 @@ CMD_SET_SPEED          = 0x07  # channel, speed low7, speed high7
 CMD_SET_ACCELERATION   = 0x09  # channel, accel low7, accel high7
 CMD_GET_POSITION       = 0x10  # channel -> 2 byte response (quarter-us)
 CMD_SET_MULTIPLE       = 0x1F  # count, first channel, then low7/high7 pairs
-CMD_GET_FIRMWARE       = 0x21  # -> firmware/device info response
 CMD_RESTART_SCRIPT     = 0xA7  # subroutine low7, subroutine high7
 CMD_GET_ERRORS         = 0x21  # -> 2 byte error register; reading it clears the errors
 
@@ -58,7 +57,7 @@ def maestro_error_names(code: int) -> List[str]:
 COMMAND_QUEUE_MAXSIZE  = 200    # ~4 seconds of 50Hz mixer output
 QUEUE_POLL_TIMEOUT     = 0.01   # Worker wake interval; bounds realtime latency
 READ_TIMEOUT           = 0.05   # Per-read serial timeout for position responses
-DEVICE_INFO_TIMEOUT    = 0.15   # Longer timeout for the firmware info response
+DEVICE_INFO_TIMEOUT    = 0.15   # Longer timeout for channel detection probes
 RECONNECT_DELAY_MIN    = 1.0    # First reconnect attempt delay
 RECONNECT_DELAY_MAX    = 30.0   # Backoff cap between reconnect attempts
 
@@ -807,9 +806,18 @@ class EnhancedMaestroControllerShared:
 
         return self.shared_manager.send_batch_command(builder)
 
+    # Highest channel of each Maestro size, probed largest first
+    _CHANNEL_PROBES = ((23, 24), (17, 18), (11, 12), (5, 6))
+
     def detect_channel_count_advanced(self) -> int:
-        """Auto-detection using device info response"""
-        logger.debug(f"Device info detection: {self.device_id} (device #{self.device_number})")
+        """Detect the channel count by probing the highest channel of each Maestro size.
+
+        A Maestro answers Get Position only for a channel it has; an out of
+        range channel gets no reply and sets its serial protocol error bit.
+        Errors already present are read (and latched) first, and the protocol
+        error caused by the probes themselves is cleared without latching.
+        """
+        logger.debug(f"Channel detection: {self.device_id} (device #{self.device_number})")
 
         try:
             if not self.connected:
@@ -819,94 +827,46 @@ class EnhancedMaestroControllerShared:
                 if self.shared_manager.connected and self.shared_manager.serial_conn:
                     conn = self.shared_manager.serial_conn
 
-                    # Use a longer read timeout for the device info exchange,
-                    # restoring the standard timeout afterwards
+                    # Allow a little longer than a normal position read
                     original_timeout = conn.timeout
                     conn.timeout = DEVICE_INFO_TIMEOUT
 
                     try:
-                        # Flush any stale data from input buffer
+                        # Keep any errors the Maestro already holds before probing
                         conn.reset_input_buffer()
-
-                        # Get device info command
-                        cmd_bytes = bytes([POLOLU_START_BYTE, self.device_number,
-                                           CMD_GET_FIRMWARE])
-                        logger.debug(f"  Sending command: {cmd_bytes.hex()}")
-                        conn.write(cmd_bytes)
-
-                        response = conn.read(16)
-                        logger.debug(f"  Response length: {len(response)} bytes")
-                        logger.debug(f"  Raw response bytes: {[hex(b) for b in response]}")
-
-                        detected_channels = None
-
-                        if len(response) >= 2:
-                            # This query is the Get Errors command and clears the
-                            # Maestro's error register, so keep what it returned
+                        conn.write(bytes([POLOLU_START_BYTE, self.device_number, CMD_GET_ERRORS]))
+                        response = conn.read(2)
+                        if len(response) == 2:
                             self._record_error_code(response[0] | (response[1] << 8))
 
-                            device_info = response.hex()
-                            logger.debug(f"  Device info: {device_info}")
+                        detected_channels = None
+                        probe_missed = False
+                        for channel, count in self._CHANNEL_PROBES:
+                            conn.reset_input_buffer()
+                            conn.write(bytes([POLOLU_START_BYTE, self.device_number,
+                                              CMD_GET_POSITION, channel]))
+                            if len(conn.read(2)) == 2:
+                                detected_channels = count
+                                break
+                            probe_missed = True
 
-                            # The Maestro returns firmware version in first two bytes
-                            # Byte 0: Minor firmware version
-                            # Byte 1: Major firmware version
-                            minor_fw = response[0]
-                            major_fw = response[1]
-                            logger.debug(f"  Firmware version: {major_fw}.{minor_fw}")
-
-                            # Documented patterns:
-                            # 1100 = 24-channel Maestro
-                            # 0100 = 18-channel Maestro
-                            if device_info.startswith('1100'):
-                                detected_channels = 24
-                                logger.debug("  Device info indicates 24-channel Maestro")
-                            elif device_info.startswith('0100'):
-                                detected_channels = 18
-                                logger.debug("  Device info indicates 18-channel Maestro")
-
-                            # If device info didn't give us an answer, try alternative detection
-                            if detected_channels is None:
-                                logger.debug("  Unknown device info, trying alternative detection")
-
-                                # Try reading position from a high channel to determine max channels
-                                for test_channel in [23, 17, 11]:
-                                    try:
-                                        conn.reset_input_buffer()
-
-                                        test_cmd = bytes([POLOLU_START_BYTE, self.device_number,
-                                                          CMD_GET_POSITION, test_channel])
-                                        conn.write(test_cmd)
-
-                                        test_response = conn.read(2)
-                                        if len(test_response) == 2:
-                                            logger.debug(f"  Channel {test_channel} responded - detected {test_channel + 1} channels")
-                                            if test_channel >= 23:
-                                                detected_channels = 24
-                                            elif test_channel >= 17:
-                                                detected_channels = 18
-                                            else:
-                                                detected_channels = 12
-                                            break
-                                    except (serial.SerialException, OSError):
-                                        raise
-                                    except Exception as probe_error:
-                                        logger.debug(f"  Channel {test_channel} probe failed: {probe_error}")
-                                        continue
-
-                            # If still no detection, use fallback
-                            if detected_channels is None:
-                                logger.debug("  All detection methods failed, using fallback")
-                                detected_channels = self._guess_channel_count()
-                        else:
-                            logger.debug("  No device info response, using fallback")
-                            detected_channels = self._guess_channel_count()
-
+                        # Clear the protocol error our own unanswered probes caused
+                        if probe_missed:
+                            conn.reset_input_buffer()
+                            conn.write(bytes([POLOLU_START_BYTE, self.device_number, CMD_GET_ERRORS]))
+                            conn.read(2)
+                            conn.reset_input_buffer()
                     finally:
                         conn.timeout = original_timeout
 
+                    if detected_channels is None:
+                        detected_channels = self._guess_channel_count()
+                        logger.warning(f"Channel detection: {self.device_id} did not answer any probe - "
+                                       f"assuming {detected_channels} channels")
+                    else:
+                        logger.info(f"Channel detection: {self.device_id} = {detected_channels} channels")
+
                     self.channel_count = detected_channels
-                    logger.info(f"Channel detection: {self.device_id} = {detected_channels} channels")
                     return detected_channels
 
             # Manager not connected - use fallback without touching the port
@@ -914,6 +874,11 @@ class EnhancedMaestroControllerShared:
             self.channel_count = fallback
             return fallback
 
+        except (serial.SerialException, OSError) as e:
+            logger.error(f"Channel detection serial error: {self.device_id} - {e}")
+            fallback = self._guess_channel_count()
+            self.channel_count = fallback
+            return fallback
         except Exception as e:
             logger.error(f"Channel detection error: {self.device_id} - {e}")
             fallback = self._guess_channel_count()
