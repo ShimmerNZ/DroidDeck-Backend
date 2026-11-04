@@ -525,13 +525,25 @@ class JoystickPairHandler(BehaviorHandler):
             return False
 
 class SystemControlHandler(BehaviorHandler):
-    """Handle system control commands - route to frontend for processing"""
+    """Handle system control commands - route to frontend for processing.
+
+    Holding a button mapped to up or down keeps stepping through the list:
+    after HOLD_REPEAT_DELAY the action repeats every HOLD_REPEAT_INTERVAL
+    until the button is released.
+    """
+
+    REPEATING_ACTIONS = ('up', 'down')
+    HOLD_REPEAT_DELAY = 0.45
+    HOLD_REPEAT_INTERVAL = 0.12
+    # Stop repeating if no release arrives, e.g. the controller link dropped mid-hold
+    HOLD_REPEAT_MAX = 15.0
 
     def __init__(self, hardware_service=None, scene_engine=None, logger=None, backend_ref=None):
         super().__init__(hardware_service, scene_engine, logger)
         self.backend = backend_ref  # Reference to backend for message broadcasting
         self.last_navigation_time = 0
         self.navigation_cooldown = 0.15  # 150ms debounce
+        self._repeat_tasks: Dict[str, asyncio.Task] = {}
 
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
@@ -543,8 +555,12 @@ class SystemControlHandler(BehaviorHandler):
                 self.logger.warning("System control config missing 'system_action'")
                 return False
 
+            pressed = controller_input.raw_value > threshold
+            if not pressed:
+                self._stop_repeat(controller_input.control_name)
+
             # Check if this is a button press (for on_press timing)
-            if trigger_timing == 'on_press' and controller_input.raw_value > threshold:
+            if trigger_timing == 'on_press' and pressed:
                 # Debounce navigation commands
                 current_time = time.time()
                 if current_time - self.last_navigation_time < self.navigation_cooldown:
@@ -555,6 +571,9 @@ class SystemControlHandler(BehaviorHandler):
                 # Route system control to frontend via WebSocket
                 await self._route_to_frontend(controller_input.control_name, action, config)
 
+                if action in self.REPEATING_ACTIONS:
+                    self._start_repeat(controller_input.control_name, action, config)
+
                 self.logger.info(f"System control routed to frontend: {action}")
                 return True
 
@@ -563,6 +582,30 @@ class SystemControlHandler(BehaviorHandler):
         except Exception as e:
             self.logger.error(f"Error in system control handler: {e}")
             return False
+
+    def _start_repeat(self, control_name: str, action: str, config: Dict[str, Any]):
+        self._stop_repeat(control_name)
+        self._repeat_tasks[control_name] = spawn(
+            self._repeat_while_held(control_name, action, config), name=f"nav_repeat_{control_name}")
+
+    def _stop_repeat(self, control_name: str):
+        task = self._repeat_tasks.pop(control_name, None)
+        if task is not None:
+            task.cancel()
+
+    async def _repeat_while_held(self, control_name: str, action: str, config: Dict[str, Any]):
+        """Repeat a navigation action until the button is released (task cancelled)"""
+        try:
+            await asyncio.sleep(self.HOLD_REPEAT_DELAY)
+            give_up_at = time.time() + self.HOLD_REPEAT_MAX
+            while time.time() < give_up_at:
+                await self._route_to_frontend(control_name, action, config)
+                await asyncio.sleep(self.HOLD_REPEAT_INTERVAL)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self._repeat_tasks.get(control_name) is asyncio.current_task():
+                del self._repeat_tasks[control_name]
 
     async def _route_to_frontend(self, control_name: str, action: str, config: Dict[str, Any]):
         """Route system control command to frontend via WebSocket"""
