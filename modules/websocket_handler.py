@@ -16,6 +16,7 @@ from modules.attention_controller import AttentionController, MotionMixerGazeOut
 from modules.config_store import ConfigStore
 from modules.pi_status import PiStatusMonitor
 from modules.file_utils import save_json_atomic
+from modules.battery_profile import build_profile, chemistry_table, normalise_config, public_profile
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,8 @@ class WebSocketMessageHandler:
             "update_camera_url": self._handle_camera_url_update,
             "update_debug_levels": self._handle_debug_levels_update,
             "set_system_volume": self._handle_set_system_volume,
+            "get_battery_config": self._handle_get_battery_config,
+            "save_battery_config": self._handle_save_battery_config,
             
             # Gesture detection
             "gesture": self._handle_gesture,
@@ -1544,6 +1547,8 @@ class WebSocketMessageHandler:
                 status["battery_estimate"] = self.telemetry_system.get_battery_estimate()
             if self.telemetry_system and self.telemetry_system.last_reading:
                 status["battery_voltage"] = self.telemetry_system.last_reading.battery_voltage
+            if self.telemetry_system and hasattr(self.telemetry_system, "battery_profile"):
+                status["battery_profile"] = public_profile(self.telemetry_system.battery_profile)
 
             # Attach motion mixer performance stats
             try:
@@ -1821,6 +1826,53 @@ class WebSocketMessageHandler:
             await websocket.send(json.dumps(message))
         except Exception as e:
             logger.error(f"Failed to send websocket message: {e}")
+
+    async def _battery_config_message(self, saved: bool = False) -> dict:
+        """Battery config, derived profile and chemistry table for the GUI"""
+        if self.telemetry_system and hasattr(self.telemetry_system, "battery_config"):
+            config = self.telemetry_system.battery_config
+        else:
+            hw_config = await self.config_store.aload("hardware_config", {})
+            config = normalise_config(hw_config.get("hardware", {}).get("battery"))
+        return {
+            "type": "battery_config_data",
+            "config": config,
+            "profile": public_profile(build_profile(config)),
+            "chemistries": chemistry_table(),
+            "saved": saved,
+            "timestamp": time.time(),
+        }
+
+    async def _handle_get_battery_config(self, websocket, data: Dict[str, Any]):
+        """Send the battery config and derived thresholds to the requesting client"""
+        try:
+            await self._send_websocket_message(websocket, await self._battery_config_message())
+        except Exception as e:
+            logger.error(f"Get battery config error: {e}")
+            await self._send_error_response(websocket, f"Failed to get battery config: {e}")
+
+    async def _handle_save_battery_config(self, websocket, data: Dict[str, Any]):
+        """Save the battery config to hardware_config.json and apply it live"""
+        try:
+            config = normalise_config(data.get("config"))
+
+            hw_config = await self.config_store.aload("hardware_config", {})
+            hardware = hw_config.setdefault("hardware", {})
+            battery = hardware.get("battery")
+            hardware["battery"] = {**(battery if isinstance(battery, dict) else {}), **config}
+
+            if not await self.config_store.asave("hardware_config", hw_config):
+                await self._send_error_response(websocket, "Failed to save battery config")
+                return
+
+            if self.telemetry_system and hasattr(self.telemetry_system, "apply_battery_config"):
+                self.telemetry_system.apply_battery_config(config)
+
+            logger.info(f"[OK] Battery config saved: {config}")
+            await self._send_websocket_message(websocket, await self._battery_config_message(saved=True))
+        except Exception as e:
+            logger.error(f"Save battery config error: {e}")
+            await self._send_error_response(websocket, f"Failed to save battery config: {e}")
 
     async def _handle_set_system_volume(self, websocket, data: Dict[str, Any]):
         """Handle system volume change request"""

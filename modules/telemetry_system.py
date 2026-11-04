@@ -19,6 +19,8 @@ from typing import Dict, Any, Optional, Callable, List, Tuple
 from collections import deque
 from pathlib import Path
 
+from modules.battery_profile import build_profile, normalise_config, DEFAULT_CONFIG
+
 logger = logging.getLogger(__name__)
 
 # ADC handling with fallbacks
@@ -141,12 +143,6 @@ def parse_alert_condition(condition: str) -> Tuple[str, Callable, float]:
     return metric, _OPERATORS[op_symbol], float(value_str)
 
 
-# 4S LiPo voltage -> state-of-charge lookup table (voltage per cell x 4)
-_SOC_CURVE = [
-    (16.8, 100), (16.4, 95), (16.0, 90), (15.6, 80),
-    (15.2, 70),  (14.8, 60), (14.4, 50), (14.0, 40),
-    (13.6, 30),  (13.2, 20), (12.8, 10), (12.4, 5), (12.0, 0),
-]
 
 class BatteryEstimator:
     """
@@ -156,12 +152,19 @@ class BatteryEstimator:
     remaining run-time from a 60-second rolling average current draw.
     The voltage-based SoC lookup acts as a pessimistic floor so that a
     partially-discharged pack at session start is handled correctly.
+
+    capacity_mah is the usable capacity, and state of charge is reported
+    over that usable range: the voltage curve covers the pack's full range,
+    so its reading is rescaled to the usable fraction before comparing.
     """
 
     ROLLING_WINDOW_SECONDS = 60
 
-    def __init__(self, capacity_mah: float = 36000):
+    def __init__(self, capacity_mah: float, soc_curve: List[Tuple[float, float]],
+                 usable_fraction: float = 1.0):
         self.capacity_mah = capacity_mah
+        self.soc_curve = soc_curve
+        self.usable_fraction = max(0.05, min(1.0, usable_fraction))
         self.mah_consumed = 0.0
         self._last_timestamp: Optional[float] = None
         self._current_window: deque = deque()  # (timestamp, amps)
@@ -204,18 +207,24 @@ class BatteryEstimator:
             self.peak_current = current_amps
 
     def _voltage_soc_percent(self, voltage: float) -> float:
-        """Interpolate SoC percentage from pack voltage."""
-        if voltage >= _SOC_CURVE[0][0]:
-            return 100.0
-        if voltage <= _SOC_CURVE[-1][0]:
-            return 0.0
-        for i in range(len(_SOC_CURVE) - 1):
-            v_hi, soc_hi = _SOC_CURVE[i]
-            v_lo, soc_lo = _SOC_CURVE[i + 1]
-            if v_lo <= voltage <= v_hi:
-                ratio = (voltage - v_lo) / (v_hi - v_lo)
-                return soc_lo + ratio * (soc_hi - soc_lo)
-        return 0.0
+        """Interpolate SoC percentage of the usable range from pack voltage."""
+        curve = self.soc_curve
+        if voltage >= curve[0][0]:
+            full_range_soc = 100.0
+        elif voltage <= curve[-1][0]:
+            full_range_soc = 0.0
+        else:
+            full_range_soc = 0.0
+            for i in range(len(curve) - 1):
+                v_hi, soc_hi = curve[i]
+                v_lo, soc_lo = curve[i + 1]
+                if v_lo <= voltage <= v_hi:
+                    ratio = (voltage - v_lo) / (v_hi - v_lo)
+                    full_range_soc = soc_lo + ratio * (soc_hi - soc_lo)
+                    break
+
+        reserve = (1.0 - self.usable_fraction) * 100.0
+        return max(0.0, min(100.0, (full_range_soc - reserve) / self.usable_fraction))
 
     def get_estimate(self, voltage: float) -> dict:
         """
@@ -310,6 +319,9 @@ class SafeTelemetrySystem:
         self.reading_history: deque = deque(maxlen=history_size)
         self.last_reading: Optional[TelemetryReading] = None
 
+        # Battery profile and run-time estimator (the alerts use its thresholds)
+        self._load_battery_config()
+
         # Alert system - parsed conditions cached per alert name
         self.alerts: Dict[str, TelemetryAlert] = {}
         self._parsed_conditions: Dict[str, Tuple[str, Callable, float]] = {}
@@ -325,9 +337,6 @@ class SafeTelemetrySystem:
             "system_uptime": 0.0,
             "average_update_time": 0.0
         }
-
-        # Battery run-time estimator
-        self._load_battery_config()
 
         # Hardware status callbacks
         self.hardware_status_callbacks: List[Callable] = []
@@ -372,13 +381,13 @@ class SafeTelemetrySystem:
         self.alerts = {
             "low_battery": TelemetryAlert(
                 name="Low Battery",
-                condition="battery_voltage < 14.0",
+                condition=f"battery_voltage < {self.battery_profile['low_voltage']}",
                 level="WARNING",
                 message="Battery voltage is low - consider charging"
             ),
             "critical_battery": TelemetryAlert(
                 name="Critical Battery",
-                condition="battery_voltage < 13.2",
+                condition=f"battery_voltage < {self.battery_profile['critical_voltage']}",
                 level="CRITICAL",
                 message="CRITICAL: Battery voltage dangerously low!"
             ),
@@ -437,22 +446,65 @@ class SafeTelemetrySystem:
         logger.info(f"Setup {len(self.alerts)} default alerts")
 
     def _load_battery_config(self):
-        """Load battery capacity from hardware_config.json and create estimator."""
-        capacity_mah = 36000  # Default: 4S 12P x 3000mAh
+        """Load the battery config from hardware_config.json and build the profile."""
+        battery_config = dict(DEFAULT_CONFIG)
         try:
             config_path = Path("configs/hardware_config.json")
             if config_path.exists():
                 with open(config_path) as f:
                     hw = json.load(f)
-                capacity_mah = hw.get("hardware", {}).get("battery", {}).get("capacity_mah", capacity_mah)
+                battery_config = hw.get("hardware", {}).get("battery", battery_config)
         except Exception as e:
-            logger.warning(f"Could not load battery config, using default {capacity_mah}mAh: {e}")
-        self.battery_estimator = BatteryEstimator(capacity_mah=capacity_mah)
-        logger.info(f"Battery estimator initialised - capacity: {capacity_mah}mAh")
+            logger.warning(f"Could not load battery config, using defaults: {e}")
+        self._set_battery_profile(battery_config)
+
+    def _set_battery_profile(self, battery_config: Dict[str, Any]):
+        """Build the profile and a fresh run-time estimator for a battery config."""
+        self.battery_config = normalise_config(battery_config)
+        self.battery_profile = build_profile(self.battery_config)
+        self.battery_estimator = BatteryEstimator(
+            capacity_mah=self.battery_profile["usable_mah"],
+            soc_curve=self.battery_profile["soc_curve"],
+            usable_fraction=self.battery_profile["usable_fraction"],
+        )
+        profile = self.battery_profile
+        logger.info(
+            f"Battery profile: {profile['chemistry']} {profile['series']} cells, "
+            f"{profile['capacity_mah']}mAh ({profile['usable_mah']}mAh usable), "
+            f"low {profile['low_voltage']}V, critical {profile['critical_voltage']}V"
+        )
+        if profile["over_sensor_range"]:
+            logger.warning(
+                f"Battery full voltage {profile['full_voltage']}V is above the voltage "
+                f"sensor range ({profile['sensor_max_voltage']}V)"
+            )
+
+    def apply_battery_config(self, battery_config: Dict[str, Any]):
+        """Apply a saved battery config: new profile, estimator and alert thresholds."""
+        self._set_battery_profile(battery_config)
+        thresholds = {
+            "low_battery": self.battery_profile["low_voltage"],
+            "critical_battery": self.battery_profile["critical_voltage"],
+        }
+        for alert_name, voltage in thresholds.items():
+            alert = self.alerts.get(alert_name)
+            if alert is None:
+                continue
+            alert.condition = f"battery_voltage < {voltage}"
+            self._parsed_conditions[alert_name] = parse_alert_condition(alert.condition)
 
     def reset_battery_estimator(self):
         """Reset the estimator after a pack swap or charge."""
         self.battery_estimator.reset()
+
+    def get_active_alerts(self) -> List[Dict[str, str]]:
+        """Alerts currently triggered, most severe first."""
+        active = [
+            {"name": alert.name, "level": alert.level, "message": alert.message}
+            for alert in self.alerts.values() if alert.triggered
+        ]
+        active.sort(key=lambda alert: 0 if alert["level"] == "CRITICAL" else 1)
+        return active
 
     def get_battery_estimate(self) -> dict:
         """Return the latest battery run-time estimate dict."""

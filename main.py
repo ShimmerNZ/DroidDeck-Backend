@@ -896,6 +896,8 @@ class WALLEBackend:
                     "memory": reading.memory_percent,
                     "temperature": reading.temperature,
                     "battery_voltage": reading.battery_voltage,
+                    "battery_soc": self.telemetry_system.get_battery_estimate().get("soc_percent"),
+                    "active_alerts": self.telemetry_system.get_active_alerts(),
                     "sabertooth_temp": reading.sabertooth_temp,
                     "current_tracks": reading.current_tracks,
                     "current_total": reading.current_total,
