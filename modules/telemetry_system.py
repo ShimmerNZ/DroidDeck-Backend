@@ -796,8 +796,10 @@ class SafeTelemetrySystem:
         cutoff = reading.timestamp - self.BATTERY_ALERT_AVERAGE_SECONDS
         recent_voltages = [r.battery_voltage for r in self.reading_history
                            if r.timestamp >= cutoff and r.battery_voltage > 0]
+        # No valid (non-zero) voltage yet means the ADC hasn't produced a
+        # reading; None skips the battery alerts instead of alarming on 0V
         battery_voltage = (sum(recent_voltages) / len(recent_voltages)
-                           if recent_voltages else reading.battery_voltage)
+                           if recent_voltages else None)
 
         # Metric values available to alert conditions
         context = {

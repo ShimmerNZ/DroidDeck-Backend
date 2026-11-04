@@ -6,7 +6,6 @@ Native Raspberry Pi audio controller using pygame
 """
 
 import logging
-import time
 import pygame
 import threading
 from pathlib import Path
@@ -581,83 +580,6 @@ class NativeAudioController:
             logger.debug(f"Audio file validation failed for {file_path}: {e}")
             return False
 
-    def test_audio_system(self) -> Dict[str, Any]:
-        """
-        Perform comprehensive audio system test.
-        Returns a dictionary with test results.
-        """
-        test_results: Dict[str, Any] = {
-            "timestamp": time.time(),
-            "pygame_available": False,
-            "mixer_initialized": False,
-            "directory_accessible": False,
-            "files_found": 0,
-            "sample_playback": False,
-            "volume_control": False,
-            "overall_status": "FAILED"
-        }
-        try:
-            # Test 1: pygame availability
-            import pygame as _pg
-            test_results["pygame_available"] = True
-            logger.debug("pygame available")
-
-            # Test 2: mixer initialization
-            if pygame.mixer.get_init():
-                test_results["mixer_initialized"] = True
-                logger.debug("mixer initialized")
-
-            # Test 3: directory access
-            if self.audio_directory.exists() and self.audio_directory.is_dir():
-                test_results["directory_accessible"] = True
-                logger.debug("audio directory accessible")
-
-            # Test 4: file scanning
-            file_count = self.get_file_count()
-            test_results["files_found"] = file_count
-            if file_count > 0:
-                logger.debug(f"found {file_count} audio files")
-
-            # Test 5: volume control
-            original_volume = self.get_volume()
-            if self.set_volume(0.5) and self.set_volume(original_volume):
-                test_results["volume_control"] = True
-                logger.debug("volume control working")
-
-            # Test 6: sample playback (if files available)
-            if file_count > 0:
-                # Try to play a very short sample
-                first_track = list(self.audio_files.keys())[0]
-                if self.play_track(first_track):
-                    time.sleep(0.1)  # brief playback
-                    if self.stop():
-                        test_results["sample_playback"] = True
-                        logger.debug("sample playback successful")
-
-            # Overall status
-            critical_tests = [
-                test_results["pygame_available"],
-                test_results["mixer_initialized"],
-                test_results["directory_accessible"]
-            ]
-            if all(critical_tests):
-                if test_results["files_found"] > 0:
-                    test_results["overall_status"] = "EXCELLENT"
-                else:
-                    test_results["overall_status"] = "GOOD"
-            elif any(critical_tests):
-                test_results["overall_status"] = "LIMITED"
-            else:
-                test_results["overall_status"] = "FAILED"
-
-            logger.info(f"Audio system test complete: {test_results['overall_status']}")
-            return test_results
-        except Exception as e:
-            logger.error(f"Audio system test failed: {e}")
-            test_results["error"] = str(e)
-            return test_results
-
-    # Callback registration methods
     def set_track_started_callback(self, callback: Callable):
         """Set callback for when track starts playing."""
         self.track_started_callback = callback

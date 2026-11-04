@@ -457,13 +457,13 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
 
     LAYER_NAME = "attention_gaze"
     # Deliberately 0, not 1: the mixer treats any layer with priority > 0
-    # as a "scene" for dispatch purposes, which skips resending the
-    # configured speed/accel from servo_config.json every tick (real
-    # scenes rely on their own flash-stored smoothing instead). At
-    # priority 0 these channels are dispatched the same way the joystick
-    # is - configured speed/accel resent every command - which is what
-    # actually lets servo_config.json's speed/accel produce eased,
-    # non-jerky motion here. Still comfortably below scenes (priority 10),
+    # as a "scene" for dispatch purposes, which never sends the configured
+    # speed/accel from servo_config.json (real scenes rely on their own
+    # flash-stored smoothing instead). At priority 0 these channels are
+    # dispatched the same way the joystick is - configured speed/accel kept
+    # applied on the Maestro - which is what actually lets
+    # servo_config.json's speed/accel produce eased, non-jerky motion
+    # here. Still comfortably below scenes (priority 10),
     # so a scene fading in still overrides it correctly; joystick being
     # additive means the tie in priority value doesn't matter to it.
     LAYER_PRIORITY = 0
@@ -515,7 +515,13 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
         # it always uses cfg.gaze_tilt_rate and cfg.gaze_tilt_accel.
         self._pan_max_rate = self._MAX_RATE
         self._pan_accel = self._config.gaze_scan_pan_accel
-        spawn(self._interp_loop())
+        # Step the glide from the mixer's own tick so exactly one step lands
+        # in every tick; a separate timer drifts against the mixer and every
+        # so often leaves a tick with no new position (a visible hitch)
+        if hasattr(mixer, "add_tick_callback"):
+            mixer.add_tick_callback(self._interp_step)
+        else:
+            spawn(self._interp_loop())
 
     _INTERP_INTERVAL = 0.02  # 50Hz - matches the motion mixer's own tick rate
     # Longest time one interpolation step is allowed to cover, so a stalled
@@ -545,27 +551,32 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
     _MAX_RATE = 0.35  # normalised units per second
 
     async def _interp_loop(self) -> None:
+        """Fallback timer for a mixer without tick callbacks"""
         last = time.monotonic()
         while True:
             await asyncio.sleep(self._INTERP_INTERVAL)
             now = time.monotonic()
-            dt = min(now - last, self._MAX_STEP_TIME)
+            self._interp_step(now - last)
             last = now
-            cfg = self._config
-            moved = False
-            if self._pan_vel != 0.0 or abs(self._pan - self._applied_pan) > 1e-6:
-                self._applied_pan, self._pan_vel = self._advance(
-                    self._applied_pan, self._pan_vel, self._pan,
-                    self._pan_max_rate, self._pan_accel, dt)
-                moved = True
-            if self._tilt_vel != 0.0 or abs(self._tilt - self._applied_tilt) > 1e-6:
-                self._applied_tilt, self._tilt_vel = self._advance(
-                    self._applied_tilt, self._tilt_vel, self._tilt,
-                    cfg.gaze_tilt_rate, cfg.gaze_tilt_accel, dt)
-                moved = True
-            if moved:
-                self._layer.set_channel(self._pan_channel, self._pulse_for(self._pan_channel, self._applied_pan))
-                self._layer.set_channel(self._tilt_channel, self._pulse_for(self._tilt_channel, self._applied_tilt))
+
+    def _interp_step(self, dt: float) -> None:
+        """Advance the pan/tilt glide by dt seconds and write the result to the layer"""
+        dt = min(dt, self._MAX_STEP_TIME)
+        cfg = self._config
+        moved = False
+        if self._pan_vel != 0.0 or abs(self._pan - self._applied_pan) > 1e-6:
+            self._applied_pan, self._pan_vel = self._advance(
+                self._applied_pan, self._pan_vel, self._pan,
+                self._pan_max_rate, self._pan_accel, dt)
+            moved = True
+        if self._tilt_vel != 0.0 or abs(self._tilt - self._applied_tilt) > 1e-6:
+            self._applied_tilt, self._tilt_vel = self._advance(
+                self._applied_tilt, self._tilt_vel, self._tilt,
+                cfg.gaze_tilt_rate, cfg.gaze_tilt_accel, dt)
+            moved = True
+        if moved:
+            self._layer.set_channel(self._pan_channel, self._pulse_for(self._pan_channel, self._applied_pan))
+            self._layer.set_channel(self._tilt_channel, self._pulse_for(self._tilt_channel, self._applied_tilt))
 
     @staticmethod
     def _advance(pos: float, vel: float, target: float, max_rate: float,

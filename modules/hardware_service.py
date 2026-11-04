@@ -46,9 +46,6 @@ class HardwareConfig:
     maestro1_device_number: int = 12
     maestro2_device_number: int = 13
 
-    # Sabertooth configuration
-    sabertooth_port: str = "/dev/ttyAMA1"
-    sabertooth_baud_rate: int = 9600
 
     # GPIO pins
     motor_step_pin: int = 16
@@ -1520,22 +1517,6 @@ class HardwareService:
             else:
                 ports_tested.append(f"{self.config.maestro_port}: NOT_FOUND")
 
-            # Test Sabertooth port
-            if Path(self.config.sabertooth_port).exists():
-                try:
-                    test_serial = serial.Serial(
-                        self.config.sabertooth_port,
-                        self.config.sabertooth_baud_rate,
-                        timeout=0.1
-                    )
-                    test_serial.close()
-                    ports_working.append(self.config.sabertooth_port)
-                    ports_tested.append(f"{self.config.sabertooth_port}: OK")
-                except Exception as e:
-                    ports_tested.append(f"{self.config.sabertooth_port}: FAILED ({e})")
-            else:
-                ports_tested.append(f"{self.config.sabertooth_port}: NOT_FOUND")
-
             test_result["details"] = {
                 "ports_tested": ports_tested,
                 "working_ports": ports_working,
@@ -1642,8 +1623,6 @@ class HardwareService:
                 "maestro_baud_rate": self.config.maestro_baud_rate,
                 "maestro1_device_number": self.config.maestro1_device_number,
                 "maestro2_device_number": self.config.maestro2_device_number,
-                "sabertooth_port": self.config.sabertooth_port,
-                "sabertooth_baud_rate": self.config.sabertooth_baud_rate,
                 "motor_step_pin": self.config.motor_step_pin,
                 "motor_dir_pin": self.config.motor_dir_pin,
                 "motor_enable_pin": self.config.motor_enable_pin,
@@ -1844,8 +1823,6 @@ def create_hardware_service(config_dict: Dict[str, Any]) -> HardwareService:
             maestro_baud_rate=hw_config.get("maestro1", {}).get("baud_rate", 57600),
             maestro1_device_number=hw_config.get("maestro1", {}).get("device_number", 12),
             maestro2_device_number=hw_config.get("maestro2", {}).get("device_number", 13),
-            sabertooth_port=hw_config.get("sabertooth", {}).get("port", "/dev/ttyAMA1"),
-            sabertooth_baud_rate=hw_config.get("sabertooth", {}).get("baud_rate", 9600),
             motor_step_pin=hw_config.get("gpio", {}).get("motor_step_pin", 16),
             motor_dir_pin=hw_config.get("gpio", {}).get("motor_dir_pin", 12),
             motor_enable_pin=hw_config.get("gpio", {}).get("motor_enable_pin", 13),

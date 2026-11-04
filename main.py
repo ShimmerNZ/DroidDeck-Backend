@@ -946,11 +946,24 @@ class WALLEBackend:
             except Exception as e:
                 logger.error(f"Telemetry update error: {e}")
 
+        update_task = None
+        skipped = 0
         while self.running:
             try:
                 # Fire telemetry update as background task - never awaited
-                # ADC reads and broadcasts run concurrently with the servo tick loop
-                spawn(_do_telemetry_update())
+                # ADC reads and broadcasts run concurrently with the servo tick loop.
+                # A cycle still running (slow or failing I2C) is never overlapped:
+                # concurrent ADS1115 reads would interleave the channel mux and
+                # stacked cycles would tie up the shared thread pool
+                if update_task is not None and not update_task.done():
+                    skipped += 1
+                    if skipped == 1 or skipped % 30 == 0:
+                        logger.warning(f"Telemetry cycle still running - skipped {skipped} interval(s)")
+                else:
+                    if skipped:
+                        logger.info(f"Telemetry cycle completed after {skipped} skipped interval(s)")
+                        skipped = 0
+                    update_task = spawn(_do_telemetry_update())
 
                 # Only sleep between fires - this is the only await in the loop
                 await asyncio.sleep(telemetry_interval)

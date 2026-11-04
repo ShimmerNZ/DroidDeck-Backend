@@ -935,6 +935,13 @@ class MotionMixer:
         # protected channels are held at stop and joystick updates to them are
         # ignored, without engaging the full failsafe.
         self._drive_hold_count: int = 0
+        # After the last drive hold is released, track input stays ignored
+        # until every protected channel is commanded back near stop (stick
+        # centred), so a stick still held from before the move can't send the
+        # robot off the moment the move finishes.
+        self._drive_hold_awaiting_centre: bool = False
+        self._drive_hold_latest: Dict[str, float] = {}
+        self.drive_hold_centre_tolerance: float = 25.0  # us either side of stop
         # Protected channels are continuous-rotation drive channels (tracks),
         # not position-holding servos, so their "stop" is always the standard
         # RC-PWM neutral pulse - independent of each channel's configurable
@@ -943,6 +950,11 @@ class MotionMixer:
         # means a misconfigured/edited home value for a track channel can
         # never cause the failsafe/disconnect/staleness paths to drive it.
         self._protected_channel_stop_pulse: float = 1500.0
+
+        # Called at the start of every tick with dt, before layers are blended,
+        # so per-tick producers (e.g. attention gaze easing) stay in step
+        # with the mixer instead of running their own timer
+        self._tick_callbacks: List[Callable[[float], None]] = []
 
         # Tick loop state
         self._running = False
@@ -1003,6 +1015,16 @@ class MotionMixer:
             self.timeline_players.pop(name, None)
         logger.debug(f"Layer removed: {name}")
 
+    def add_tick_callback(self, callback: Callable[[float], None]):
+        """Register a function called with dt at the start of every tick"""
+        if callback not in self._tick_callbacks:
+            self._tick_callbacks.append(callback)
+
+    def remove_tick_callback(self, callback: Callable[[float], None]):
+        """Unregister a tick callback"""
+        if callback in self._tick_callbacks:
+            self._tick_callbacks.remove(callback)
+
     async def get_layer(self, name: str) -> Optional[MotionLayer]:
         """Get a layer by name"""
         return self.layers.get(name)
@@ -1056,6 +1078,8 @@ class MotionMixer:
         """
         if active:
             self._drive_hold_count += 1
+            self._drive_hold_awaiting_centre = False
+            self._drive_hold_latest.clear()
             if self._drive_hold_count > 1 or not self._protected_channels:
                 return
             stop = self._protected_channel_stop_pulse
@@ -1073,7 +1097,30 @@ class MotionMixer:
                 return
             self._drive_hold_count -= 1
             if self._drive_hold_count == 0:
-                logger.info(f"Drive hold released ({reason})")
+                self._drive_hold_awaiting_centre = bool(self._protected_channels)
+                self._drive_hold_latest.clear()
+                logger.info(f"Drive hold released ({reason}) - waiting for stick to return to centre")
+
+    def _drive_hold_blocks(self, channel_id: str, position: float) -> bool:
+        """True while a drive hold, or the post-hold wait for centre, should
+        block this joystick update to a protected channel."""
+        if self._drive_hold_count:
+            return True
+        if not self._drive_hold_awaiting_centre:
+            return False
+        self._drive_hold_latest[channel_id] = position
+        stop = self._protected_channel_stop_pulse
+        tolerance = self.drive_hold_centre_tolerance
+        centred = all(
+            ch in self._drive_hold_latest and abs(self._drive_hold_latest[ch] - stop) <= tolerance
+            for ch in self._protected_channels
+        )
+        if not centred:
+            return True
+        self._drive_hold_awaiting_centre = False
+        self._drive_hold_latest.clear()
+        logger.info("Stick centred - track control restored")
+        return False
 
     def _send_protected_stop_now(self, stop: float):
         """Queue the stop pulse for every protected channel at EMERGENCY
@@ -1134,8 +1181,9 @@ class MotionMixer:
         """
         if not self.joystick_layer:
             return
-        if (self._failsafe_active or self._drive_hold_count) and channel_id in self._protected_channels:
-            return
+        if channel_id in self._protected_channels:
+            if self._failsafe_active or self._drive_hold_blocks(channel_id, position):
+                return
         # Guard against accidental mode/weight changes during refactors
         try:
             if self.joystick_layer.blend_mode != BlendMode.ADDITIVE:
@@ -1377,6 +1425,13 @@ class MotionMixer:
 
         # 0. Watchdog: force any protected channel with stale joystick input back to home
         self._decay_stale_joystick_channels(blend_start)
+
+        # 0b. Per-tick producers update their layer values for this tick
+        for callback in self._tick_callbacks:
+            try:
+                callback(dt)
+            except Exception as e:
+                logger.error(f"Mixer tick callback error: {e}")
 
         # 1. Update timeline players
         dead_players = []
