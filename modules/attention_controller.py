@@ -74,6 +74,8 @@ class Person:
     cy: float
     w: float
     h: float
+    # Shoulder width as a fraction of frame width, 0 when not visible
+    sw: float = 0.0
 
 
 @dataclass
@@ -91,8 +93,16 @@ class AttentionConfig:
     lost_grace: float = 2.0
     # How long a previously focused person is de-prioritised when choosing
     switch_cooldown: float = 20.0
-    # Face height (fraction of frame height) treated as "as close as it gets"
+    # Box height (fraction of frame height) treated as "as close as it gets",
+    # used when a person's shoulders are not both visible
     size_reference: float = 0.3
+    # Shoulder width (fraction of frame width) treated as "as close as it
+    # gets". Preferred over box height, which shrinks when a close person's
+    # legs drop out of frame
+    shoulder_reference: float = 0.2
+    # Longest wait for the head to reach someone who gestured before the
+    # gesture's reaction scene plays
+    gesture_look_max_wait: float = 1.5
 
     # When the focused person is lost, how far from frame centre (as a
     # fraction of the frame, 0..0.5) they must last have been seen for the
@@ -769,6 +779,7 @@ def _parse_people(raw: Any) -> List[Person]:
                 cy=float(item["cy"]),
                 w=float(item.get("w", 0.0)),
                 h=float(item.get("h", 0.0)),
+                sw=float(item.get("sw", 0.0) or 0.0),
             ))
         except (KeyError, TypeError, ValueError, AttributeError):
             continue
@@ -857,6 +868,22 @@ class AttentionController:
             self._start_focus(person, now, self.config.acquire_categories)
         # If they're not visible right now, _pick() prefers this id as soon
         # as they're confirmed again, from whichever state we're currently in.
+
+    def look_at_gesture(self, person_id: Optional[int]) -> Optional[float]:
+        """Turn attention to the person who just gestured, without the usual
+        acquire reaction since the gesture plays its own scene. Returns how
+        long to wait for the head to reach them, or None if attention is off
+        or they are not in view."""
+        if not self._enabled or person_id is None:
+            return None
+        person = self._find(person_id)
+        if person is None:
+            return None
+        now = self.clock()
+        if self._focus_id != person.id or self.state is not AttentionState.FOCUS:
+            self._event(f"gesture: looking at person {person.id}")
+            self._start_focus(person, now, ())
+        return min(self.output.remaining_travel_time(), self.config.gesture_look_max_wait)
 
     def get_status(self) -> Dict[str, Any]:
         return {
@@ -1140,7 +1167,10 @@ class AttentionController:
                 return manual
 
         def score(person: Person) -> float:
-            size = min(1.0, person.h / cfg.size_reference)
+            if person.sw > 0:
+                size = min(1.0, person.sw / cfg.shoulder_reference)
+            else:
+                size = min(1.0, person.h / cfg.size_reference)
             central = 1.0 - min(1.0, abs(person.cx - 0.5) * 2.0)
             penalty = 0.0
             last = self._last_focus_time.get(person.id)

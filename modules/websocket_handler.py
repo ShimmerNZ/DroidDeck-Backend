@@ -40,6 +40,7 @@ class WebSocketMessageHandler:
         self._prev_buttons: Dict[str, bool] = {}  # last seen button state for delta filtering
         self.config_store = ConfigStore()
         self.pi_status = PiStatusMonitor()
+        self._gesture_scene_active = False
         self.attention = AttentionController(
             scene_engine, backend_ref, status_callback=self._broadcast_attention_status)
 
@@ -1615,60 +1616,75 @@ class WebSocketMessageHandler:
     # ==================== GESTURE & TRACKING HANDLERS ====================
 
     async def _handle_gesture(self, websocket, data: Dict[str, Any]):
-        """Gesture detection handler with callback bypass"""
+        """Gesture from the frontend: look at whoever made it, then play its scene"""
         gesture_name = data.get("name")
         confidence = data.get("confidence", 1.0)
-        
-        logger.info(f" Gesture detected: {gesture_name} (confidence: {confidence})")
-        
+        person_id = data.get("person_id")
+
+        logger.info(f" Gesture detected: {gesture_name} from person {person_id} (confidence: {confidence})")
+
         # Map gesture names to scene names
         gesture_scene_mapping = {
             "left_wave": "left hand wave",
-            "right_wave": "right hand wave", 
+            "right_wave": "right hand wave",
             "hands_up": "hands up",
         }
-        
+
         scene_name = gesture_scene_mapping.get(gesture_name)
-        if scene_name:
+        if scene_name and self._gesture_scene_active:
+            logger.info(f"Gesture '{gesture_name}' ignored - previous gesture scene still running")
+            scene_name = None
+        elif scene_name:
             try:
-                # SOLUTION: Temporarily disable all callbacks to avoid deadlock
-                original_started = self.scene_engine.scene_started_callback
-                original_completed = self.scene_engine.scene_completed_callback
-                original_error = self.scene_engine.scene_error_callback
-                
-                # Disable callbacks completely
-                self.scene_engine.scene_started_callback = None
-                self.scene_engine.scene_completed_callback = None
-                self.scene_engine.scene_error_callback = None
-                
-                # Play scene without any callbacks. Gestures are automatic,
-                # so they never interrupt a scene the operator started
-                success = await self.scene_engine.play_scene(scene_name, auto_triggered=True)
-                
-                # Restore callbacks immediately
-                self.scene_engine.scene_started_callback = original_started
-                self.scene_engine.scene_completed_callback = original_completed
-                self.scene_engine.scene_error_callback = original_error
-                
-                logger.info(f" Triggered scene '{scene_name}' for gesture '{gesture_name}' (no callbacks)")
-                
-            except Exception as e:
-                # Always restore callbacks even on error
-                self.scene_engine.scene_started_callback = original_started
-                self.scene_engine.scene_completed_callback = original_completed
-                self.scene_engine.scene_error_callback = original_error
-                logger.error(f"Failed to trigger scene '{scene_name}': {e}")
-        else:
+                look_wait = self.attention.look_at_gesture(
+                    int(person_id) if person_id is not None else None)
+            except (TypeError, ValueError):
+                look_wait = None
+            # Played as a task so a wait for the head to turn does not hold up
+            # other messages from this client
+            self._gesture_scene_active = True
+            asyncio.create_task(self._play_gesture_scene(scene_name, gesture_name, look_wait or 0.0))
+        elif gesture_name not in gesture_scene_mapping:
             logger.warning(f"No scene mapping found for gesture: {gesture_name}")
-        
+
         # Broadcast gesture event (this should work since it's outside callback context)
         await self.backend.broadcast_message({
             "type": "gesture_detected",
             "name": gesture_name,
+            "person_id": person_id,
             "confidence": confidence,
             "scene_triggered": scene_name,
             "timestamp": time.time()
         })
+
+    async def _play_gesture_scene(self, scene_name: str, gesture_name: str, delay: float):
+        """Play a gesture's reaction scene, after the head has had time to turn"""
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await self._play_scene_without_callbacks(scene_name, gesture_name)
+        finally:
+            self._gesture_scene_active = False
+
+    async def _play_scene_without_callbacks(self, scene_name: str, gesture_name: str):
+        """Play a scene with the engine callbacks disabled, which avoids a deadlock"""
+        original_started = self.scene_engine.scene_started_callback
+        original_completed = self.scene_engine.scene_completed_callback
+        original_error = self.scene_engine.scene_error_callback
+        try:
+            self.scene_engine.scene_started_callback = None
+            self.scene_engine.scene_completed_callback = None
+            self.scene_engine.scene_error_callback = None
+
+            # Gestures are automatic, so they never interrupt a scene the operator started
+            await self.scene_engine.play_scene(scene_name, auto_triggered=True)
+            logger.info(f" Triggered scene '{scene_name}' for gesture '{gesture_name}' (no callbacks)")
+        except Exception as e:
+            logger.error(f"Failed to trigger scene '{scene_name}': {e}")
+        finally:
+            self.scene_engine.scene_started_callback = original_started
+            self.scene_engine.scene_completed_callback = original_completed
+            self.scene_engine.scene_error_callback = original_error
 
     async def _handle_get_gesture_stats(self, websocket, data: Dict[str, Any]):
         """Get gesture detection statistics"""
