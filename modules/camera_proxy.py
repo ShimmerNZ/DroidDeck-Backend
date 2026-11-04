@@ -407,6 +407,8 @@ class CameraProxy:
         logger.info("Starting camera stream worker...")
 
         while self.streaming_enabled and self.running:
+            session = None
+            stream = None
             try:
                 logger.info(f"Connecting to ESP32 camera at: {self.esp32_url}")
 
@@ -441,6 +443,13 @@ class CameraProxy:
                 while self.streaming_enabled and self.running:
                     jpeg_frame = _read_mjpeg_part(stream.raw)
                     if jpeg_frame is None:
+                        # Camera ended the stream; pause briefly so a camera
+                        # that keeps dropping connections can't cause a
+                        # tight reconnect loop
+                        self.connected_to_esp32 = False
+                        logger.warning("Camera stream ended - reconnecting")
+                        if self.streaming_enabled:
+                            time.sleep(self.reconnect_delay)
                         break
 
                     current_time = time.time()
@@ -465,6 +474,14 @@ class CameraProxy:
                 logger.error(f"Camera stream error: {e}")
                 if self.streaming_enabled:
                     time.sleep(delay)
+            finally:
+                # Release the socket now rather than leaving it to garbage collection
+                for resource in (stream, session):
+                    if resource is not None:
+                        try:
+                            resource.close()
+                        except Exception:
+                            pass
 
         self.stream_active = False
         self.connected_to_esp32 = False
@@ -770,10 +787,18 @@ class CameraProxy:
                 size = request.args.get('size', type=int, default=5 * 1024 * 1024)
                 size = min(size, 50 * 1024 * 1024)  # Cap at 50MB
 
-                test_data = b'0' * size
+                # Streamed in chunks so a large test never sits in memory whole
+                chunk = b'0' * 65536
+
+                def generate():
+                    remaining = size
+                    while remaining > 0:
+                        part = chunk if remaining >= len(chunk) else chunk[:remaining]
+                        remaining -= len(part)
+                        yield part
 
                 return Response(
-                    test_data,
+                    generate(),
                     mimetype='application/octet-stream',
                     headers={
                         'Content-Length': str(size),

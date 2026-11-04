@@ -8,6 +8,7 @@ Flask + Socket.IO web interface bridging browser clients to the backend.
 import os
 import json
 import logging
+import asyncio
 import threading
 import time
 from pathlib import Path
@@ -51,6 +52,48 @@ class DroidDeckWebServer:
         """Set or replace the backend reference and re-wire scene callbacks"""
         self.backend = backend_ref
         self._wire_scene_callbacks()
+
+    def _backend_loop(self):
+        """The backend's running asyncio loop, or None before it has started"""
+        loop = getattr(self.backend, "loop", None)
+        if loop is not None and loop.is_running():
+            return loop
+        return None
+
+    def _run_backend(self, coro, timeout: Optional[float] = None):
+        """Run a backend coroutine on the backend's own event loop and wait
+        for its result.
+
+        Flask and Socket.IO handlers run on their own threads. Backend
+        coroutines share locks, tasks and state with the main loop, so they
+        must run there; running them on a private loop leaves tasks they
+        start (sweeps, scenes, idle mode) on a loop that is closed straight
+        away, and races the mixer tick.
+        """
+        loop = self._backend_loop()
+        if loop is None:
+            # Backend loop not running yet (startup or standalone use)
+            private = asyncio.new_event_loop()
+            try:
+                return private.run_until_complete(coro)
+            finally:
+                private.close()
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            # Called on the backend loop itself: waiting would deadlock
+            return asyncio.ensure_future(coro, loop=loop)
+        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout)
+
+    def _call_backend(self, func, *args):
+        """Run a plain backend function on the backend loop's thread"""
+        loop = self._backend_loop()
+        if loop is None:
+            return func(*args)
+        loop.call_soon_threadsafe(func, *args)
+        return None
 
     def _wire_scene_callbacks(self):
         """Register scene engine callbacks to broadcast events to web clients"""
@@ -163,10 +206,7 @@ class DroidDeckWebServer:
                 def stop_scene_thread():
                     import asyncio
                     try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        loop.run_until_complete(self.backend.scene_engine.stop_current_scene())
-                        loop.close()
+                        self._run_backend(self.backend.scene_engine.stop_current_scene())
                     except Exception as e:
                         logger.error(f"Error stopping scene: {e}")
 
@@ -219,10 +259,7 @@ class DroidDeckWebServer:
                     def idle_mode_thread():
                         import asyncio
                         try:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            self.backend.scene_engine.set_idle_mode(state)
-                            loop.close()
+                            self._call_backend(self.backend.scene_engine.set_idle_mode, state)
                         except Exception as e:
                             logger.error(f"Error setting idle mode: {e}")
 
@@ -309,12 +346,9 @@ class DroidDeckWebServer:
             def stepper_thread():
                 import asyncio
                 try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    loop.run_until_complete(
+                    self._run_backend(
                         self.backend.hardware_service.handle_stepper_command({'command': command})
                     )
-                    loop.close()
                 except Exception as e:
                     logger.error(f"Stepper command error: {e}")
 
@@ -340,10 +374,7 @@ class DroidDeckWebServer:
                 def save_scene_thread():
                     import asyncio
                     try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        loop.run_until_complete(self.backend.scene_engine.save_scenes([scene_data]))
-                        loop.close()
+                        self._run_backend(self.backend.scene_engine.save_scenes([scene_data]))
                         self.socketio.emit('backend_message', {
                             'type': 'scene_saved',
                             'scene_name': scene_data.get('label'),
@@ -475,10 +506,7 @@ class DroidDeckWebServer:
                             import asyncio
                             try:
                                 # Create a new event loop for this thread
-                                loop = asyncio.new_event_loop()
-                                asyncio.set_event_loop(loop)
-                                loop.run_until_complete(self.backend.scene_engine.play_scene(scene_name))
-                                loop.close()
+                                self._run_backend(self.backend.scene_engine.play_scene(scene_name))
                             except Exception as e:
                                 logger.error(f"Error playing scene: {e}")
                         
@@ -609,11 +637,9 @@ class DroidDeckWebServer:
                 def failsafe_thread():
                     import asyncio
                     try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
                         
                         # Execute failsafe toggle
-                        loop.run_until_complete(self.backend.set_failsafe_mode(enable))
+                        self._run_backend(self.backend.set_failsafe_mode(enable))
                         
                         # Get NEMA status to check for errors
                         nema_status = {'enabled': False, 'homed': False, 'error': None}
@@ -630,7 +656,6 @@ class DroidDeckWebServer:
                             logger.error(f"Error getting NEMA status: {e}")
                             nema_status['error'] = 'Status unavailable'
                         
-                        loop.close()
                         
                         # Send response with NEMA status
                         self.socketio.emit('backend_message', {
@@ -721,11 +746,9 @@ class DroidDeckWebServer:
                     def servo_command_thread():
                         import asyncio
                         try:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
                             
                             # Set servo position
-                            result = loop.run_until_complete(
+                            result = self._run_backend(
                                 self.backend.hardware_service.set_servo_position(
                                     channel, position, "realtime"
                                 )
@@ -733,11 +756,10 @@ class DroidDeckWebServer:
                             
                             # Optionally set speed if provided
                             if speed is not None:
-                                loop.run_until_complete(
+                                self._run_backend(
                                     self.backend.hardware_service.set_servo_speed(channel, speed)
                                 )
                             
-                            loop.close()
                             
                             logger.debug(f"Servo command executed: {channel} = {position}")
                             
@@ -782,15 +804,12 @@ class DroidDeckWebServer:
                     def nema_enable_thread():
                         import asyncio
                         try:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
                             
-                            result = loop.run_until_complete(
+                            result = self._run_backend(
                                 self.backend.hardware_service.handle_stepper_command({
                                     'command': 'enable' if enabled else 'disable'
                                 })
                             )
-                            loop.close()
                             
                             logger.info(f"NEMA enable command executed: {result}")
                             
@@ -907,17 +926,14 @@ class DroidDeckWebServer:
                 def nema_move_thread():
                     import asyncio
                     try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
                         
                         # Call the stepper command handler
-                        result = loop.run_until_complete(
+                        result = self._run_backend(
                             self.backend.hardware_service.handle_stepper_command({
                                 'command': 'move_to_position',
                                 'position_cm': position_cm
                             })
                         )
-                        loop.close()
                         
                         logger.info(f"NEMA move command executed: {result}")
                     except Exception as e:
@@ -950,15 +966,12 @@ class DroidDeckWebServer:
                 def nema_home_thread():
                     import asyncio
                     try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
                         
-                        result = loop.run_until_complete(
+                        result = self._run_backend(
                             self.backend.hardware_service.handle_stepper_command({
                                 'command': 'home'
                             })
                         )
-                        loop.close()
                         
                         logger.info(f"NEMA home command executed: {result}")
                     except Exception as e:
@@ -995,10 +1008,8 @@ class DroidDeckWebServer:
                 def nema_sweep_thread():
                     import asyncio
                     try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
                         
-                        result = loop.run_until_complete(
+                        result = self._run_backend(
                             self.backend.hardware_service.handle_stepper_command({
                                 'command': 'start_sweep',
                                 'min_cm': min_cm,
@@ -1007,7 +1018,6 @@ class DroidDeckWebServer:
                                 'acceleration': acceleration
                             })
                         )
-                        loop.close()
                         
                         logger.info(f"NEMA sweep started: {result}")
                     except Exception as e:
@@ -1040,15 +1050,12 @@ class DroidDeckWebServer:
                 def nema_stop_thread():
                     import asyncio
                     try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
                         
-                        result = loop.run_until_complete(
+                        result = self._run_backend(
                             self.backend.hardware_service.handle_stepper_command({
                                 'command': 'stop_sweep'
                             })
                         )
-                        loop.close()
                         
                         logger.info(f"NEMA sweep stopped: {result}")
                     except Exception as e:
@@ -1077,15 +1084,12 @@ class DroidDeckWebServer:
                 def nema_status_thread():
                     import asyncio
                     try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
                         
-                        result = loop.run_until_complete(
+                        result = self._run_backend(
                             self.backend.hardware_service.handle_stepper_command({
                                 'command': 'get_status'
                             })
                         )
-                        loop.close()
                         
                         # Send status back to client
                         if result and result.get('success'):
@@ -1119,16 +1123,13 @@ class DroidDeckWebServer:
                 def nema_config_thread():
                     import asyncio
                     try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
                         
-                        result = loop.run_until_complete(
+                        result = self._run_backend(
                             self.backend.hardware_service.handle_stepper_command({
                                 'command': 'update_config',
                                 'config': config
                             })
                         )
-                        loop.close()
                         
                         logger.info(f"NEMA config updated: {result}")
                     except Exception as e:
@@ -1159,10 +1160,7 @@ class DroidDeckWebServer:
                 def emergency_stop_thread():
                     import asyncio
                     try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        loop.run_until_complete(self.backend.hardware_service.emergency_stop_all())
-                        loop.close()
+                        self._run_backend(self.backend.hardware_service.emergency_stop_all())
                         logger.info("Emergency stop executed successfully")
                     except Exception as e:
                         logger.error(f"Error executing emergency stop: {e}")
