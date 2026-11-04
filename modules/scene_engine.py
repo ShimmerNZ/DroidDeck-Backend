@@ -943,6 +943,13 @@ class EnhancedSceneEngine:
             logger.error(f"Error executing script on {maestro_name}: {e}")
             return False
     
+    def _is_track_channel(self, servo_id: str) -> bool:
+        """True for the drive track channels, which scenes must never move"""
+        backend = getattr(self.hardware_service, "backend_reference", None)
+        if backend is not None and hasattr(backend, "is_track_channel"):
+            return backend.is_track_channel(servo_id)
+        return servo_id in ("m2_ch12", "m2_ch13")
+
     async def _execute_servo_movements_batch(self, scene: Dict[str, Any]) -> bool:
         """Execute servo movements using efficient batch commands"""
         servos = scene.get("servos", {})
@@ -958,6 +965,10 @@ class EnhancedSceneEngine:
         for servo_id, settings in servos.items():
             if self.interrupt_requested:
                 break
+
+            # Track channels are controller-only and never driven by scenes
+            if self._is_track_channel(servo_id):
+                continue
                 
             try:
                 maestro_num, channel = self._parse_servo_id(servo_id)

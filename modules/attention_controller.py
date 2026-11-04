@@ -57,11 +57,6 @@ logger = logging.getLogger(__name__)
 # late, or reconnects, learns it without waiting for the next state change
 STATUS_HEARTBEAT_SECONDS = 2.0
 
-# How often a summary of camera frame ages is logged, and the oldest age (in
-# seconds) a reading may report before it is treated as bad data and ignored
-LATENCY_REPORT_SECONDS = 5.0
-LATENCY_MAX_AGE_SECONDS = 10.0
-
 
 class AttentionState(Enum):
     OFF = "OFF"
@@ -840,45 +835,6 @@ class AttentionController:
 
         self._people = people
         self._last_update = now
-        self._note_frame_age(message.get("frame_time"), message.get("deck_ms"), now)
-
-    def _note_frame_age(self, frame_time: Any, deck_ms: Any, now: float) -> None:
-        """Record how old a reading's camera frame was when it reached the
-        backend, and log a summary every LATENCY_REPORT_SECONDS. frame_time
-        is the camera proxy's monotonic arrival time for the frame, which
-        shares a clock with this process; deck_ms is how long the frontend
-        held the frame before sending the reading."""
-        if frame_time is None:
-            return
-        try:
-            age = time.monotonic() - float(frame_time)
-            deck = None if deck_ms is None else float(deck_ms) / 1000.0
-        except (TypeError, ValueError):
-            return
-        if not 0.0 <= age <= LATENCY_MAX_AGE_SECONDS:
-            return
-
-        if self._latency_window_start is None:
-            self._latency_window_start = now
-        self._frame_ages.append((age, deck))
-        if now - self._latency_window_start >= LATENCY_REPORT_SECONDS:
-            self._report_latency(now)
-
-    def _report_latency(self, now: float) -> None:
-        ages = sorted(age for age, _ in self._frame_ages)
-        decks = [deck for _, deck in self._frame_ages if deck is not None]
-        count = len(ages)
-        mean = sum(ages) / count
-        p90 = ages[int(0.9 * (count - 1))]
-        text = (f"latency: frame age at backend avg {mean * 1000:.0f}ms, "
-                f"p90 {p90 * 1000:.0f}ms, max {ages[-1] * 1000:.0f}ms over {count} readings")
-        if decks:
-            deck_mean = sum(decks) / len(decks)
-            text += (f"; frontend {deck_mean * 1000:.0f}ms, "
-                     f"network {max(mean - deck_mean, 0.0) * 1000:.0f}ms")
-        self._event(text)
-        self._frame_ages.clear()
-        self._latency_window_start = now
 
     def select_person(self, person_id: Optional[int]) -> None:
         """Manually lock attention onto a specific tracked person (by id),
@@ -1309,8 +1265,6 @@ class AttentionController:
         self._standby_note = ""
         self._last_publish = float("-inf")
         self._pending_reaction: Optional[Tuple[List[str], str, float]] = None
-        self._frame_ages: List[Tuple[float, Optional[float]]] = []
-        self._latency_window_start: Optional[float] = None
 
     async def _run(self) -> None:
         while True:

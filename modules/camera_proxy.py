@@ -21,7 +21,6 @@ import json
 import numpy as np
 import logging
 from pathlib import Path
-from collections import deque
 
 # Setup logging
 logging.basicConfig(
@@ -116,10 +115,6 @@ class CameraProxy:
         self.connected_to_esp32 = False
         self.stream_thread = None
 
-        # Frame timing tracking
-        self.frame_times = deque(maxlen=60)
-        self.last_frame_timestamp = 0
-
         # ESP32 camera settings with correct parameter names
         self.esp32_settings = {
             "resolution": 6,       # SVGA (800x600)
@@ -137,7 +132,6 @@ class CameraProxy:
         self.stream_active = False
 
         # Timing control
-        self.last_frame_time = 0
         self.target_frame_interval = 1.0 / self.target_fps
 
         # Placeholder frames cached per display state
@@ -776,8 +770,7 @@ class CameraProxy:
             return jsonify({
                 "status": "healthy" if self.running else "stopped",
                 "esp32_connected": self.connected_to_esp32,
-                "stream_active": self.stream_active,
-                "uptime": time.time() - self.last_frame_time if self.last_frame_time else 0
+                "stream_active": self.stream_active
             })
 
         @app.route('/bandwidth_test')

@@ -1548,8 +1548,14 @@ class MotionMixer:
             additive_sum = 0.0
             has_additive = False
 
+            # Track channels are controller-only: scenes, idle and attention
+            # layers can never drive them
+            joystick_only = channel_id in self._protected_channels
+
             for layer in sorted_layers:
                 if layer.weight <= 0.001:
+                    continue
+                if joystick_only and layer is not self.joystick_layer:
                     continue
                 if channel_id not in layer.channel_values:
                     continue

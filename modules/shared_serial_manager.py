@@ -255,6 +255,18 @@ class EnhancedSharedSerialPortManager:
         logger.info("Serial manager started")
         return initial_connected
 
+    def restart_worker(self) -> bool:
+        """Start a new worker thread if the manager is running but its worker
+        has died. Returns True when a worker is running afterwards."""
+        if not self.running:
+            return False
+        if self.worker_thread and self.worker_thread.is_alive():
+            return True
+        logger.error("Serial worker thread not running - restarting it")
+        self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.worker_thread.start()
+        return True
+
     def _open_port(self) -> bool:
         """Attempt to open the serial port. Returns True on success."""
         self.stats["connection_attempts"] += 1

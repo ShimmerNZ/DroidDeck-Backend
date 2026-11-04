@@ -179,6 +179,7 @@ class BottangoLiveDriver:
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._blocked_track_channels: set = set()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._tick_task = None
         self._writer = None
@@ -507,7 +508,19 @@ class BottangoLiveDriver:
         except asyncio.CancelledError:
             pass
 
+    def _is_track_channel(self, channel_key: str) -> bool:
+        """Track channels are controller-only and never driven by Bottango"""
+        backend = getattr(self.hardware_service, "backend_reference", None)
+        if backend is not None and hasattr(backend, "is_track_channel"):
+            return backend.is_track_channel(channel_key)
+        return channel_key in ("m2_ch12", "m2_ch13")
+
     async def _send_servo(self, channel_key: str, pw: int):
+        if self._is_track_channel(channel_key):
+            if channel_key not in self._blocked_track_channels:
+                self._blocked_track_channels.add(channel_key)
+                logger.warning(f"Bottango live output to track channel {channel_key} ignored - tracks are controller-only")
+            return
         logger.debug(f"send_servo: {channel_key} -> {pw} us")
         if self.hardware_service:
             try:

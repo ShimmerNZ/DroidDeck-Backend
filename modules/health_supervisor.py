@@ -39,6 +39,7 @@ CHECK_INTERVAL = 10.0          # Seconds between health sweeps
 TELEMETRY_STALE_AFTER = 15.0   # Telemetry older than this is stale
 SERIAL_QUEUE_WARN_DEPTH = 100  # Queue depth that indicates a stalled bus
 MIXER_RESTART_COOLDOWN = 60.0  # Minimum seconds between mixer restart attempts
+SERIAL_RESTART_COOLDOWN = 30.0 # Minimum seconds between serial worker restarts
 
 
 class HealthSupervisor:
@@ -59,7 +60,11 @@ class HealthSupervisor:
         self._running = False
         self._last_mixer_ticks = -1
         self._last_mixer_restart = 0.0
+        self._last_serial_restart = 0.0
         self._last_status: Dict[str, str] = {}
+        # Set when the sweep itself ran late, meaning the event loop was
+        # blocked (e.g. a stepper move) and the mixer could not have ticked
+        self._loop_was_blocked = False
 
     # ---- Individual component checks ----
 
@@ -73,6 +78,11 @@ class HealthSupervisor:
 
             if not running:
                 return "stopped"
+
+            if self._loop_was_blocked:
+                # Not a fair test this sweep - start counting again from now
+                self._last_mixer_ticks = ticks
+                return "ok"
 
             if self._last_mixer_ticks >= 0 and ticks == self._last_mixer_ticks:
                 # Tick loop is running but not advancing - attempt one restart
@@ -105,6 +115,15 @@ class HealthSupervisor:
             queue_depth = self.serial_manager.command_queue.qsize()
 
             if not worker_alive:
+                now = time.monotonic()
+                restart = getattr(self.serial_manager, "restart_worker", None)
+                if restart and now - self._last_serial_restart > SERIAL_RESTART_COOLDOWN:
+                    self._last_serial_restart = now
+                    try:
+                        if restart():
+                            return "restarted"
+                    except Exception as e:
+                        logger.error(f"Serial worker restart failed: {e}")
                 return "worker_dead"
             if not connected:
                 return "disconnected"
@@ -173,7 +192,9 @@ class HealthSupervisor:
         logger.info(f"Health supervisor started - interval {CHECK_INTERVAL}s")
         try:
             while self._running:
+                started = time.monotonic()
                 await asyncio.sleep(CHECK_INTERVAL)
+                self._loop_was_blocked = time.monotonic() - started > CHECK_INTERVAL * 1.5
                 try:
                     report = self.get_status()
 

@@ -62,6 +62,7 @@ from modules.controller_input_handler import ControllerInputProcessor
 from modules.motion_system import MotionMixer, BlendMode
 from modules.gpio_compat import setup_output_pin, set_output, is_gpio_available
 from modules.sd_watchdog import SystemdWatchdog
+from modules.health_supervisor import HealthSupervisor
 from web.webapp import DroidDeckWebServer
 from modules.task_utils import spawn
 
@@ -101,6 +102,8 @@ class WALLEBackend:
         self.failsafe_active = True
         self.connected_clients = set()
         self.telemetry_task = None
+        self.health_supervisor = None
+        self.health_supervisor_task = None
         self.websocket_server = None
         self.loop = None
         self.running = False
@@ -1158,6 +1161,20 @@ class WALLEBackend:
             # Start control link watchdog
             self.control_link_task = asyncio.create_task(self.control_link_watchdog())
 
+            # Start health supervisor: restarts a stalled mixer tick loop or a
+            # dead serial worker, and logs component faults as they change
+            try:
+                self.health_supervisor = HealthSupervisor(
+                    motion_mixer=self.motion_mixer,
+                    serial_manager=self.hardware_service.shared_managers.get("maestro_port"),
+                    telemetry_system=self.telemetry_system,
+                    bottango_driver=self.bottango_live_driver,
+                    broadcast=self.broadcast_message,
+                )
+                self.health_supervisor_task = asyncio.create_task(self.health_supervisor.run())
+            except Exception as e:
+                logger.error(f"Health supervisor failed to start: {e}")
+
             # Start WebSocket server with version-appropriate method
             logger.info("Starting WebSocket server on port 8766")
 
@@ -1225,6 +1242,15 @@ class WALLEBackend:
 
         # Tell systemd we're stopping and stop the watchdog pings so it
         # doesn't race a slow shutdown against the WatchdogSec window
+        if self.health_supervisor:
+            self.health_supervisor.stop()
+        if self.health_supervisor_task and not self.health_supervisor_task.done():
+            self.health_supervisor_task.cancel()
+            try:
+                await asyncio.wait_for(self.health_supervisor_task, timeout=1.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+
         if hasattr(self, 'sd_watchdog') and self.sd_watchdog:
             self.sd_watchdog.notify_stopping()
             if self.sd_watchdog_task and not self.sd_watchdog_task.done():
