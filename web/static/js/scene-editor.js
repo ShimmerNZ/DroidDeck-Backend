@@ -1,4 +1,4 @@
-// Enhanced Scene Management Functions for Droid Deck Web UI
+// Scene Management Functions for Droid Deck Web UI
 // Integrates with existing socket-handler.js and ui-functions.js
 
 // Scene Editor State

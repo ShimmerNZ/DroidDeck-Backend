@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Complete Enhanced Scene Engine for WALL-E Robot Control System
+Scene Engine for WALL-E Robot Control System
 Manages scenes, emotions, and audio-synchronized servo movements with batch command optimization
 """
 
@@ -71,7 +71,7 @@ class SceneValidationResult:
 
 class EnhancedSceneEngine:
     """
-    Complete Enhanced Scene Engine with batch command optimization and advanced features
+    Scene engine with batch command optimization
     """
 
     # A new user scene within this time of the last one starting is treated
@@ -880,7 +880,7 @@ class EnhancedSceneEngine:
         logger.debug(f"DEBUG: Finished waiting after {time.time() - start_time:.2f}s")
 
     async def _execute_scene_components(self, scene: Dict[str, Any]) -> bool:
-        """Execute all components of a scene with enhanced batch support"""
+        """Execute all components of a scene with batch support"""
         success = True
         
         logger.debug("DEBUG: Starting _execute_scene_components")
@@ -1037,7 +1037,7 @@ class EnhancedSceneEngine:
     async def _send_maestro_batch(self, maestro_id: str, servo_configs: List[Dict[str, Any]]) -> bool:
         """Send batch command to specific Maestro with fallback to individual commands"""
         try:
-            # Try enhanced batch method first
+            # Try batch method first
             if hasattr(self.hardware_service, 'set_multiple_servo_targets'):
                 batch_success = await self.hardware_service.set_multiple_servo_targets(
                     maestro_id, servo_configs, priority="normal"
@@ -1726,7 +1726,8 @@ class EnhancedSceneEngine:
     
     async def _load_bottango_scene(self, scene_name: str) -> dict:
         """Load full Bottango scene data from scenes/ folder"""
-        return self._read_bottango_scene_sync(scene_name)
+        # File read and JSON parse run off the event loop
+        return await asyncio.to_thread(self._read_bottango_scene_sync, scene_name)
 
     def _read_bottango_scene_sync(self, scene_name: str) -> dict:
         """Read a converted Bottango scene file from scenes/ (exact or sanitised name)"""

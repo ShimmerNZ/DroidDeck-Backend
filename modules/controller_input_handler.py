@@ -11,6 +11,7 @@ import time
 from typing import Dict, Any, Optional, Callable, List
 from dataclasses import dataclass
 from enum import Enum
+from modules.task_utils import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -741,7 +742,7 @@ class SceneTriggerHandler(BehaviorHandler):
 
             if should_trigger:
                 # Run scene in background to avoid blocking controller input processing
-                asyncio.create_task(self.scene_engine.play_scene(scene_name))
+                spawn(self.scene_engine.play_scene(scene_name))
                 self.logger.info(f"Scene triggered (non-blocking): {scene_name}")
                 return True
 
@@ -792,7 +793,7 @@ class ToggleScenesHandler(BehaviorHandler):
                 self.current_scene[control_key] = 1 - current
 
                 # Run scene in background to avoid blocking controller input processing
-                asyncio.create_task(self.scene_engine.play_scene(scene_to_trigger))
+                spawn(self.scene_engine.play_scene(scene_to_trigger))
                 self.logger.info(f"Toggle scene triggered (non-blocking): {scene_to_trigger}")
                 return True
 

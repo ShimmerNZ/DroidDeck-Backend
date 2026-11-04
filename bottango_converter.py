@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Bottango Animation Converter with Bezier Interpolation
-Enhanced version with proper cubic hermite/bezier curve evaluation
+Cubic hermite/bezier curve evaluation
 """
 
 import json

@@ -38,6 +38,7 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
+from modules.task_utils import spawn
 
 # Only needed by MotionMixerGazeOutput, which drives the real servos. Kept
 # optional so this module still imports (for dry-run/log-only use, or unit
@@ -487,7 +488,7 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
             auto_remove=False,
         )
         self._layer.state = LayerState.ACTIVE
-        asyncio.ensure_future(mixer.add_layer(self._layer))
+        spawn(mixer.add_layer(self._layer))
 
         # The values _pan/_tilt hold are targets, not what's actually sent -
         # _interp_loop eases the real commanded position toward them a
@@ -514,7 +515,7 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
         # it always uses cfg.gaze_tilt_rate and cfg.gaze_tilt_accel.
         self._pan_max_rate = self._MAX_RATE
         self._pan_accel = self._config.gaze_scan_pan_accel
-        asyncio.ensure_future(self._interp_loop())
+        spawn(self._interp_loop())
 
     _INTERP_INTERVAL = 0.02  # 50Hz - matches the motion mixer's own tick rate
     # Longest time one interpolation step is allowed to cover, so a stalled
@@ -1223,7 +1224,7 @@ class AttentionController:
             return
 
         self._event(f"reaction ({reason}): playing scene '{name}'")
-        asyncio.ensure_future(self._play_scene(name))
+        spawn(self._play_scene(name))
 
     def _choose_scene(self, categories: Sequence[str]) -> Optional[str]:
         engine = self.scene_engine

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Enhanced WALL-E Startup Script with Camera Proxy Support
+# WALL-E Startup Script with Camera Proxy Support
 
 cd "$(dirname "$0")"
 

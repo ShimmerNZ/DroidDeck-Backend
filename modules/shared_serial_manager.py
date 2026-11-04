@@ -169,7 +169,7 @@ class EnhancedSharedSerialPortManager:
         fresh position within 20ms, so dropping is correct for motion data).
     """
 
-    def __init__(self, port: str, baud_rate: int = 9600):
+    def __init__(self, port: str, baud_rate: int = 57600):
         self.port = port
         self.baud_rate = baud_rate
 
@@ -374,6 +374,8 @@ class EnhancedSharedSerialPortManager:
             return False
 
         if command.priority == CommandPriority.EMERGENCY:
+            if command.command_type == "set_target":
+                self._discard_realtime(command.device_number, command.data["channel"])
             with self._emergency_lock:
                 self._emergency_commands.append(command)
             return True
@@ -407,16 +409,38 @@ class EnhancedSharedSerialPortManager:
 
             if command.command_type == "set_multiple_targets":
                 for target in command.batch_targets:
+                    previous = slot.get(target.channel)
+                    if previous is not None:
+                        # Speed/accel are only sent when they change, so a
+                        # pending setting must survive being superseded by a
+                        # newer position for the same channel
+                        if target.speed is None:
+                            target.speed = previous.speed
+                        if target.acceleration is None:
+                            target.acceleration = previous.acceleration
                     slot[target.channel] = target
             else:
                 channel = command.data["channel"]
+                previous = slot.get(channel)
                 slot[channel] = BatchServoTarget(
                     channel=channel,
-                    target=command.data["target"]
+                    target=command.data["target"],
+                    speed=previous.speed if previous else None,
+                    acceleration=previous.acceleration if previous else None
                 )
 
             # Remember the device_id so the drained batch carries it
             self._realtime_device_ids[command.device_number] = command.device_id
+
+    def _discard_realtime(self, device_number: int, channel: int):
+        """Drop a pending realtime target so it can't be sent after an
+        emergency command for the same channel."""
+        with self._realtime_lock:
+            slot = self._realtime_pending.get(device_number)
+            if slot:
+                slot.pop(channel, None)
+                if not slot:
+                    self._realtime_pending.pop(device_number, None)
 
     def _drain_realtime(self) -> List[SharedSerialCommand]:
         """Swap out pending realtime targets and build batch commands."""
@@ -578,37 +602,40 @@ class EnhancedSharedSerialPortManager:
                 if target.acceleration is not None:
                     self._send_acceleration_command(device_num, target.channel, target.acceleration)
 
-            # Check whether channels form a contiguous block
-            first_ch = targets[0].channel
-            is_contiguous = all(
-                targets[i].channel == first_ch + i for i in range(len(targets))
-            )
+            # Split into runs of contiguous channels. Each run of two or more
+            # goes out as one Set Multiple Targets (0x1F):
+            #   0xAA, device, 0x1F, count, first_channel, lo, hi, lo, hi, ...
+            # (5 + 2n bytes). A single channel uses Set Target (6 bytes), which
+            # is smaller than a one-entry Set Multiple Targets.
+            runs: List[List[BatchServoTarget]] = [[targets[0]]]
+            for target in targets[1:]:
+                if target.channel == runs[-1][-1].channel + 1:
+                    runs[-1].append(target)
+                else:
+                    runs.append([target])
 
-            if is_contiguous:
-                # Set Multiple Targets (0x1F):
-                # 0xAA, device, 0x1F, count, first_channel, lo, hi, lo, hi, ...
-                # Only the first channel number appears; subsequent channels are implied.
-                cmd_bytes = [POLOLU_START_BYTE, device_num, CMD_SET_MULTIPLE,
-                             len(targets), first_ch]
-                for target in targets:
-                    # Convert float us to integer quarter-us (Maestro native resolution)
-                    target_quarter_us = int(round(target.target * 4))
-                    cmd_bytes.append(target_quarter_us & 0x7F)
-                    cmd_bytes.append((target_quarter_us >> 7) & 0x7F)
-                self.serial_conn.write(bytes(cmd_bytes))
-                logger.debug(f"Sent Set Multiple Targets: {len(targets)} contiguous channels from ch{first_ch} to device #{device_num}")
-            else:
-                # Non-contiguous channels: send individual Set Target commands
-                for target in targets:
-                    # Convert float us to integer quarter-us (Maestro native resolution)
-                    target_quarter_us = int(round(target.target * 4))
-                    cmd_bytes = bytes([
-                        POLOLU_START_BYTE, device_num, CMD_SET_TARGET, target.channel,
+            cmd_bytes = bytearray()
+            for run in runs:
+                if len(run) == 1:
+                    target_quarter_us = int(round(run[0].target * 4))
+                    cmd_bytes += bytes([
+                        POLOLU_START_BYTE, device_num, CMD_SET_TARGET, run[0].channel,
                         target_quarter_us & 0x7F,
                         (target_quarter_us >> 7) & 0x7F
                     ])
-                    self.serial_conn.write(cmd_bytes)
-                logger.debug(f"Sent {len(targets)} individual Set Target commands (non-contiguous) to device #{device_num}")
+                else:
+                    cmd_bytes += bytes([POLOLU_START_BYTE, device_num, CMD_SET_MULTIPLE,
+                                        len(run), run[0].channel])
+                    for target in run:
+                        # Convert float us to integer quarter-us (Maestro native resolution)
+                        target_quarter_us = int(round(target.target * 4))
+                        cmd_bytes.append(target_quarter_us & 0x7F)
+                        cmd_bytes.append((target_quarter_us >> 7) & 0x7F)
+
+            # One write per batch keeps the bytes back to back on the shared line
+            self.serial_conn.write(bytes(cmd_bytes))
+            logger.debug(f"Sent {len(targets)} targets in {len(runs)} run(s) "
+                         f"({len(cmd_bytes)} bytes) to device #{device_num}")
 
             return True
 
@@ -1108,7 +1135,7 @@ _global_managers: Dict[Tuple[str, int], EnhancedSharedSerialPortManager] = {}
 _manager_lock = threading.Lock()
 
 
-def get_shared_manager(port: str, baud_rate: int = 9600) -> EnhancedSharedSerialPortManager:
+def get_shared_manager(port: str, baud_rate: int = 57600) -> EnhancedSharedSerialPortManager:
     """
     Get or create a shared serial manager (compatibility function)
 

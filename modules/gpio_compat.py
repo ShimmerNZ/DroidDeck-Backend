@@ -3,7 +3,7 @@
 """
 GPIO Compatibility Layer for WALL-E Robot Control System
 Supports both RPi.GPIO (Pi 4 and older) and gpiozero (Pi 5 recommended)
-FIXED VERSION - Handles pin reuse properly
+Handles pin reuse across repeated setup calls
 """
 
 import logging

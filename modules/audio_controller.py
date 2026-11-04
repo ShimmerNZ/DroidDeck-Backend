@@ -16,6 +16,7 @@ import random
 import os
 import subprocess
 from shutil import which
+from modules.task_utils import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,7 @@ def _set_pulse_default_sink_to_usb() -> None:
 
 class NativeAudioController:
     """
-    Enhanced native Raspberry Pi audio controller using pygame.
+    Native Raspberry Pi audio controller using pygame.
     Handles audio playback, volume control, playlist management, and scene synchronization.
     """
 
@@ -239,7 +240,7 @@ class NativeAudioController:
                     if asyncio.iscoroutinefunction(self.track_started_callback):
                         # For async callbacks, schedule but don't wait
                         loop = asyncio.get_event_loop()
-                        loop.create_task(self.track_started_callback(track_identifier, str(audio_file)))
+                        spawn(self.track_started_callback(track_identifier, str(audio_file)), loop=loop)
                     else:
                         # For sync callbacks, call directly
                         self.track_started_callback(track_identifier, str(audio_file))
@@ -269,7 +270,7 @@ class NativeAudioController:
                     
                     if asyncio.iscoroutinefunction(self.track_finished_callback):
                         loop = asyncio.get_event_loop()
-                        loop.create_task(self.track_finished_callback(*args))
+                        spawn(self.track_finished_callback(*args), loop=loop)
                     else:
                         self.track_finished_callback(*args)
                 except Exception as e:
@@ -680,5 +681,4 @@ class NativeAudioController:
                 pygame.mixer.quit()
             logger.info("Audio controller cleanup complete")
         except Exception as e:
-            # FIXED: correct logger usage
             logger.error(f"Audio cleanup error: {e}")

@@ -280,7 +280,7 @@ class BatteryEstimator:
 
 class SafeTelemetrySystem:
     """
-    Enhanced telemetry system with real hardware readings + fallback simulation.
+    Telemetry system with real hardware readings + fallback simulation.
     Provides system monitoring, alerting, and data logging capabilities.
     """
 

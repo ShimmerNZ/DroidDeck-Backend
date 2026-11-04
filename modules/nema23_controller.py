@@ -14,7 +14,7 @@ from enum import Enum
 from dataclasses import dataclass
 import json
 
-# Import our new GPIO compatibility layer
+# GPIO compatibility layer
 from modules.gpio_compat import (
     setup_output_pin,
     setup_input_pin,
@@ -88,7 +88,7 @@ class StepperConfig:
 
 
 class NEMA23Controller:
-    """Enhanced NEMA 23 stepper controller with homing and positioning"""
+    """NEMA 23 stepper controller with homing and positioning"""
 
     def __init__(self, config: StepperConfig):
         self.config = config
@@ -122,6 +122,9 @@ class NEMA23Controller:
         self.position_changed_callback: Optional[Callable] = None
         self.state_changed_callback: Optional[Callable] = None
         self.homing_complete_callback: Optional[Callable] = None
+        # Called with True before a blocking move and False after it, so the
+        # drive tracks can be held at stop while the event loop is busy
+        self.drive_hold_callback: Optional[Callable[[bool, str], None]] = None
 
         # GPIO setup
         self.gpio_initialized = False
@@ -202,6 +205,14 @@ class NEMA23Controller:
             return bool(state) if state is not None else False
         return False
 
+    def _set_drive_hold(self, active: bool, reason: str):
+        """Ask the motion system to hold or release the drive tracks"""
+        if self.drive_hold_callback:
+            try:
+                self.drive_hold_callback(active, reason)
+            except Exception as e:
+                logger.error(f"Drive hold callback error: {e}")
+
     def set_state(self, new_state: MotorState):
         """Update motor state and notify callbacks"""
         if new_state != self.state:
@@ -261,6 +272,7 @@ class NEMA23Controller:
         self.intentionally_disabled = False
 
         logger.info("🏠  Starting homing sequence...")
+        self._set_drive_hold(True, "stepper homing")
         self.set_state(MotorState.HOMING)
         self.enable_motor()
 
@@ -330,6 +342,9 @@ class NEMA23Controller:
                 self.intentionally_disabled = True
             return False
 
+        finally:
+            self._set_drive_hold(False, "stepper homing")
+
     async def move_to_position_cm(self, target_cm: float, speed_override: Optional[int] = None) -> bool:
         """Move to specified position in centimeters with smooth acceleration"""
         if not self.home_position_found:
@@ -368,6 +383,7 @@ class NEMA23Controller:
             logger.info(f"    ({self.steps_to_cm(self.current_position_steps):.1f} cm → {self.steps_to_cm(target_steps):.1f} cm)")
 
             self.target_position_steps = target_steps
+            self._set_drive_hold(True, "stepper move")
             self.set_state(MotorState.MOVING)
             self.enable_motor()
 
@@ -390,6 +406,9 @@ class NEMA23Controller:
                 logger.error(f"Movement failed: {e}")
                 self.set_state(MotorState.ERROR)
                 return False
+
+            finally:
+                self._set_drive_hold(False, "stepper move")
 
     async def _execute_smooth_movement(self, total_steps: int, max_speed: int, direction: MoveDirection):
         """Execute movement with smooth acceleration and deceleration"""
@@ -564,7 +583,11 @@ class NEMA23Controller:
 
     async def _sweep_loop(self):
         """Internal sweep loop - continuously moves between min and max"""
+        hold_engaged = False
         try:
+            # Hold the tracks for the whole sweep, including the pauses between legs
+            self._set_drive_hold(True, "stepper sweep")
+            hold_engaged = True
             direction_forward = True
 
             while self.sweep_active:
@@ -591,6 +614,8 @@ class NEMA23Controller:
             logger.error(f"Sweep loop error: {e}")
         finally:
             self.sweep_active = False
+            if hold_engaged:
+                self._set_drive_hold(False, "stepper sweep")
 
     def get_status(self) -> dict:
         """Get comprehensive motor status"""

@@ -44,6 +44,12 @@ except ImportError as e:
     print(f"Failed to import websockets: {e}")
     sys.exit(1)
 
+# Non-blocking broadcast for the legacy server connections used by websockets.server.serve
+try:
+    from websockets.legacy.protocol import broadcast as ws_broadcast
+except ImportError:
+    ws_broadcast = None
+
 # Import modular components
 from modules.websocket_handler import WebSocketMessageHandler
 from modules.scene_engine import EnhancedSceneEngine as SceneEngine
@@ -57,6 +63,7 @@ from modules.motion_system import MotionMixer, BlendMode
 from modules.gpio_compat import setup_output_pin, set_output, is_gpio_available
 from modules.sd_watchdog import SystemdWatchdog
 from web.webapp import DroidDeckWebServer
+from modules.task_utils import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -552,6 +559,10 @@ class WALLEBackend:
                     except Exception as e:
                         logger.error(f"Error scheduling broadcast: {e}")
                 self.hardware_service.stepper_interface.websocket_broadcast_callback = sync_broadcast_wrapper
+
+            # Stepper moves block the event loop, so hold the tracks at stop while one runs
+            if self.hardware_service.stepper_controller and self.motion_mixer:
+                self.hardware_service.stepper_controller.drive_hold_callback = self.motion_mixer.set_drive_hold
             logger.info("Component callbacks configured")
 
         except Exception as e:
@@ -638,7 +649,15 @@ class WALLEBackend:
         """Broadcast message to all connected clients (both WebSocket and Web Server)"""
 
         # Broadcast to WebSocket clients (PyQt app)
-        if self.connected_clients:
+        if self.connected_clients and ws_broadcast:
+            # Writes to each client's buffer without awaiting, so one stalled
+            # client can't hold up the caller; closed clients are skipped and
+            # removed by the connection handler
+            try:
+                ws_broadcast(list(self.connected_clients), json.dumps(message))
+            except Exception as e:
+                logger.debug(f"Error broadcasting to clients: {e}")
+        elif self.connected_clients:
             message_json = json.dumps(message)
             disconnected_clients = set()
 
@@ -757,7 +776,9 @@ class WALLEBackend:
             # Send settings to camera proxy first
             import requests
             try:
-                response = requests.post(
+                # Blocking HTTP call - run off the event loop
+                response = await asyncio.to_thread(
+                    requests.post,
                     f"{self.camera_proxy_url}/camera/settings",
                     json=config_updates,
                     timeout=5
@@ -929,7 +950,7 @@ class WALLEBackend:
             try:
                 # Fire telemetry update as background task - never awaited
                 # ADC reads and broadcasts run concurrently with the servo tick loop
-                asyncio.ensure_future(_do_telemetry_update())
+                spawn(_do_telemetry_update())
 
                 # Only sleep between fires - this is the only await in the loop
                 await asyncio.sleep(telemetry_interval)
@@ -1366,7 +1387,7 @@ class WALLEBackend:
         """Handle scene started event"""
         try:
             # Create a background task instead of awaiting
-            asyncio.create_task(self.broadcast_message({
+            spawn(self.broadcast_message({
                 "type": "scene_started",
                 "scene_name": scene_name,
                 "duration": scene_data.get("duration", 2.0),
@@ -1378,7 +1399,7 @@ class WALLEBackend:
     async def handle_scene_completed(self, scene_name: str, scene_data: Dict[str, Any], success: bool):
         """Handle scene completed event"""
         try:
-            asyncio.create_task(self.broadcast_message({
+            spawn(self.broadcast_message({
                 "type": "scene_completed",
                 "scene_name": scene_name,
                 "success": success,
@@ -1391,7 +1412,7 @@ class WALLEBackend:
     async def handle_scene_error(self, scene_name: str, scene_data: Dict[str, Any], error: str):
         """Handle scene error event"""
         try:
-            asyncio.create_task(self.broadcast_message({
+            spawn(self.broadcast_message({
                 "type": "scene_error",
                 "scene_name": scene_name,
                 "error": error,
@@ -1787,8 +1808,8 @@ async def main():
         backend = WALLEBackend(config)
 
         # Start audio and backend
-        asyncio.create_task(play_startup_track(backend))
-        asyncio.create_task(announce_network_info(backend))
+        spawn(play_startup_track(backend))
+        spawn(announce_network_info(backend))
         await backend.start()
 
     except KeyboardInterrupt:

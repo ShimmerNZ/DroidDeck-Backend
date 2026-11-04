@@ -425,7 +425,7 @@ class DroidDeckWebServer:
         """Setup Socket.IO event handlers"""
         
         @self.socketio.on('connect')
-        def handle_connect(auth):  # FIXED: Accept auth parameter
+        def handle_connect(auth):
             """Handle client connection"""
             # Get client session ID from Flask-SocketIO's request context
             from flask import request as flask_request

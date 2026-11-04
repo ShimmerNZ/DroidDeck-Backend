@@ -17,6 +17,7 @@ from modules.config_store import ConfigStore
 from modules.pi_status import PiStatusMonitor
 from modules.file_utils import save_json_atomic
 from modules.battery_profile import build_profile, chemistry_table, normalise_config, public_profile
+from modules.task_utils import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -374,7 +375,7 @@ class WebSocketMessageHandler:
             await self._send_error_response(websocket, f"Navigation error: {str(e)}")
 
     async def _handle_start_calibration_mode(self, websocket, data: Dict[str, Any]):
-        """Start controller calibration mode - FIXED for proper streaming"""
+        """Start controller calibration mode and streaming"""
         try:
             if hasattr(self.backend, 'bluetooth_controller'):
                 # Enable calibration streaming
@@ -402,7 +403,7 @@ class WebSocketMessageHandler:
             await self._send_error_response(websocket, f"Calibration mode error: {str(e)}")
 
     async def _handle_stop_calibration_mode(self, websocket, data: Dict[str, Any]):
-        """Stop controller calibration mode - FIXED"""
+        """Stop controller calibration mode"""
         try:
             if hasattr(self.backend, 'bluetooth_controller'):
                 # Disable calibration streaming
@@ -1172,7 +1173,7 @@ class WebSocketMessageHandler:
             
             # Use call_soon_threadsafe to schedule the coroutine safely
             def send_response():
-                asyncio.create_task(self._send_websocket_message(websocket, response))
+                spawn(self._send_websocket_message(websocket, response))
             
             current_loop.call_soon_threadsafe(send_response)
         
@@ -1223,7 +1224,7 @@ class WebSocketMessageHandler:
             
             # Use call_soon_threadsafe to schedule the coroutine safely
             def send_response():
-                asyncio.create_task(self._send_websocket_message(websocket, response))
+                spawn(self._send_websocket_message(websocket, response))
             
             current_loop.call_soon_threadsafe(send_response)
         
@@ -1261,7 +1262,7 @@ class WebSocketMessageHandler:
             return
 
         # Fire-and-forget so we don't block controller message handling
-        asyncio.create_task(self.scene_engine.play_scene(emotion))
+        spawn(self.scene_engine.play_scene(emotion))
 
         # Optional: immediate ack so UI gets feedback
         await self._send_websocket_message(websocket, {
@@ -1350,7 +1351,7 @@ class WebSocketMessageHandler:
             await self._send_error_response(websocket, "Error testing scene: invalid scene data")
             return
         # Runs as a task so the handler stays free for control frames while the scene plays
-        asyncio.create_task(self._run_scene_test(websocket, scene))
+        spawn(self._run_scene_test(websocket, scene))
 
     async def _run_scene_test(self, websocket, scene: Dict[str, Any]):
         """Play an unsaved scene and report the result to the requesting client"""
@@ -1614,7 +1615,7 @@ class WebSocketMessageHandler:
     # ==================== GESTURE & TRACKING HANDLERS ====================
 
     async def _handle_gesture(self, websocket, data: Dict[str, Any]):
-        """Enhanced gesture detection handler with callback bypass"""
+        """Gesture detection handler with callback bypass"""
         gesture_name = data.get("name")
         confidence = data.get("confidence", 1.0)
         
@@ -1712,11 +1713,11 @@ class WebSocketMessageHandler:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self.backend.broadcast_message({
+        spawn(self.backend.broadcast_message({
             "type": "attention_state",
             **status,
             "timestamp": time.time()
-        }))
+        }), loop=loop)
 
     async def _handle_people(self, websocket, data: Dict[str, Any]):
         """Feed the people list from the frontend into the attention controller.
@@ -1910,7 +1911,8 @@ class WebSocketMessageHandler:
             
             # Try using amixer first (ALSA)
             try:
-                result = subprocess.run(
+                result = await asyncio.to_thread(
+                    subprocess.run,
                     ['amixer', 'sset', 'Master', f'{volume}%'],
                     capture_output=True,
                     text=True,
@@ -1924,7 +1926,8 @@ class WebSocketMessageHandler:
                 # Fall back to pactl (PulseAudio)
                 logger.debug(f"amixer failed, trying pactl: {e}")
                 try:
-                    result = subprocess.run(
+                    result = await asyncio.to_thread(
+                        subprocess.run,
                         ['pactl', 'set-sink-volume', '@DEFAULT_SINK@', f'{volume}%'],
                         capture_output=True,
                         text=True,

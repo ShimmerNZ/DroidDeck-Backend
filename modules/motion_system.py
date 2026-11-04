@@ -6,10 +6,11 @@ import json
 import logging
 import time
 import math
-from typing import Dict, Set, List, Optional, Any, Callable
+from typing import Dict, Set, List, Optional, Any, Callable, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from modules.task_utils import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -661,6 +662,12 @@ class CommandDispatcher:
         # Tracks channels that have already had scene-mode speed/accel sent to the Maestro.
         # Cleared when channels leave the scene set so settings are re-applied if they re-enter.
         self._scene_settings_applied: Set[str] = set()
+        # Speed/accel last sent for each joystick channel: (speed, accel, time sent).
+        # The Maestro keeps these settings, so they are only re-sent when they
+        # change, when a channel moves in or out of scene control, or every
+        # settings_refresh_seconds as a refresh while the channel is moving.
+        self._joystick_settings_sent: Dict[str, Tuple[Optional[int], Optional[int], float]] = {}
+        self.settings_refresh_seconds: float = 1.0
         self.stats = {
             "ticks": 0,
             "commands_sent": 0,
@@ -675,14 +682,17 @@ class CommandDispatcher:
         released = self.scene_channels - channels
         entered = channels - self.scene_channels
 
+        for channel_id in released | entered:
+            self._joystick_settings_sent.pop(channel_id, None)
+
         if released:
             # Clear applied-settings tracking so they're re-sent if channels re-enter
             self._scene_settings_applied -= released
-            asyncio.ensure_future(self._restore_channel_settings(released))
+            spawn(self._restore_channel_settings(released))
 
         if entered:
             # Track channels entering scene mode (no Maestro commands needed)
-            asyncio.ensure_future(self._apply_scene_channel_settings(entered))
+            spawn(self._apply_scene_channel_settings(entered))
 
         self._prev_scene_channels = self.scene_channels.copy()
         self.scene_channels = channels
@@ -784,11 +794,20 @@ class CommandDispatcher:
                     # Only send the target position each tick to avoid serial overhead.
                     pass
                 else:
-                    # Joystick channels: use configured speed/accel for hardware smoothing
-                    if 'speed' in cfg:
-                        cmd['speed'] = cfg['speed']
-                    if 'accel' in cfg:
-                        cmd['acceleration'] = cfg['accel']
+                    # Joystick channels: configured speed/accel give hardware
+                    # smoothing; only sent when they need to reach the Maestro
+                    speed = cfg.get('speed')
+                    accel = cfg.get('accel')
+                    if speed is not None or accel is not None:
+                        now = time.monotonic()
+                        sent = self._joystick_settings_sent.get(channel_id)
+                        if (sent is None or sent[0] != speed or sent[1] != accel
+                                or now - sent[2] >= self.settings_refresh_seconds):
+                            if speed is not None:
+                                cmd['speed'] = speed
+                            if accel is not None:
+                                cmd['acceleration'] = accel
+                            self._joystick_settings_sent[channel_id] = (speed, accel, now)
 
                 if maestro_num == 1:
                     maestro1_cmds.append(cmd)
@@ -848,6 +867,7 @@ class MotionMixer:
 
     TICK_RATE = 50        # Hz
     TICK_INTERVAL = 1.0 / TICK_RATE
+    RESYNC_TICKS = 2      # ticks behind schedule before the tick schedule restarts
 
     def __init__(self, hardware_service=None, servo_config_path: str = "configs/servo_config.json"):
         # Load servo config for speed/accel restoration after scenes
@@ -911,6 +931,10 @@ class MotionMixer:
         # held at home, so failsafe stops track movement immediately instead
         # of waiting for the joystick value to go stale.
         self._failsafe_active: bool = False
+        # Number of active drive holds (see set_drive_hold). While above zero,
+        # protected channels are held at stop and joystick updates to them are
+        # ignored, without engaging the full failsafe.
+        self._drive_hold_count: int = 0
         # Protected channels are continuous-rotation drive channels (tracks),
         # not position-holding servos, so their "stop" is always the standard
         # RC-PWM neutral pulse - independent of each channel's configurable
@@ -958,6 +982,9 @@ class MotionMixer:
     def reload_servo_config(self, config_path: str = "configs/servo_config.json"):
         """Reload servo config (e.g., after user changes limits)"""
         self._load_servo_config(config_path)
+        # The dispatcher reads speed/accel from its own copy
+        if self._servo_config:
+            self.dispatcher.servo_config = self._servo_config
         logger.info("Servo config reloaded for motion mixer")
 
     # ---- Layer Management ----
@@ -1014,6 +1041,66 @@ class MotionMixer:
                 f"{sorted(self._protected_channels)}"
             )
 
+    def set_drive_hold(self, active: bool, reason: str = "stepper move"):
+        """Hold the protected (track) channels at stop for the duration of an
+        operation that blocks the event loop, such as a NEMA stepper move.
+
+        Holds are counted, so nested callers (homing followed by a move to the
+        default position) release correctly. Engaging the first hold writes
+        the stop pulse into the joystick layer and also sends it straight to
+        the Maestro at EMERGENCY priority: the serial worker runs on its own
+        thread, so the tracks stop even though the mixer tick cannot run while
+        the loop is blocked. While held, joystick updates to protected channels
+        are ignored. Releasing the last hold leaves the channels at stop until
+        the next controller update.
+        """
+        if active:
+            self._drive_hold_count += 1
+            if self._drive_hold_count > 1 or not self._protected_channels:
+                return
+            stop = self._protected_channel_stop_pulse
+            now = time.monotonic()
+            if self.joystick_layer:
+                for channel_id in self._protected_channels:
+                    self.joystick_layer.set_channel(channel_id, stop)
+                    self._joystick_last_update[channel_id] = now
+                    self._joystick_stale_channels.discard(channel_id)
+            self._send_protected_stop_now(stop)
+            logger.info(f"Drive hold engaged ({reason}) - protected channels stopped: "
+                        f"{sorted(self._protected_channels)}")
+        else:
+            if self._drive_hold_count == 0:
+                return
+            self._drive_hold_count -= 1
+            if self._drive_hold_count == 0:
+                logger.info(f"Drive hold released ({reason})")
+
+    def _send_protected_stop_now(self, stop: float):
+        """Queue the stop pulse for every protected channel at EMERGENCY
+        priority, bypassing the tick loop."""
+        hardware = self.dispatcher.hardware_service
+        if not hardware:
+            return
+        try:
+            from modules.shared_serial_manager import CommandPriority
+        except ImportError:
+            return
+        for channel_id in self._protected_channels:
+            try:
+                parts = channel_id.split('_')
+                maestro_num = int(parts[0][1])
+                channel = int(parts[1][2:])
+            except (IndexError, ValueError):
+                logger.warning(f"Invalid protected channel ID: {channel_id}")
+                continue
+            maestro = getattr(hardware, f"maestro{maestro_num}", None)
+            if not maestro:
+                continue
+            try:
+                maestro.set_target(channel, stop, priority=CommandPriority.EMERGENCY)
+            except Exception as e:
+                logger.error(f"Failed to send stop to {channel_id}: {e}")
+
     def force_protected_channels_home(self, reason: str = "input source disconnected"):
         """Immediately force every protected channel to home.
 
@@ -1047,7 +1134,7 @@ class MotionMixer:
         """
         if not self.joystick_layer:
             return
-        if self._failsafe_active and channel_id in self._protected_channels:
+        if (self._failsafe_active or self._drive_hold_count) and channel_id in self._protected_channels:
             return
         # Guard against accidental mode/weight changes during refactors
         try:
@@ -1252,7 +1339,17 @@ class MotionMixer:
         logger.info("MotionMixer tick loop stopped")
 
     async def _tick_loop(self):
-        """Main tick loop running at fixed rate"""
+        """Main tick loop running at fixed rate.
+
+        Ticks are scheduled against fixed deadlines (start + n * interval)
+        rather than sleeping for the remainder of each tick, so the small
+        lateness of every asyncio wake-up is absorbed by a shorter next sleep
+        instead of accumulating into a lower tick rate. If the loop falls more
+        than RESYNC_TICKS behind (for example after a blocking stepper move)
+        the schedule restarts from now instead of firing a burst of catch-up
+        ticks.
+        """
+        next_deadline = time.monotonic()
         while self._running:
             tick_start = time.monotonic()
             dt = tick_start - self._last_tick_time
@@ -1266,11 +1363,13 @@ class MotionMixer:
             except Exception as e:
                 logger.error(f"Mixer tick error: {e}")
 
-            # Sleep for remainder of tick interval
-            elapsed = time.monotonic() - tick_start
-            sleep_time = self.TICK_INTERVAL - elapsed
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
+            next_deadline += self.TICK_INTERVAL
+            now = time.monotonic()
+            if now - next_deadline > self.TICK_INTERVAL * self.RESYNC_TICKS:
+                next_deadline = now
+
+            # Always yield so an overrun tick can't starve the rest of the event loop
+            await asyncio.sleep(max(0.0, next_deadline - now))
 
     async def _tick(self, dt: float):
         """Single tick: update layers, blend, constrain, dispatch"""

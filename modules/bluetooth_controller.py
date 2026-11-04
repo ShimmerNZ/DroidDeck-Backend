@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WALL-E Backend - Optimized Bluetooth Controller Service
-Fixed for low-latency D-pad controls and proper calibration streaming
+WALL-E Backend - Bluetooth Controller Service
+Low-latency D-pad controls and calibration streaming
 """
 
 import asyncio
@@ -13,6 +13,7 @@ import logging
 from typing import Dict, Optional, Any, Set
 from dataclasses import dataclass
 from enum import Enum
+from modules.task_utils import spawn
 
 try:
     import pygame
@@ -141,8 +142,8 @@ class OptimizedBluetoothController:
 
 
 
-        # FIXED: Separate timing for different types of inputs
-        self.dpad_update_rate = 0.008  # 125Hz for responsive D-pad (was 33ms = 30Hz)
+        # Separate timing for different types of inputs
+        self.dpad_update_rate = 0.008  # 125Hz for responsive D-pad
         self.analog_update_rate = 0.016  # 60Hz for analog inputs (smooth but not excessive)
         self.calibration_stream_rate = 0.050  # 20Hz for calibration streaming
         # How often to check pygame's joystick count for disconnections.
@@ -168,12 +169,12 @@ class OptimizedBluetoothController:
         # Calibration system
         self.calibration = ControllerCalibration()
         self.calibration_mode = False
-        self.calibration_streaming = False  # FIXED: Proper calibration streaming flag
+        self.calibration_streaming = False
         self.calibration_stream_task = None
 
-        # FIXED: Reduced navigation cooldown for responsive D-pad
+        # Navigation cooldown for responsive D-pad
         self.last_navigation_time = 0
-        self.navigation_cooldown = 0.025  # 25ms instead of 200ms (40Hz max rate)
+        self.navigation_cooldown = 0.025  # 25ms (40Hz max rate)
 
         # Initialize pygame
         if PYGAME_AVAILABLE:
@@ -196,7 +197,7 @@ class OptimizedBluetoothController:
         if self.joystick:
             try:
                 self.joystick.quit()
-            except:
+            except Exception:
                 pass
             self.joystick = None
         if was_connected:
@@ -235,7 +236,7 @@ class OptimizedBluetoothController:
                 if self.joystick:
                     try:
                         self.joystick.quit()
-                    except:
+                    except Exception:
                         pass
                     self.joystick = None
 
@@ -361,7 +362,6 @@ class OptimizedBluetoothController:
         """Send navigation command with reduced latency"""
         current_time = time.time()
 
-        # FIXED: Much shorter cooldown for responsive D-pad
         if current_time - self.last_navigation_time < self.navigation_cooldown:
             return
 
@@ -374,7 +374,7 @@ class OptimizedBluetoothController:
                 "timestamp": current_time
             }
             # Use asyncio.create_task for non-blocking broadcast
-            asyncio.create_task(self.websocket_broadcast(message))
+            spawn(self.websocket_broadcast(message))
 
     async def process_dpad_events(self):
         """High-priority D-pad event processing loop"""
@@ -416,7 +416,7 @@ class OptimizedBluetoothController:
                             else:
                                 # Send to controller input processor
                                 if self.controller_input_processor:
-                                    asyncio.create_task(
+                                    spawn(
                                         self.controller_input_processor.process_controller_input(
                                             button_name, 1.0, "button"
                                         )
@@ -426,14 +426,14 @@ class OptimizedBluetoothController:
                         button_name = self.button_map.get(event.button)
                         if button_name and self.controller_input_processor:
                             if button_name not in ['button_b', 'button_guide']:
-                                asyncio.create_task(
+                                spawn(
                                     self.controller_input_processor.process_controller_input(
                                         button_name, 0.0, "button"
                                     )
                                 )
 
                     elif event.type == pygame.JOYHATMOTION:
-                        # FIXED: Immediate D-pad processing for low latency
+                        # Immediate D-pad processing for low latency
                         hat_x, hat_y = event.value
 
                         if hat_y == 1:  # Up
@@ -446,7 +446,7 @@ class OptimizedBluetoothController:
                             await self.send_navigation_command('right')
 
 
-                # FIXED: High-frequency D-pad polling for responsiveness
+                # High-frequency D-pad polling for responsiveness
                 await asyncio.sleep(self.dpad_update_rate)
 
             except (pygame.error, AttributeError) as e:
@@ -486,7 +486,7 @@ class OptimizedBluetoothController:
                     if not self.joystick.get_init():
                         self._mark_disconnected("joystick lost initialization")
                         continue
-                except:
+                except Exception:
                     self._mark_disconnected("joystick became invalid")
                     continue
 
@@ -521,7 +521,7 @@ class OptimizedBluetoothController:
 
                             # Send to controller input processor
                             if self.controller_input_processor:
-                                asyncio.create_task(
+                                spawn(
                                     self.controller_input_processor.process_controller_input(
                                         axis_name, calibrated_value, "analog"
                                     )
@@ -543,7 +543,7 @@ class OptimizedBluetoothController:
                 await asyncio.sleep(1.0)
 
     async def calibration_stream_loop(self):
-        """Calibration data streaming loop - FIXED"""
+        """Calibration data streaming loop"""
         while self.calibration_streaming and self.current_state.connected:
             try:
                 if not self.joystick:
@@ -612,7 +612,7 @@ class OptimizedBluetoothController:
         self.running = True
 
         # Start the service loops
-        asyncio.create_task(self._startup_sequence())
+        spawn(self._startup_sequence())
 
         logger.info("Optimized controller service starting (async initialization)")
 
@@ -646,18 +646,18 @@ class OptimizedBluetoothController:
         # (they will handle reconnection automatically)
 
         # High-priority D-pad loop
-        asyncio.create_task(self.process_dpad_events())
+        spawn(self.process_dpad_events())
 
         # Lower-priority analog loop
-        asyncio.create_task(self.process_analog_inputs())
+        spawn(self.process_analog_inputs())
 
         # Calibration monitoring
-        asyncio.create_task(self._monitor_calibration_mode())
+        spawn(self._monitor_calibration_mode())
 
         logger.info("Controller processing loops started")
 
     async def _monitor_calibration_mode(self):
-        """Monitor and manage calibration streaming with enhanced reconnection"""
+        """Monitor and manage calibration streaming and controller reconnection"""
         last_health_check = 0
         last_reconnect_attempt = 0
 
@@ -681,7 +681,7 @@ class OptimizedBluetoothController:
                     self.calibration_stream_task = None
                     logger.info("Stopped calibration streaming")
 
-                # Enhanced reconnection logic for disconnected controllers
+                # Reconnection logic for disconnected controllers
                 if not self.current_state.connected:
                     if current_time - last_reconnect_attempt > 3.0:  # Every 3 seconds
                         last_reconnect_attempt = current_time
@@ -724,14 +724,14 @@ class OptimizedBluetoothController:
         if self.joystick:
             try:
                 self.joystick.quit()
-            except:
+            except Exception:
                 pass
 
         if PYGAME_AVAILABLE:
             try:
                 pygame.joystick.quit()
                 pygame.quit()
-            except:
+            except Exception:
                 pass
 
         logger.info("Optimized controller service stopped")
@@ -747,7 +747,7 @@ class OptimizedBluetoothController:
             "axis_count": self.joystick.get_numaxes() if self.joystick else 0,
             "has_dpad": self.joystick.get_numhats() > 0 if self.joystick else False,
             "calibrated": self.is_calibrated(),
-            "calibration_mode": self.calibration_streaming,  # FIXED: Use correct flag
+            "calibration_mode": self.calibration_streaming,
             "optimization_status": {
                 "dpad_rate_hz": int(1.0 / self.dpad_update_rate),
                 "analog_rate_hz": int(1.0 / self.analog_update_rate),
