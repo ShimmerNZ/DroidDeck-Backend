@@ -127,16 +127,24 @@ class ControllerCalibration:
 class OptimizedBluetoothController:
     """Optimized Bluetooth controller service with separated input loops"""
 
+    # A full pygame joystick rescan holds the event loop for 100-300 ms, so it
+    # only runs when /dev/input changes (a controller connecting adds device
+    # nodes there) or, as a backstop, after this many seconds
+    RESCAN_BACKSTOP_SECONDS = 30.0
+
     def __init__(self, controller_input_processor=None, websocket_broadcast=None, on_disconnect=None):
         self.logger = logging.getLogger(__name__)
         self.controller_input_processor = controller_input_processor
         self.websocket_broadcast = websocket_broadcast
+        self._input_devices_seen: Optional[frozenset] = None
+        self._last_full_rescan = 0.0
         # Called (no args) the moment a controller disconnect is detected, so
         # the caller can immediately stop anything still being driven by the
         # last commanded joystick value instead of waiting on it to go stale.
         self.on_disconnect = on_disconnect
         self.joystick = None
         self.running = False
+        self._service_tasks = []  # loops started by start(), cancelled by disable()
         self.controller_type = "unknown"
         self.load_controller_mappings()
 
@@ -215,6 +223,22 @@ class OptimizedBluetoothController:
         inputs.extend(self.axis_map.values())
         inputs.extend(self.dpad_map.values())
         return inputs
+
+    def _should_rescan(self) -> bool:
+        """True when a pygame joystick rescan is worth its cost: input devices
+        have appeared or gone since the last scan, or the backstop has expired"""
+        try:
+            devices = frozenset(os.listdir("/dev/input"))
+        except OSError:
+            devices = None
+        now = time.monotonic()
+        changed = devices is None or devices != self._input_devices_seen
+        backstop = now - self._last_full_rescan >= self.RESCAN_BACKSTOP_SECONDS
+        if not (changed or backstop):
+            return False
+        self._input_devices_seen = devices
+        self._last_full_rescan = now
+        return True
 
     def initialize_controller(self) -> bool:
         """Try to connect to first available joystick with improved reconnection handling"""
@@ -612,7 +636,7 @@ class OptimizedBluetoothController:
         self.running = True
 
         # Start the service loops
-        spawn(self._startup_sequence())
+        self._service_tasks.append(spawn(self._startup_sequence(), name="bt_startup"))
 
         logger.info("Optimized controller service starting (async initialization)")
 
@@ -623,8 +647,9 @@ class OptimizedBluetoothController:
 
         while self.running and retry_count < max_retries:
             try:
-                # Try to initialize controller
-                success = self.initialize_controller()
+                # Try to initialize controller (skipped while no input device
+                # has appeared since the last attempt)
+                success = self._should_rescan() and self.initialize_controller()
 
                 if success:
                     logger.info(f"Controller initialized successfully on attempt {retry_count + 1}")
@@ -646,13 +671,13 @@ class OptimizedBluetoothController:
         # (they will handle reconnection automatically)
 
         # High-priority D-pad loop
-        spawn(self.process_dpad_events())
+        self._service_tasks.append(spawn(self.process_dpad_events(), name="bt_dpad"))
 
         # Lower-priority analog loop
-        spawn(self.process_analog_inputs())
+        self._service_tasks.append(spawn(self.process_analog_inputs(), name="bt_analog"))
 
         # Calibration monitoring
-        spawn(self._monitor_calibration_mode())
+        self._service_tasks.append(spawn(self._monitor_calibration_mode(), name="bt_monitor"))
 
         logger.info("Controller processing loops started")
 
@@ -686,7 +711,11 @@ class OptimizedBluetoothController:
                     if current_time - last_reconnect_attempt > 3.0:  # Every 3 seconds
                         last_reconnect_attempt = current_time
 
-                        # THIS IS THE PROBLEM: Only partial pygame reinitialization
+                        # Only rescan when a device may have connected
+                        if not self._should_rescan():
+                            await asyncio.sleep(1.0)
+                            continue
+
                         # Force pygame to refresh its joystick list
                         pygame.joystick.quit()
                         pygame.joystick.init()
@@ -710,6 +739,44 @@ class OptimizedBluetoothController:
             except Exception as e:
                 logger.error(f"Calibration monitor error: {e}")
                 await asyncio.sleep(1.0)
+
+    def enable(self):
+        """Start scanning for and reading a Bluetooth controller"""
+        if self.running:
+            return
+        # Force a rescan on the first attempt
+        self._input_devices_seen = None
+        self._last_full_rescan = 0.0
+        self.start()
+
+    def disable(self):
+        """Stop the controller service without shutting pygame down.
+
+        pygame is shared with the audio controller, so only the joystick
+        subsystem is released (stop() calls pygame.quit() and is for shutdown).
+        The service loops are cancelled directly so a quick disable/enable
+        can't leave old loops running beside new ones.
+        """
+        if not self.running and not self._service_tasks:
+            return
+        logger.info("Disabling Bluetooth controller service")
+        self.running = False
+        self.calibration_streaming = False
+        if self.calibration_stream_task:
+            self.calibration_stream_task.cancel()
+            self.calibration_stream_task = None
+        for task in self._service_tasks:
+            task.cancel()
+        self._service_tasks.clear()
+        # Fires on_disconnect if a controller was in use, so anything it was
+        # driving (the tracks) is stopped
+        self._mark_disconnected("Bluetooth disabled")
+        if PYGAME_AVAILABLE:
+            try:
+                pygame.joystick.quit()
+            except Exception:
+                pass
+        logger.info("Bluetooth controller service disabled - not scanning")
 
     def stop(self):
         """Stop the controller service"""

@@ -587,6 +587,20 @@
             </div>
 
             <div class="glass-card">
+                <div class="card-title">Hardware</div>
+                <div class="settings-grid">
+                    <div class="setting-item">
+                        <label>Bluetooth Controller:</label>
+                        <input type="checkbox" id="bluetoothEnabled" onchange="toggleBluetooth(this.checked)">
+                    </div>
+                    <div class="setting-item">
+                        <label>Status:</label>
+                        <span id="bluetoothStatus">--</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="glass-card">
                 <div class="card-title">System Information</div>
                 <div id="systemInfo">
                     <div class="setting-item">

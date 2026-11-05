@@ -554,6 +554,10 @@ class DroidDeckWebServer:
                     self._handle_toggle_failsafe(client_sid, data)
                 elif cmd_type == 'get_failsafe_status':
                     self._handle_get_failsafe_status(client_sid)
+                elif cmd_type == 'get_bluetooth_status':
+                    self._handle_get_bluetooth_status(client_sid)
+                elif cmd_type == 'set_bluetooth_enabled':
+                    self._handle_set_bluetooth_enabled(client_sid, data)
                 elif cmd_type == 'scene_stop':
                     self._handle_scene_stop(client_sid)
                 elif cmd_type == 'import_scenes':
@@ -701,6 +705,38 @@ class DroidDeckWebServer:
                 'message': f'Failsafe toggle error: {str(e)}',
                 'timestamp': time.time()
             })
+
+    def _handle_get_bluetooth_status(self, client_sid):
+        """Send the Bluetooth controller setting and connection state"""
+        try:
+            if self.backend and hasattr(self.backend, 'get_bluetooth_status'):
+                status = self.backend.get_bluetooth_status()
+                self.socketio.emit('backend_message', {
+                    'type': 'bluetooth_status', **status, 'timestamp': time.time()
+                }, room=client_sid)
+        except Exception as e:
+            logger.error(f"Bluetooth status error: {e}")
+
+    def _handle_set_bluetooth_enabled(self, client_sid, data):
+        """Turn the Bluetooth controller on or off from the web UI"""
+        enabled = bool(data.get('enabled', False))
+        if not (self.backend and hasattr(self.backend, 'set_bluetooth_enabled')):
+            return
+
+        def bluetooth_thread():
+            try:
+                status = self._run_backend(self.backend.set_bluetooth_enabled(enabled), timeout=10)
+                # Every web client shows the same setting
+                self.socketio.emit('backend_message', {
+                    'type': 'bluetooth_status', **status, 'timestamp': time.time()
+                })
+            except Exception as e:
+                logger.error(f"Bluetooth toggle error: {e}")
+                self.socketio.emit('backend_message', {
+                    'type': 'error', 'message': f'Bluetooth toggle failed: {e}'
+                }, room=client_sid)
+
+        threading.Thread(target=bluetooth_thread, daemon=True).start()
 
     def _handle_get_failsafe_status(self, client_sid):
         """Handle get failsafe status request from web UI"""

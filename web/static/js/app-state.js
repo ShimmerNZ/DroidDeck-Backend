@@ -198,10 +198,13 @@ function showScreen(screenName) {
             break;
         case 'scenes':
             // Update this case to include the scene editor
-            initializeSceneEditor();  // ADD THIS LINE
+            initializeSceneEditor();
             break;
         case 'nema':
             getNemaStatus();
+            break;
+        case 'settings':
+            requestBluetoothStatus();
             break;
     }
 }

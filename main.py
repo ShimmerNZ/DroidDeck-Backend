@@ -63,6 +63,8 @@ from modules.motion_system import MotionMixer, BlendMode
 from modules.gpio_compat import setup_output_pin, set_output, is_gpio_available
 from modules.sd_watchdog import SystemdWatchdog
 from modules.health_supervisor import HealthSupervisor
+from modules.loop_monitor import LoopStallMonitor
+from modules.file_utils import save_json_atomic, load_json_safe
 from web.webapp import DroidDeckWebServer
 from modules.task_utils import spawn
 
@@ -104,6 +106,7 @@ class WALLEBackend:
         self.telemetry_task = None
         self.health_supervisor = None
         self.health_supervisor_task = None
+        self.loop_monitor = None
         self.websocket_server = None
         self.loop = None
         self.running = False
@@ -595,38 +598,52 @@ class WALLEBackend:
             logger.error(f"Failed to setup callbacks: {e}")
 
 
+    def _bluetooth_setting(self) -> bool:
+        """Whether the Bluetooth controller is enabled in hardware_config.json (default off)"""
+        hw = self.config.get("hardware", {}) if isinstance(self.config, dict) else {}
+        return bool((hw.get("bluetooth_controller") or {}).get("enabled", False))
+
+    def _load_controller_mappings(self, controller_type: str):
+        """Load the controller mapping for controller_type, then controller_config.json over it.
+        The Steam Deck's input mapping comes from here, so this runs whether or not
+        Bluetooth is enabled."""
+        success = self.controller_input_processor.load_controller_config_by_type(controller_type)
+        if success:
+            logger.info(f"Loaded {controller_type} controller configuration")
+        else:
+            logger.warning(f"Failed to load config for {controller_type}, using fallback")
+
+        controller_config_path = "configs/controller_config.json"
+        if os.path.exists(controller_config_path):
+            try:
+                with open(controller_config_path, 'r') as f:
+                    controller_config = json.load(f)
+
+                # Load config into controller processor
+                if hasattr(self.controller_input_processor, 'load_controller_config'):
+                    success = self.controller_input_processor.load_controller_config(controller_config)
+                    logger.info(f"Manual controller config loaded: {success}")
+            except Exception as e:
+                logger.warning(f"Failed to load manual controller config: {e}")
+
     async def start_bluetooth_controller(self):
-        """Start the bluetooth controller service"""
+        """Load controller mappings and, when enabled, start the Bluetooth controller service"""
         try:
+            if not self._bluetooth_setting():
+                # Scanning for a controller holds the event loop on every
+                # attempt, so with Bluetooth off nothing is scanned at all
+                logger.info("Bluetooth controller disabled - not scanning (enable it in the web UI)")
+                self._load_controller_mappings("steam_deck")
+                return
+
             # Try to detect and initialize controller first
             if await self.bluetooth_controller.initialize_controller_with_calibration():
                 controller_type = self.bluetooth_controller.controller_type
                 logger.info(f"Detected controller type: {controller_type}")
-
-                # Load appropriate configuration based on controller type
-                success = self.controller_input_processor.load_controller_config_by_type(controller_type)
-                if success:
-                    logger.info(f"Loaded {controller_type} controller configuration")
-                else:
-                    logger.warning(f"Failed to load config for {controller_type}, using fallback")
+                self._load_controller_mappings(controller_type)
             else:
                 logger.warning("No controller detected, will retry periodically")
-                # Still load Xbox config as fallback
-                self.controller_input_processor.load_controller_config_by_type("steam_deck")
-
-            # Alternatively, try loading from config file if it exists
-            controller_config_path = "configs/controller_config.json"
-            if os.path.exists(controller_config_path):
-                try:
-                    with open(controller_config_path, 'r') as f:
-                        controller_config = json.load(f)
-
-                    # Load config into controller processor
-                    if hasattr(self.controller_input_processor, 'load_controller_config'):
-                        success = self.controller_input_processor.load_controller_config(controller_config)
-                        logger.info(f"Manual controller config loaded: {success}")
-                except Exception as e:
-                    logger.warning(f"Failed to load manual controller config: {e}")
+                self._load_controller_mappings("steam_deck")
 
             # Start bluetooth controller service
             self.bluetooth_controller.start()
@@ -634,6 +651,56 @@ class WALLEBackend:
 
         except Exception as e:
             logger.error(f"Failed to start bluetooth controller: {e}")
+
+    def get_bluetooth_status(self) -> Dict[str, Any]:
+        """Bluetooth controller setting and connection state for the web UI"""
+        info = {}
+        try:
+            info = self.bluetooth_controller.get_controller_info()
+        except Exception:
+            pass
+        return {
+            "enabled": self._bluetooth_setting(),
+            "running": bool(getattr(self.bluetooth_controller, "running", False)),
+            "connected": bool(info.get("connected", False)),
+            "controller_name": info.get("controller_name") or "",
+        }
+
+    async def set_bluetooth_enabled(self, enabled: bool) -> Dict[str, Any]:
+        """Turn the Bluetooth controller on or off, save the setting and apply it now"""
+        enabled = bool(enabled)
+        config_path = Path("configs/hardware_config.json")
+        saved = False
+        try:
+            file_config = load_json_safe(config_path, default=None)
+            if not isinstance(file_config, dict) or not isinstance(file_config.get("hardware"), dict):
+                # Never write a config built from nothing over the real one
+                logger.error("hardware_config.json could not be read - Bluetooth setting not saved")
+            else:
+                hw = file_config["hardware"]
+                bt = hw.get("bluetooth_controller")
+                if not isinstance(bt, dict):
+                    bt = {}
+                bt["enabled"] = enabled
+                hw["bluetooth_controller"] = bt
+                saved = save_json_atomic(config_path, file_config)
+        except Exception as e:
+            logger.error(f"Failed to save Bluetooth setting: {e}")
+
+        # Keep the in-memory config in step with the file
+        self.config.setdefault("hardware", {}).setdefault("bluetooth_controller", {})["enabled"] = enabled
+
+        if enabled:
+            await self.bluetooth_controller.load_calibration()
+            self.bluetooth_controller.enable()
+            logger.info("Bluetooth controller enabled from web UI - scanning for a controller")
+        else:
+            self.bluetooth_controller.disable()
+            logger.info("Bluetooth controller disabled from web UI")
+
+        status = self.get_bluetooth_status()
+        status["saved"] = saved
+        return status
 
     def load_camera_proxy_pid(self):
         """Load camera proxy PID from file"""
@@ -1184,6 +1251,13 @@ class WALLEBackend:
             # Start control link watchdog
             self.control_link_task = asyncio.create_task(self.control_link_watchdog())
 
+            # Report anything that holds the event loop (and so drops mixer ticks)
+            try:
+                self.loop_monitor = LoopStallMonitor()
+                self.loop_monitor.start()
+            except Exception as e:
+                logger.error(f"Event loop stall monitor failed to start: {e}")
+
             # Start health supervisor: restarts a stalled mixer tick loop or a
             # dead serial worker, and logs component faults as they change
             try:
@@ -1265,6 +1339,9 @@ class WALLEBackend:
 
         # Tell systemd we're stopping and stop the watchdog pings so it
         # doesn't race a slow shutdown against the WatchdogSec window
+        if self.loop_monitor:
+            self.loop_monitor.stop()
+
         if self.health_supervisor:
             self.health_supervisor.stop()
         if self.health_supervisor_task and not self.health_supervisor_task.done():

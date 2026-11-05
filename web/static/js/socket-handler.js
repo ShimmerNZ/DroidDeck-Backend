@@ -174,6 +174,9 @@ function handleBackendMessage(data) {
         case 'calibration_reset':
             showToast('Controller calibration reset', 'success');
             break;
+        case 'bluetooth_status':
+            updateBluetoothStatus(data);
+            break;
         case 'system_state_changed':
             // Sync failsafe state if included
             if (data.failsafe_enabled !== undefined) {

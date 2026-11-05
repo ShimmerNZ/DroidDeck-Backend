@@ -500,6 +500,40 @@ function updateSerialPerformanceStats(data) {
 let idleModeActive = false;
 let playMode = 'sequential';
 
+function requestBluetoothStatus() {
+    sendWebSocketMessage({ type: 'get_bluetooth_status' });
+}
+
+function toggleBluetooth(enabled) {
+    const status = document.getElementById('bluetoothStatus');
+    if (status) {
+        status.textContent = enabled ? 'Turning on...' : 'Turning off...';
+    }
+    if (!sendWebSocketMessage({ type: 'set_bluetooth_enabled', enabled: enabled })) {
+        // Not connected: put the checkbox back as it was
+        const box = document.getElementById('bluetoothEnabled');
+        if (box) box.checked = !enabled;
+        if (status) status.textContent = 'Not connected to backend';
+    }
+}
+
+function updateBluetoothStatus(data) {
+    const box = document.getElementById('bluetoothEnabled');
+    const status = document.getElementById('bluetoothStatus');
+    if (box) box.checked = !!data.enabled;
+    if (!status) return;
+    if (!data.enabled) {
+        status.textContent = 'Off - not scanning';
+    } else if (data.connected) {
+        status.textContent = `Connected: ${data.controller_name || 'controller'}`;
+    } else {
+        status.textContent = 'On - waiting for a controller';
+    }
+    if (data.saved === false) {
+        showToast('Bluetooth setting applied but could not be saved', 'error');
+    }
+}
+
 function toggleIdleMode() {
     idleModeActive = !idleModeActive;
     const btn = document.getElementById('idleToggleBtn');
