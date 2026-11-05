@@ -563,7 +563,8 @@ class WALLEBackend:
                         logger.error(f"Error scheduling broadcast: {e}")
                 self.hardware_service.stepper_interface.websocket_broadcast_callback = sync_broadcast_wrapper
 
-            # Stepper moves block the event loop, so hold the tracks at stop while one runs
+            # Software-timed stepper moves block the event loop, so the tracks are
+            # held at stop while one runs (hardware-timed moves don't need this)
             if self.hardware_service.stepper_controller and self.motion_mixer:
                 self.hardware_service.stepper_controller.drive_hold_callback = self.motion_mixer.set_drive_hold
             logger.info("Component callbacks configured")

@@ -6,10 +6,14 @@ Handles homing, positioning, and smooth movement with TB6600 driver
 """
 
 import asyncio
+import bisect
+import inspect
+import math
 import threading
 import time
 import logging
-from typing import Optional, Callable, Dict, Any
+from collections import deque
+from typing import Optional, Callable, Dict, Any, List, Tuple
 from enum import Enum
 from dataclasses import dataclass
 import json
@@ -24,8 +28,10 @@ from modules.gpio_compat import (
     setup_button_callback,
     cleanup_gpio,
     is_gpio_available,
-    get_gpio_library
+    get_gpio_library,
+    release_pin
 )
+from modules.task_utils import spawn
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +78,12 @@ class StepperConfig:
     # Timing (microseconds)
     step_pulse_width: int = 5        # Minimum pulse width for TB6600
 
+    # Step generation. When True, step pulses are timed by lgpio's native
+    # wave thread and moves never block the event loop; when False (or if
+    # lgpio waves are unavailable) the original software-timed loop is used
+    hardware_timed_steps: bool = True
+    start_speed: int = 1000          # Speed a move starts from before accelerating (steps/s)
+
     # Safety margins
     soft_limit_margin: float = 0.5   # Extra safety margin for soft limits
 
@@ -87,8 +99,141 @@ class StepperConfig:
                         raise ValueError(f"Invalid value for {key}: {value}")
 
 
+class _StepProfile:
+    """Constant-acceleration trapezoidal step profile, generated one step at
+    a time so a stop request can switch it into deceleration mid-move."""
+
+    def __init__(self, total_steps: int, start_speed: float, max_speed: float, acceleration: float):
+        self.total = max(0, int(total_steps))
+        self.v0 = max(1.0, min(float(start_speed), float(max_speed)))
+        self.vmax = max(float(max_speed), self.v0)
+        self.accel = max(1.0, float(acceleration))
+        self.done = 0
+        self.v2 = self.v0 * self.v0
+        self.stopping = False
+
+    @property
+    def finished(self) -> bool:
+        return self.done >= self.total
+
+    def _decel_steps(self) -> float:
+        return (self.v2 - self.v0 * self.v0) / (2.0 * self.accel)
+
+    def request_stop(self):
+        """Shorten the move to the distance needed to slow to start speed"""
+        if self.stopping:
+            return
+        self.stopping = True
+        self.total = min(self.total, self.done + int(math.ceil(self._decel_steps())))
+
+    def next_interval(self) -> Optional[float]:
+        """Seconds until the next step, or None when the move is complete"""
+        if self.done >= self.total:
+            return None
+        remaining = self.total - self.done
+        if self.stopping or remaining <= self._decel_steps():
+            self.v2 = max(self.v0 * self.v0, self.v2 - 2.0 * self.accel)
+        elif self.v2 < self.vmax * self.vmax:
+            self.v2 = min(self.vmax * self.vmax, self.v2 + 2.0 * self.accel)
+        self.done += 1
+        return 1.0 / math.sqrt(self.v2)
+
+
+class _LgpioStepWave:
+    """STEP pin driven by lgpio waves.
+
+    lgpio plays queued waves from its own native thread, sleeping against
+    absolute monotonic deadlines, so pulse timing is unaffected by Python's
+    GIL or by anything else the event loop is doing. The STEP pin is taken
+    from gpiozero and claimed as a one-pin lgpio group.
+    """
+
+    QUEUE_SIZE = 10  # lgpio LG_TX_BUF: waves that can be queued per group
+
+    def __init__(self, step_pin: int):
+        import lgpio
+        self.lgpio = lgpio
+        self.pin = step_pin
+        self._own_handle = False
+        self.handle = self._find_handle()
+        release_pin(step_pin)
+        lgpio.group_claim_output(self.handle, [step_pin], [0])
+
+    def _find_handle(self) -> int:
+        # Share gpiozero's chip handle when it is using lgpio, so the same
+        # gpiochip (RP1 on the Pi 5) is used for every stepper pin
+        try:
+            from gpiozero import Device
+            handle = getattr(Device.pin_factory, "_handle", None)
+            if isinstance(handle, int) and handle >= 0:
+                return handle
+        except Exception:
+            pass
+        last_error = None
+        for chip in (0, 4):
+            try:
+                handle = self.lgpio.gpiochip_open(chip)
+                if handle >= 0:
+                    self._own_handle = True
+                    return handle
+            except Exception as e:
+                last_error = e
+        raise RuntimeError(f"could not open a gpiochip for lgpio waves: {last_error}")
+
+    def submit(self, pulses: List[Tuple[int, int, int]]):
+        """Queue one wave of (bits, mask, delay_us) pulses"""
+        wave = [self.lgpio.pulse(bits, mask, delay) for bits, mask, delay in pulses]
+        status = self.lgpio.tx_wave(self.handle, self.pin, wave)
+        if status < 0:
+            raise RuntimeError(f"tx_wave failed ({status})")
+
+    def queued(self) -> int:
+        """Waves queued or playing"""
+        return self.QUEUE_SIZE - self.lgpio.tx_room(self.handle, self.pin, self.lgpio.TX_WAVE)
+
+    def cancel(self):
+        """Stop any wave immediately and leave STEP low and ready for reuse"""
+        try:
+            self.lgpio.group_free(self.handle, self.pin)
+        finally:
+            self.lgpio.group_claim_output(self.handle, [self.pin], [0])
+
+    def close(self):
+        try:
+            self.lgpio.group_free(self.handle, self.pin)
+        except Exception:
+            pass
+        if self._own_handle:
+            try:
+                self.lgpio.gpiochip_close(self.handle)
+            except Exception:
+                pass
+
+
+class _WaveChunk:
+    """One queued wave: its step count and when each step completes"""
+    __slots__ = ("steps", "step_ends", "start", "end")
+
+    def __init__(self, step_ends: List[float], start: float):
+        self.steps = len(step_ends)
+        self.step_ends = step_ends
+        self.start = start
+        self.end = start + (step_ends[-1] if step_ends else 0.0)
+
+    def steps_done_by(self, when: float) -> int:
+        if when <= self.start:
+            return 0
+        return bisect.bisect_right(self.step_ends, when - self.start)
+
+
 class NEMA23Controller:
     """NEMA 23 stepper controller with homing and positioning"""
+
+    # Hardware-timed move tuning
+    WAVE_CHUNK_SECONDS = 0.05     # Length of each queued wave
+    WAVE_LEAD_CHUNKS = 5          # Waves kept queued ahead (~250 ms of motion)
+    WAVE_POLL_SECONDS = 0.01      # How often the feeder checks the queue
+    POSITION_REPORT_SECONDS = 0.25
 
     def __init__(self, config: StepperConfig):
         self.config = config
@@ -122,9 +267,17 @@ class NEMA23Controller:
         self.position_changed_callback: Optional[Callable] = None
         self.state_changed_callback: Optional[Callable] = None
         self.homing_complete_callback: Optional[Callable] = None
-        # Called with True before a blocking move and False after it, so the
-        # drive tracks can be held at stop while the event loop is busy
+        # Called with True before a software-timed (blocking) move and False
+        # after it, so the drive tracks can be held at stop while the event
+        # loop is busy. Hardware-timed moves don't block and don't use it
         self.drive_hold_callback: Optional[Callable[[bool, str], None]] = None
+
+        # Hardware-timed stepping (lgpio waves); None means software timing
+        self._wave: Optional[_LgpioStepWave] = None
+        self._wave_busy = False
+        self._emergency = False
+        self._cut_time = 0.0
+        self._last_position_report = 0.0
 
         # GPIO setup
         self.gpio_initialized = False
@@ -153,6 +306,7 @@ class NEMA23Controller:
             if all([step_ok, dir_ok, enable_ok, limit_ok]):
                 self.gpio_initialized = True
                 logger.info(f"✅ GPIO initialized for stepper motor using {get_gpio_library()}")
+                self._setup_wave()
             else:
                 logger.error("✗ Failed to setup one or more GPIO pins")
 
@@ -160,8 +314,31 @@ class NEMA23Controller:
             logger.error(f"✗ Failed to setup GPIO: {e}")
             self.gpio_initialized = False
 
+    def _setup_wave(self):
+        """Switch STEP to lgpio wave output, falling back to software timing"""
+        if not self.config.hardware_timed_steps:
+            logger.info("Stepper using software-timed steps (hardware_timed_steps disabled)")
+            return
+        try:
+            self._wave = _LgpioStepWave(self.config.step_pin)
+            logger.info("Stepper using hardware-timed steps (lgpio waves) - moves run without blocking")
+        except Exception as e:
+            self._wave = None
+            logger.warning(f"lgpio waves unavailable ({e}) - stepper using software-timed steps")
+            # STEP may already have been released from gpiozero
+            setup_output_pin(self.config.step_pin, initial_state=False)
+
+    @property
+    def hardware_timed(self) -> bool:
+        return self._wave is not None
+
     def enable_motor(self):
         """Enable the stepper motor"""
+        if self.intentionally_disabled:
+            # Re-enabling after a disable or emergency stop clears the stop
+            # request it left behind, so later moves aren't cut short
+            self.stop_movement.clear()
+            self._emergency = False
         if self.gpio_initialized:
             set_output(self.config.enable_pin, False)  # TB6600 enables on LOW
             self.intentionally_disabled = False
@@ -262,11 +439,271 @@ class NEMA23Controller:
         """Convert centimeters to steps"""
         return int(cm * self.steps_per_cm)
 
+    def _report_position(self, force: bool = False):
+        """Throttled position callback for hardware-timed moves"""
+        now = time.monotonic()
+        if not force and now - self._last_position_report < self.POSITION_REPORT_SECONDS:
+            return
+        self._last_position_report = now
+        if self.position_changed_callback:
+            try:
+                self.position_changed_callback(self.current_position_steps,
+                                               self.steps_to_cm(self.current_position_steps))
+            except Exception as e:
+                logger.error(f"Position callback error: {e}")
+
+    async def _run_wave(self, total_steps: int, direction: MoveDirection,
+                        start_speed: float, max_speed: float, acceleration: float,
+                        watch_limit: Optional[Callable[[], bool]] = None,
+                        chunk_seconds: Optional[float] = None,
+                        lead_chunks: Optional[int] = None,
+                        poll_seconds: Optional[float] = None) -> str:
+        """Play a move as queued lgpio waves while yielding to the event loop.
+
+        Waves are generated a chunk at a time and kept a few chunks ahead of
+        playback. current_position_steps tracks the steps actually played.
+        Returns 'complete', 'stopped' (stop_movement - decelerated to a halt),
+        'limit' (watch_limit returned True and the limit switch triggered;
+        pulses cut immediately) or 'emergency' (emergency_stop cut pulses).
+        """
+        wave = self._wave
+        chunk_seconds = chunk_seconds or self.WAVE_CHUNK_SECONDS
+        lead_chunks = lead_chunks or self.WAVE_LEAD_CHUNKS
+        poll_seconds = poll_seconds or self.WAVE_POLL_SECONDS
+        pulse_us = max(int(self.config.step_pulse_width), 10)
+
+        profile = _StepProfile(total_steps, start_speed, max_speed, acceleration)
+        sign = 1 if direction == MoveDirection.AWAY_FROM_HOME else -1
+        start_position = self.current_position_steps
+        inflight: deque = deque()
+        played = 0
+        stop_requested = False
+
+        def partial(when: float) -> int:
+            # Chunk start times are chained, so this also covers chunks that
+            # finished since the queue was last read
+            return sum(chunk.steps_done_by(when) for chunk in inflight)
+
+        def set_position(when: float):
+            self.current_position_steps = start_position + sign * (played + partial(when))
+
+        self.set_direction(direction)
+        await asyncio.sleep(0.002)  # DIR setup time before the first STEP edge
+
+        try:
+            while True:
+                # Checked before reading the queue: emergency_stop has already
+                # emptied it, which would otherwise count every queued step
+                if self._emergency:
+                    set_position(self._cut_time)
+                    return "emergency"
+
+                now = time.monotonic()
+                queued = wave.queued()
+                while len(inflight) > queued:
+                    played += inflight.popleft().steps
+
+                set_position(now)
+                self._report_position()
+
+                if watch_limit and watch_limit() and self.is_limit_switch_triggered():
+                    wave.cancel()
+                    set_position(time.monotonic())
+                    return "limit"
+
+                if self.stop_movement.is_set() and not stop_requested:
+                    stop_requested = True
+                    profile.request_stop()
+
+                if profile.finished and not inflight:
+                    break
+
+                if len(inflight) < lead_chunks and not profile.finished:
+                    pulses: List[Tuple[int, int, int]] = []
+                    step_ends: List[float] = []
+                    elapsed = 0.0
+                    while elapsed < chunk_seconds:
+                        interval = profile.next_interval()
+                        if interval is None:
+                            break
+                        period_us = max(int(round(interval * 1_000_000)), pulse_us * 2)
+                        pulses.append((1, 1, pulse_us))
+                        pulses.append((0, 1, period_us - pulse_us))
+                        elapsed += period_us / 1_000_000
+                        step_ends.append(elapsed)
+                    if pulses:
+                        start = max(inflight[-1].end, now) if inflight else now
+                        wave.submit(pulses)
+                        inflight.append(_WaveChunk(step_ends, start))
+                        continue
+
+                await asyncio.sleep(poll_seconds)
+
+            self.current_position_steps = start_position + sign * played
+            return "stopped" if stop_requested else "complete"
+
+        except asyncio.CancelledError:
+            wave.cancel()
+            set_position(time.monotonic())
+            raise
+
+    async def _wave_move_to(self, target_steps: int, speed_override: Optional[int] = None) -> bool:
+        """Hardware-timed move to target_steps (caller holds _wave_busy)"""
+        total_steps = abs(target_steps - self.current_position_steps)
+        if total_steps == 0:
+            return True
+        direction = (MoveDirection.AWAY_FROM_HOME if target_steps > self.current_position_steps
+                     else MoveDirection.TOWARD_HOME)
+        max_speed = min(speed_override or self.config.normal_speed, self.config.max_speed)
+
+        logger.info(f"Moving from {self.current_position_steps} to {target_steps} steps "
+                    f"({self.steps_to_cm(self.current_position_steps):.1f} cm -> "
+                    f"{self.steps_to_cm(target_steps):.1f} cm)")
+        self.target_position_steps = target_steps
+        self.set_state(MotorState.MOVING)
+        self.enable_motor()
+
+        # Only trust the limit switch near home, as the software-timed path does
+        near_home_steps = self.cm_to_steps(2.0)
+        watch = None
+        if direction == MoveDirection.TOWARD_HOME:
+            watch = lambda: self.current_position_steps < near_home_steps
+
+        try:
+            result = await self._run_wave(total_steps, direction, self.config.start_speed,
+                                          max_speed, self.config.acceleration, watch_limit=watch)
+        except asyncio.CancelledError:
+            self.set_state(MotorState.READY)
+            self._report_position(force=True)
+            raise
+        except Exception as e:
+            logger.error(f"Movement failed: {e}")
+            self.set_state(MotorState.ERROR)
+            return False
+
+        if result == "emergency":
+            self._report_position(force=True)
+            return False
+        if result == "limit":
+            # The switch sits home_offset behind zero by definition
+            self.current_position_steps = -self.home_offset_steps
+            logger.warning("Limit switch triggered during movement - stopped; position "
+                           "re-anchored to the switch (re-home for exact zero)")
+        elif result == "stopped":
+            logger.info("Movement stopped")
+
+        self.set_state(MotorState.READY)
+        self._report_position(force=True)
+        logger.info(f"Movement complete - position: {self.current_position_steps} steps "
+                    f"({self.steps_to_cm(self.current_position_steps):.1f} cm)")
+        return True
+
+    async def _move_steps_wave(self, target_steps: int, speed_override: Optional[int]) -> bool:
+        if self._wave_busy:
+            logger.warning("Stepper busy - move ignored")
+            return False
+        self._wave_busy = True
+        self._emergency = False
+        try:
+            return await self._wave_move_to(target_steps, speed_override)
+        finally:
+            self._wave_busy = False
+
+    async def _home_motor_wave(self) -> bool:
+        """Hardware-timed homing: fast approach, back off, slow approach for a
+        repeatable trigger point, then back off home_offset to zero."""
+        if self._wave_busy:
+            logger.warning("Stepper busy - homing ignored")
+            return False
+        self._wave_busy = True
+        self._emergency = False
+        self.stop_movement.clear()
+
+        was_disabled = self.intentionally_disabled
+        self.intentionally_disabled = False
+        speed = self.config.homing_speed
+        slow = max(100, speed // 8)
+        accel = self.config.acceleration
+        backoff = self.cm_to_steps(0.2)
+        always = lambda: True
+
+        def interrupted(result: str) -> bool:
+            if result in ("stopped", "emergency"):
+                logger.warning("Homing interrupted")
+                return True
+            return False
+
+        logger.info("Starting homing sequence (hardware timed)...")
+        self.set_state(MotorState.HOMING)
+        self.enable_motor()
+        try:
+            if not self.is_limit_switch_triggered():
+                logger.info("Homing phase 1: moving toward limit switch")
+                result = await self._run_wave(self.max_travel_steps + 1000, MoveDirection.TOWARD_HOME,
+                                              speed, speed, accel, watch_limit=always)
+                if interrupted(result):
+                    return False
+                if result != "limit":
+                    logger.error("Homing failed - limit switch not found")
+                    self.set_state(MotorState.ERROR)
+                    return False
+
+            logger.info("Homing phase 2: backing off for slow approach")
+            result = await self._run_wave(backoff, MoveDirection.AWAY_FROM_HOME, speed, speed, accel)
+            if interrupted(result):
+                return False
+
+            logger.info(f"Homing phase 3: slow approach at {slow} steps/s")
+            result = await self._run_wave(backoff * 2, MoveDirection.TOWARD_HOME, slow, slow, accel,
+                                          watch_limit=always, chunk_seconds=0.01,
+                                          lead_chunks=2, poll_seconds=0.002)
+            if interrupted(result):
+                return False
+            if result != "limit":
+                logger.error("Homing failed - limit switch not found on slow approach")
+                self.set_state(MotorState.ERROR)
+                return False
+
+            logger.info("Homing phase 4: backing off to zero position")
+            result = await self._run_wave(self.home_offset_steps, MoveDirection.AWAY_FROM_HOME,
+                                          speed, speed, accel)
+            if interrupted(result):
+                return False
+
+            self.current_position_steps = 0
+            self.home_position_found = True
+            self.set_state(MotorState.READY)
+            logger.info("Homing complete - zero position established")
+
+            if self.homing_complete_callback:
+                try:
+                    self.homing_complete_callback(True)
+                except Exception as e:
+                    logger.error(f"Homing callback error: {e}")
+
+            await self._wave_move_to(self.default_position_steps)
+            return True
+
+        except asyncio.CancelledError:
+            self.set_state(MotorState.ERROR)
+            raise
+        except Exception as e:
+            logger.error(f"Homing failed: {e}")
+            self.set_state(MotorState.ERROR)
+            return False
+        finally:
+            self._wave_busy = False
+            if was_disabled:
+                self.intentionally_disabled = True
+
     async def home_motor(self) -> bool:
         """Perform homing sequence to find zero position"""
         if not self.gpio_initialized:
             logger.error("Cannot home - GPIO not initialized")
             return False
+
+        if self._wave:
+            return await self._home_motor_wave()
 
         was_disabled = self.intentionally_disabled
         self.intentionally_disabled = False
@@ -377,6 +814,9 @@ class NEMA23Controller:
         if target_steps == self.current_position_steps:
             logger.info("Already at target position")
             return True
+
+        if self._wave:
+            return await self._move_steps_wave(target_steps, speed_override)
 
         with self.movement_lock:
             logger.info(f"🎯 Moving from {self.current_position_steps} to {target_steps} steps")
@@ -509,6 +949,14 @@ class NEMA23Controller:
         logger.warning("🚨 EMERGENCY STOP - Stepper motor")
         self.stop_movement.set()
         self.sweep_active = False
+        if self._wave:
+            # Cut queued pulses immediately; the feeder sees _emergency on its next poll
+            self._emergency = True
+            self._cut_time = time.monotonic()
+            try:
+                self._wave.cancel()
+            except Exception as e:
+                logger.error(f"Failed to cancel step wave: {e}")
         self.disable_motor()
         self.set_state(MotorState.ERROR)
 
@@ -558,9 +1006,16 @@ class NEMA23Controller:
             # Signal movement to stop immediately
             self.stop_movement.set()
 
-            # Cancel sweep task if running
+            # Hardware-timed moves decelerate to a stop on stop_movement, so
+            # let the current leg finish its stop; otherwise cancel the task
             if self.sweep_task and not self.sweep_task.done():
-                self.sweep_task.cancel()
+                if self._wave:
+                    done, _ = await asyncio.wait({self.sweep_task}, timeout=3.0)
+                    if not done:
+                        logger.warning("Sweep did not stop in time - cancelling")
+                        self.sweep_task.cancel()
+                else:
+                    self.sweep_task.cancel()
                 try:
                     await self.sweep_task
                 except asyncio.CancelledError:
@@ -585,9 +1040,11 @@ class NEMA23Controller:
         """Internal sweep loop - continuously moves between min and max"""
         hold_engaged = False
         try:
-            # Hold the tracks for the whole sweep, including the pauses between legs
-            self._set_drive_hold(True, "stepper sweep")
-            hold_engaged = True
+            # Software-timed moves block the event loop, so hold the tracks for
+            # the whole sweep, including the pauses between legs
+            if not self._wave:
+                self._set_drive_hold(True, "stepper sweep")
+                hold_engaged = True
             direction_forward = True
 
             while self.sweep_active:
@@ -641,6 +1098,7 @@ class NEMA23Controller:
             "default_position_cm": self.config.default_position_cm,
             "steps_per_cm": round(self.steps_per_cm, 2),
             "safe_position": self.is_position_safe(self.current_position_steps),
+            "step_timing": "hardware" if self._wave else "software",
             "sweep_active": self.sweep_active,
             "sweep_min_cm": self.sweep_min_cm if self.sweep_active else None,
             "sweep_max_cm": self.sweep_max_cm if self.sweep_active else None
@@ -653,6 +1111,10 @@ class NEMA23Controller:
 
         if self.movement_thread and self.movement_thread.is_alive():
             self.movement_thread.join(timeout=2.0)
+
+        if self._wave:
+            self._wave.close()
+            self._wave = None
 
         self.disable_motor()
 
@@ -683,23 +1145,17 @@ class StepperControlInterface:
             return
 
         try:
-            # Check if the callback is a coroutine function
-            import inspect
-            if not inspect.iscoroutinefunction(self.websocket_broadcast_callback):
-                # Callback isn't async - skip silently
-                return
-
-            # Get the current event loop
-            try:
-                loop = asyncio.get_running_loop()
-                # Schedule the coroutine to run in the event loop
-                asyncio.run_coroutine_threadsafe(
-                    self.websocket_broadcast_callback(message),
-                    loop
-                )
-            except RuntimeError:
-                # No event loop - this is normal during shutdown
-                pass
+            callback = self.websocket_broadcast_callback
+            if inspect.iscoroutinefunction(callback):
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    # No event loop - this is normal during shutdown
+                    return
+                spawn(callback(message))
+            else:
+                # Synchronous callbacks schedule the broadcast themselves
+                callback(message)
 
         except Exception:
             # Silently ignore any broadcast errors

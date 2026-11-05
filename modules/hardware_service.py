@@ -61,6 +61,7 @@ class HardwareConfig:
     stepper_normal_speed: int = 4000
     stepper_max_speed: int = 4800
     stepper_acceleration: int = 3200
+    stepper_hardware_timed_steps: bool = True
 
     # Timing
     telemetry_interval: float = 0.2
@@ -211,7 +212,8 @@ class HardwareService:
                 homing_speed=self.config.stepper_homing_speed,
                 normal_speed=self.config.stepper_normal_speed,
                 max_speed=self.config.stepper_max_speed,
-                acceleration=self.config.stepper_acceleration
+                acceleration=self.config.stepper_acceleration,
+                hardware_timed_steps=self.config.stepper_hardware_timed_steps
             )
 
             # Create stepper controller
@@ -1836,7 +1838,8 @@ def create_hardware_service(config_dict: Dict[str, Any]) -> HardwareService:
             stepper_homing_speed=hw_config.get("stepper_motor", {}).get("homing_speed", 1600),
             stepper_normal_speed=hw_config.get("stepper_motor", {}).get("normal_speed", 4000),
             stepper_max_speed=hw_config.get("stepper_motor", {}).get("max_speed", 4800),
-            stepper_acceleration=hw_config.get("stepper_motor", {}).get("acceleration", 3200)
+            stepper_acceleration=hw_config.get("stepper_motor", {}).get("acceleration", 3200),
+            stepper_hardware_timed_steps=bool(hw_config.get("stepper_motor", {}).get("hardware_timed_steps", True))
         )
 
         # Create and return hardware service

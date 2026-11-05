@@ -1621,7 +1621,7 @@ class NemaStepperHandler(BehaviorHandler):
     def __init__(self, hardware_service=None, scene_engine=None, logger=None):
         super().__init__(hardware_service, scene_engine, logger)
         self.last_button_states = {}  # Track button press states
-        self.toggle_states = {}       # Track toggle positions for each button
+        self._move_task: Optional[asyncio.Task] = None
 
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
@@ -1644,7 +1644,13 @@ class NemaStepperHandler(BehaviorHandler):
 
     async def _handle_toggle_positions(self, controller_input: ControllerInput, config: Dict[str, Any],
                                      trigger_timing: str, threshold: float) -> bool:
-        """Toggle between min and max positions on button press"""
+        """Toggle between min and max positions on button press.
+
+        The move runs as a background task so controller input keeps flowing
+        while the stepper travels; awaiting it here would stall every input
+        from that connection for the length of the move. Pressing again
+        mid-move stops the current move and heads for the other end.
+        """
         control_name = controller_input.control_name
         raw_value = controller_input.raw_value
 
@@ -1660,55 +1666,58 @@ class NemaStepperHandler(BehaviorHandler):
         elif trigger_timing == 'on_release':
             should_trigger = not is_pressed and was_pressed
 
-        if should_trigger:
-            # Get NEMA config
-            min_pos = config.get('min_position', 0.0)
-            max_pos = config.get('max_position', 20.0)
-            speed = config.get('normal_speed', 1000)
-            acceleration = config.get('acceleration', 800)
+        if not should_trigger:
+            return True  # No error, just no trigger
 
-            # Check if we have a stepper service available
-            if hasattr(self.hardware_service, 'stepper_controller') and self.hardware_service.stepper_controller:
-                stepper = self.hardware_service.stepper_controller
+        stepper = getattr(self.hardware_service, 'stepper_controller', None)
+        if not stepper:
+            self.logger.warning("No stepper controller available for NEMA control")
+            return False
 
-                try:
-                    # Get the current toggle state for this button (default to False = at min)
-                    is_at_max = self.toggle_states.get(control_name, False)
+        if not stepper.is_movement_allowed():
+            self.logger.warning(f"NEMA toggle ({control_name}) ignored - stepper disabled")
+            return False
 
-                    # Determine target position based on toggle state
-                    if is_at_max:
-                        target_pos = min_pos
-                        new_toggle_state = False
-                        self.logger.info(f"Toggling {control_name}: MAX -> MIN ({target_pos}cm)")
-                    else:
-                        target_pos = max_pos
-                        new_toggle_state = True
-                        self.logger.info(f"Toggling {control_name}: MIN -> MAX ({target_pos}cm)")
+        min_pos = config.get('min_position', 0.0)
+        max_pos = config.get('max_position', 20.0)
 
-                    # Update stepper config with our desired speed/acceleration
-                    stepper_config_update = {
-                        "normal_speed": speed,
-                        "acceleration": acceleration
-                    }
-                    stepper.update_config(stepper_config_update)
+        # Head for whichever end is further from where the carriage is going
+        # (or is, when idle), so the toggle always follows the real position
+        moving = self._move_task is not None and not self._move_task.done()
+        reference_cm = stepper.steps_to_cm(
+            stepper.target_position_steps if moving else stepper.current_position_steps)
+        target_pos = min_pos if abs(reference_cm - max_pos) < abs(reference_cm - min_pos) else max_pos
+        reversing = " (reversing current move)" if moving else ""
+        self.logger.info(f"Toggling {control_name}: -> {target_pos}cm{reversing}")
 
-                    # Send move command
-                    success = await stepper.move_to_position_cm(target_pos)
+        previous = self._move_task if moving else None
+        self._move_task = spawn(
+            self._toggle_move(stepper, previous, target_pos, config, control_name),
+            name=f"nema_toggle_{control_name}")
+        return True
 
-                    if success:
-                        # Only update toggle state if movement was successful
-                        self.toggle_states[control_name] = new_toggle_state
-                        self.logger.info(f"NEMA stepper moving to {target_pos}cm (button: {control_name})")
-                    else:
-                        self.logger.error(f"NEMA stepper move command failed")
+    async def _toggle_move(self, stepper, previous: Optional[asyncio.Task], target_pos: float,
+                           config: Dict[str, Any], control_name: str):
+        """Stop any toggle move in progress, then move to target_pos"""
+        if previous is not None:
+            stepper.stop_movement.set()
+            try:
+                await previous
+            except (asyncio.CancelledError, Exception):
+                pass
+            stepper.stop_movement.clear()
 
-                    return success
+        stepper.update_config({
+            "normal_speed": config.get('normal_speed', 1000),
+            "acceleration": config.get('acceleration', 800),
+        })
 
-                except Exception as e:
-                    self.logger.error(f"NEMA stepper control error: {e}")
-                    return False
-            else:
-                self.logger.warning("No stepper controller available for NEMA control")
-                return False
-
-        return True  # No error, just no trigger
+        try:
+            success = await stepper.move_to_position_cm(target_pos)
+        except Exception as e:
+            self.logger.error(f"NEMA stepper control error: {e}")
+            return
+        if success:
+            self.logger.info(f"NEMA stepper at {target_pos}cm (button: {control_name})")
+        else:
+            self.logger.error("NEMA stepper move command failed")

@@ -6,6 +6,7 @@ Handles all WebSocket message routing and processing
 """
 
 import asyncio
+import weakref
 import json
 import logging
 import time
@@ -37,7 +38,9 @@ class WebSocketMessageHandler:
         self.last_navigation_time = 0
         self.navigation_cooldown = 0.3  # debounce navigation commands
         self._imu_active = False  # tracks whether frontend is streaming IMU data
-        self._prev_buttons: Dict[str, bool] = {}  # last seen button state for delta filtering
+        # Last seen button state for delta filtering, per connection: each
+        # connection's frames must only be compared with its own earlier frames
+        self._prev_buttons = weakref.WeakKeyDictionary()
         self.config_store = ConfigStore()
         self.pi_status = PiStatusMonitor()
         self._gesture_scene_active = False
@@ -220,10 +223,14 @@ class WebSocketMessageHandler:
             # button state at 50Hz; without this filter every idle button is
             # dispatched through the behaviour registry every frame
             # (~1,000 no-op coroutine calls per second).
+            try:
+                prev_buttons = self._prev_buttons.setdefault(websocket, {})
+            except TypeError:
+                prev_buttons = {}
             for button_name, is_pressed in buttons.items():
-                if self._prev_buttons.get(button_name) == is_pressed:
+                if prev_buttons.get(button_name) == is_pressed:
                     continue
-                self._prev_buttons[button_name] = is_pressed
+                prev_buttons[button_name] = is_pressed
 
                 value = 1.0 if is_pressed else 0.0
                 try:
