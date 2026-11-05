@@ -20,6 +20,28 @@ from modules.file_utils import save_json_atomic
 
 logger = logging.getLogger(__name__)
 
+class _SocketIOClientBridge:
+    """Stands in for a Steam Deck WebSocket connection so the backend's
+    WebSocket message handler can serve a web client unchanged. Replies the
+    handler sends go back to that one Socket.IO client; broadcasts already
+    reach every web client through broadcast_message()."""
+
+    def __init__(self, socketio, sid: str):
+        self._socketio = socketio
+        self.sid = sid
+        self.remote_address = ("web", sid)
+        self.open = True
+        self.closed = False
+
+    async def send(self, message):
+        data = json.loads(message) if isinstance(message, (str, bytes)) else message
+        self._socketio.emit('backend_message', data, room=self.sid)
+
+    async def close(self, *args, **kwargs):
+        self.open = False
+        self.closed = True
+
+
 class DroidDeckWebServer:
     """Web server module for Droid Deck interface"""
     
@@ -30,6 +52,9 @@ class DroidDeckWebServer:
         self.app = None
         self.socketio = None
         self.web_clients = set()
+        # One bridge per Socket.IO client, so the backend handler sees each web
+        # client as its own connection (per-connection state such as button edges)
+        self._backend_bridges: Dict[str, _SocketIOClientBridge] = {}
         self.server_thread = None
         
         # Web config directory
@@ -86,6 +111,31 @@ class DroidDeckWebServer:
             # Called on the backend loop itself: waiting would deadlock
             return asyncio.ensure_future(coro, loop=loop)
         return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout)
+
+    def _forward_to_backend(self, client_sid: str, data: Dict[str, Any]):
+        """Hand a web command to the backend's WebSocket message handler -
+        the same code path the Steam Deck uses - on the backend's own loop"""
+        handler = getattr(self.backend, 'websocket_handler', None)
+        loop = self._backend_loop()
+        if handler is None or loop is None:
+            self.socketio.emit('backend_message', {
+                'type': 'error', 'message': 'Backend not ready'
+            }, room=client_sid)
+            return
+        bridge = self._backend_bridges.get(client_sid)
+        if bridge is None:
+            bridge = _SocketIOClientBridge(self.socketio, client_sid)
+            self._backend_bridges[client_sid] = bridge
+        future = asyncio.run_coroutine_threadsafe(
+            handler.handle_message(bridge, json.dumps(data)), loop)
+
+        def _log_failure(done):
+            try:
+                done.result()
+            except Exception as e:
+                logger.error(f"Web command '{data.get('type')}' failed: {e}")
+
+        future.add_done_callback(_log_failure)
 
     def _call_backend(self, func, *args):
         """Run a plain backend function on the backend loop's thread"""
@@ -197,112 +247,6 @@ class DroidDeckWebServer:
         self.setup_routes()
         self.setup_socketio_events()
         
-    def _handle_scene_stop(self, client_sid):
-        """Stop the currently playing scene"""
-        try:
-            if self.backend and hasattr(self.backend, 'scene_engine'):
-                import threading
-
-                def stop_scene_thread():
-                    import asyncio
-                    try:
-                        self._run_backend(self.backend.scene_engine.stop_current_scene())
-                    except Exception as e:
-                        logger.error(f"Error stopping scene: {e}")
-
-                thread = threading.Thread(target=stop_scene_thread, daemon=True)
-                thread.start()
-            else:
-                logger.warning("Scene engine not available for scene_stop")
-        except Exception as e:
-            logger.error(f"Scene stop handler error: {e}")
-
-    def _handle_audio_command(self, client_sid, data):
-        """Handle audio play/stop/volume commands"""
-        try:
-            command = data.get('command')
-            if not self.backend or not hasattr(self.backend, 'audio_controller'):
-                self.socketio.emit('error', {'message': 'Audio controller not available'}, room=client_sid)
-                return
-
-            audio = self.backend.audio_controller
-
-            if command == 'play':
-                track = data.get('track')
-                if track:
-                    audio.play_track(track)
-                    logger.info(f"Web UI audio play: {track}")
-            elif command == 'stop':
-                audio.stop()
-                logger.info("Web UI audio stop")
-            elif command == 'volume':
-                volume = float(data.get('volume', 0.3))
-                audio.set_volume(volume)
-                logger.info(f"Web UI audio volume: {volume}")
-            else:
-                logger.warning(f"Unknown audio command: {command}")
-
-        except Exception as e:
-            logger.error(f"Audio command handler error: {e}")
-            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
-
-    def _handle_mode_command(self, client_sid, data):
-        """Handle mode toggle commands (idle, demo, etc.)"""
-        try:
-            mode_name = data.get('name')
-            state = data.get('state', True)
-
-            if mode_name == 'idle':
-                if self.backend and hasattr(self.backend, 'scene_engine'):
-                    import threading
-
-                    def idle_mode_thread():
-                        import asyncio
-                        try:
-                            self._call_backend(self.backend.scene_engine.set_idle_mode, state)
-                        except Exception as e:
-                            logger.error(f"Error setting idle mode: {e}")
-
-                    thread = threading.Thread(target=idle_mode_thread, daemon=True)
-                    thread.start()
-
-                    self.socketio.emit('backend_message', {
-                        'type': 'mode_response',
-                        'mode': 'idle',
-                        'state': state,
-                        'success': True,
-                        'timestamp': time.time()
-                    }, room=client_sid)
-                    logger.info(f"Idle mode {'enabled' if state else 'disabled'} from web UI")
-                else:
-                    self.socketio.emit('error', {'message': 'Scene engine not available'}, room=client_sid)
-            else:
-                logger.warning(f"Unknown mode command: {mode_name}")
-
-        except Exception as e:
-            logger.error(f"Mode command handler error: {e}")
-            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
-
-    def _handle_save_controller_config(self, client_sid, data):
-        """Save controller configuration to disk"""
-        try:
-            config = data.get('config', {})
-            config_path = Path("configs/controller_config.json")
-
-            save_json_atomic(config_path, config)
-
-            logger.info(f"Controller config saved: {len(config)} mappings")
-
-            self.socketio.emit('backend_message', {
-                'type': 'controller_config_saved',
-                'count': len(config),
-                'timestamp': time.time()
-            }, room=client_sid)
-
-        except Exception as e:
-            logger.error(f"Save controller config error: {e}")
-            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
-
     def _handle_reset_controller_calibration(self, client_sid):
         """Reset controller calibration"""
         try:
@@ -319,45 +263,6 @@ class DroidDeckWebServer:
 
         except Exception as e:
             logger.error(f"Reset calibration error: {e}")
-            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
-
-    def _handle_calibration_mode(self, client_sid, start: bool):
-        """Start or stop controller calibration mode"""
-        try:
-            msg_type = 'calibration_mode_started' if start else 'calibration_mode_stopped'
-            self.socketio.emit('backend_message', {
-                'type': msg_type,
-                'timestamp': time.time()
-            }, room=client_sid)
-            logger.info(f"Calibration mode {'started' if start else 'stopped'} from web UI")
-        except Exception as e:
-            logger.error(f"Calibration mode error: {e}")
-
-    def _handle_stepper_command(self, client_sid, data):
-        """Handle stepper enable/disable commands (type=stepper)"""
-        try:
-            command = data.get('command')
-            if not self.backend or not hasattr(self.backend, 'hardware_service'):
-                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
-                return
-
-            import threading
-
-            def stepper_thread():
-                import asyncio
-                try:
-                    self._run_backend(
-                        self.backend.hardware_service.handle_stepper_command({'command': command})
-                    )
-                except Exception as e:
-                    logger.error(f"Stepper command error: {e}")
-
-            thread = threading.Thread(target=stepper_thread, daemon=True)
-            thread.start()
-            logger.info(f"Stepper command from web UI: {command}")
-
-        except Exception as e:
-            logger.error(f"Stepper command handler error: {e}")
             self.socketio.emit('error', {'message': str(e)}, room=client_sid)
 
     def _handle_save_scene(self, client_sid, data):
@@ -474,6 +379,10 @@ class DroidDeckWebServer:
             client_sid = flask_request.sid
             
             self.web_clients.discard(client_sid)
+            bridge = self._backend_bridges.pop(client_sid, None)
+            if bridge is not None:
+                bridge.open = False
+                bridge.closed = True
             logger.info(f"Web client disconnected: {client_sid}")
         
         @self.socketio.on('backend_command')
@@ -493,63 +402,10 @@ class DroidDeckWebServer:
                     })
                     return
 
-                if cmd_type == 'scene':
-                    # Forward scene playback to backend
-                    scene_name = data.get('emotion')
-                    logger.info(f"Web UI requesting scene: {scene_name}")
-                                    
-                    if self.backend and hasattr(self.backend, 'scene_engine'):
-                        # Use threading to call the async method safely
-                        import threading
-                        
-                        def play_scene_thread():
-                            import asyncio
-                            try:
-                                # Create a new event loop for this thread
-                                self._run_backend(self.backend.scene_engine.play_scene(scene_name))
-                            except Exception as e:
-                                logger.error(f"Error playing scene: {e}")
-                        
-                        # Start scene in background thread
-                        thread = threading.Thread(target=play_scene_thread, daemon=True)
-                        thread.start()
-                    
-                    else:
-                        logger.error("Backend or scene_engine not available")
-                        emit('error', {'message': 'Scene engine not available'})
-                   
-                elif cmd_type == 'get_scenes':
-                    self._handle_get_scenes(client_sid)
-                elif cmd_type == 'get_controller_info':
-                    self._handle_get_controller_info(client_sid)
-                elif cmd_type == 'system_status':
+                # Commands the web server handles itself: web-only features, and
+                # system_status, whose reply is shaped for the web Health screen
+                if cmd_type == 'system_status':
                     self._handle_system_status(client_sid)
-                elif cmd_type == 'get_audio_files':
-                    self._handle_get_audio_files(client_sid)
-                elif cmd_type == 'get_all_servo_positions':
-                    self._handle_get_servo_positions(client_sid, data)
-                elif cmd_type == 'get_controller_config':
-                    self._handle_get_controller_config(client_sid)
-                elif cmd_type == 'emergency_stop':
-                    self._handle_emergency_stop(client_sid)
-                elif cmd_type == 'nema_move_to_position':
-                    self._handle_nema_move_to_position(client_sid, data)
-                elif cmd_type == 'nema_home':
-                    self._handle_nema_home(client_sid)
-                elif cmd_type == 'nema_start_sweep':
-                    self._handle_nema_start_sweep(client_sid, data)
-                elif cmd_type == 'nema_stop_sweep':
-                    self._handle_nema_stop_sweep(client_sid)
-                elif cmd_type == 'nema_get_status':
-                    self._handle_nema_get_status(client_sid)
-                elif cmd_type == 'nema_enable':
-                    self._handle_nema_enable(client_sid, data)
-                elif cmd_type == 'get_nema_config':
-                    self._handle_get_nema_config(client_sid)
-                elif cmd_type == 'nema_config_update':
-                    self._handle_nema_config_update(client_sid, data)   
-                elif cmd_type == 'servo':
-                    self._handle_servo_command(client_sid, data) 
                 elif cmd_type == 'toggle_failsafe':
                     self._handle_toggle_failsafe(client_sid, data)
                 elif cmd_type == 'get_failsafe_status':
@@ -558,28 +414,19 @@ class DroidDeckWebServer:
                     self._handle_get_bluetooth_status(client_sid)
                 elif cmd_type == 'set_bluetooth_enabled':
                     self._handle_set_bluetooth_enabled(client_sid, data)
-                elif cmd_type == 'scene_stop':
-                    self._handle_scene_stop(client_sid)
-                elif cmd_type == 'import_scenes':
-                    self._handle_get_scenes(client_sid)
-                elif cmd_type == 'audio':
-                    self._handle_audio_command(client_sid, data)
-                elif cmd_type == 'mode':
-                    self._handle_mode_command(client_sid, data)
-                elif cmd_type == 'save_controller_config':
-                    self._handle_save_controller_config(client_sid, data)
+                elif cmd_type == 'get_nema_config':
+                    self._handle_get_nema_config(client_sid)
                 elif cmd_type == 'reset_controller_calibration':
                     self._handle_reset_controller_calibration(client_sid)
-                elif cmd_type == 'start_calibration_mode':
-                    self._handle_calibration_mode(client_sid, True)
-                elif cmd_type == 'stop_calibration_mode':
-                    self._handle_calibration_mode(client_sid, False)
-                elif cmd_type == 'stepper':
-                    self._handle_stepper_command(client_sid, data)
                 elif cmd_type == 'save_scene':
                     self._handle_save_scene(client_sid, data)
                 elif cmd_type == 'delete_scene':
                     self._handle_delete_scene(client_sid, data)
+                elif cmd_type == 'import_scenes':
+                    self._forward_to_backend(client_sid, {**data, 'type': 'get_scenes'})
+                else:
+                    # Everything else uses the same backend handler as the Steam Deck
+                    self._forward_to_backend(client_sid, data)
 
             except Exception as e:
                 logger.error(f"Failed to handle command: {e}")
@@ -633,7 +480,7 @@ class DroidDeckWebServer:
         """Handle failsafe mode toggle from web UI"""
         try:
             enable = data.get('enable', False)
-            logger.warning(f"âš ï¸ Failsafe {'ENABLED' if enable else 'DISABLED'} from web UI")
+            logger.warning(f"⚠️ Failsafe {'ENABLED' if enable else 'DISABLED'} from web UI")
             
             if self.backend and hasattr(self.backend, 'set_failsafe_mode'):
                 import threading
@@ -767,58 +614,6 @@ class DroidDeckWebServer:
             self.socketio.emit('error', {'message': str(e)}, room=client_sid)
 
 
-    def _handle_servo_command(self, client_sid, data):
-            """Handle servo control command"""
-            try:
-                channel = data.get('channel')
-                position = data.get('pos')
-                speed = data.get('speed')
-                
-                logger.info(f"Web UI servo command: {channel} -> {position}")
-                
-                if self.backend and hasattr(self.backend, 'hardware_service'):
-                    import threading
-                    
-                    def servo_command_thread():
-                        import asyncio
-                        try:
-                            
-                            # Set servo position
-                            result = self._run_backend(
-                                self.backend.hardware_service.set_servo_position(
-                                    channel, position, "realtime"
-                                )
-                            )
-                            
-                            # Optionally set speed if provided
-                            if speed is not None:
-                                self._run_backend(
-                                    self.backend.hardware_service.set_servo_speed(channel, speed)
-                                )
-                            
-                            
-                            logger.debug(f"Servo command executed: {channel} = {position}")
-                            
-                        except Exception as e:
-                            logger.error(f"Error in servo command: {e}")
-                    
-                    thread = threading.Thread(target=servo_command_thread, daemon=True)
-                    thread.start()
-                    
-                    # Acknowledge command received
-                    self.socketio.emit('backend_message', {
-                        'type': 'servo_command_sent',
-                        'channel': channel,
-                        'position': position,
-                        'timestamp': time.time()
-                    }, room=client_sid)
-                else:
-                    self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
-                    
-            except Exception as e:
-                logger.error(f"Servo command error: {e}")
-                self.socketio.emit('error', {'message': str(e)}, room=client_sid)
-
     def _send_initial_data_to_client(self, client_sid):
         """Send initial data when client connects"""
         try:
@@ -828,64 +623,6 @@ class DroidDeckWebServer:
         except Exception as e:
             logger.error(f"Error sending initial data: {e}")
         
-    def _handle_nema_enable(self, client_sid, data):
-            """Handle NEMA enable/disable command"""
-            try:
-                enabled = data.get('enabled', True)
-                logger.info(f"Web UI requesting NEMA {'enable' if enabled else 'disable'}")
-                
-                if self.backend and hasattr(self.backend, 'hardware_service'):
-                    import threading
-                    
-                    def nema_enable_thread():
-                        import asyncio
-                        try:
-                            
-                            result = self._run_backend(
-                                self.backend.hardware_service.handle_stepper_command({
-                                    'command': 'enable' if enabled else 'disable'
-                                })
-                            )
-                            
-                            logger.info(f"NEMA enable command executed: {result}")
-                            
-                            # Send response back to client
-                            if result and result.get('success'):
-                                self.socketio.emit('backend_message', {
-                                    'type': 'nema_enable_response',
-                                    'success': True,
-                                    'enabled': enabled,
-                                    'message': result.get('message', ''),
-                                    'timestamp': time.time()
-                                })
-                            else:
-                                self.socketio.emit('backend_message', {
-                                    'type': 'nema_enable_response',
-                                    'success': False,
-                                    'enabled': not enabled,  # Revert on failure
-                                    'message': result.get('message', 'Enable command failed'),
-                                    'timestamp': time.time()
-                                })
-                        except Exception as e:
-                            logger.error(f"Error in NEMA enable: {e}")
-                            self.socketio.emit('backend_message', {
-                                'type': 'nema_enable_response',
-                                'success': False,
-                                'enabled': not enabled,
-                                'message': str(e),
-                                'timestamp': time.time()
-                            })
-                    
-                    thread = threading.Thread(target=nema_enable_thread, daemon=True)
-                    thread.start()
-                    
-                else:
-                    self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
-                    
-            except Exception as e:
-                logger.error(f"NEMA enable error: {e}")
-                self.socketio.emit('error', {'message': str(e)}, room=client_sid)
-
     def _handle_get_controller_info(self, client_sid):
         """Get real controller info from backend"""
         try:
@@ -919,7 +656,7 @@ class DroidDeckWebServer:
                     for scene_name, scene_data in self.backend.scene_engine.scenes.items():
                         scenes_data.append({
                             'label': scene_data.get('label', scene_name),
-                            'emoji': scene_data.get('emoji', 'ðŸŽ­'),
+                            'emoji': scene_data.get('emoji', '🎭'),
                             'duration': scene_data.get('duration', 2.0),
                             'categories': scene_data.get('categories', ['Misc']),
                             'audio_enabled': scene_data.get('audio_enabled', False),
@@ -945,351 +682,6 @@ class DroidDeckWebServer:
                 
         except Exception as e:
             logger.error(f"Error getting scenes: {e}")
-
-    def _handle_nema_move_to_position(self, client_sid, data):
-        """Handle NEMA move to position command"""
-        try:
-            position_cm = data.get('position_cm')
-            if position_cm is None:
-                self.socketio.emit('error', {'message': 'Missing position_cm parameter'}, room=client_sid)
-                return
-            
-            logger.info(f"Web UI requesting NEMA move to {position_cm}cm")
-            
-            if self.backend and hasattr(self.backend, 'hardware_service'):
-                import threading
-                
-                def nema_move_thread():
-                    import asyncio
-                    try:
-                        
-                        # Call the stepper command handler
-                        result = self._run_backend(
-                            self.backend.hardware_service.handle_stepper_command({
-                                'command': 'move_to_position',
-                                'position_cm': position_cm
-                            })
-                        )
-                        
-                        logger.info(f"NEMA move command executed: {result}")
-                    except Exception as e:
-                        logger.error(f"Error in NEMA move: {e}")
-                
-                thread = threading.Thread(target=nema_move_thread, daemon=True)
-                thread.start()
-                
-                self.socketio.emit('backend_message', {
-                    'type': 'nema_command_sent',
-                    'command': 'move_to_position',
-                    'position_cm': position_cm,
-                    'timestamp': time.time()
-                }, room=client_sid)
-            else:
-                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
-                
-        except Exception as e:
-            logger.error(f"NEMA move error: {e}")
-            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
-
-    def _handle_nema_home(self, client_sid):
-        """Handle NEMA home command"""
-        try:
-            logger.info("Web UI requesting NEMA home")
-            
-            if self.backend and hasattr(self.backend, 'hardware_service'):
-                import threading
-                
-                def nema_home_thread():
-                    import asyncio
-                    try:
-                        
-                        result = self._run_backend(
-                            self.backend.hardware_service.handle_stepper_command({
-                                'command': 'home'
-                            })
-                        )
-                        
-                        logger.info(f"NEMA home command executed: {result}")
-                    except Exception as e:
-                        logger.error(f"Error in NEMA home: {e}")
-                
-                thread = threading.Thread(target=nema_home_thread, daemon=True)
-                thread.start()
-                
-                self.socketio.emit('backend_message', {
-                    'type': 'nema_command_sent',
-                    'command': 'home',
-                    'timestamp': time.time()
-                }, room=client_sid)
-            else:
-                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
-                
-        except Exception as e:
-            logger.error(f"NEMA home error: {e}")
-            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
-
-    def _handle_nema_start_sweep(self, client_sid, data):
-        """Handle NEMA start sweep command"""
-        try:
-            min_cm = data.get('min_cm', 0)
-            max_cm = data.get('max_cm', 20)
-            normal_speed = data.get('normal_speed', 1000)
-            acceleration = data.get('acceleration', 800)
-            
-            logger.info(f"Web UI requesting NEMA sweep: {min_cm}-{max_cm}cm")
-            
-            if self.backend and hasattr(self.backend, 'hardware_service'):
-                import threading
-                
-                def nema_sweep_thread():
-                    import asyncio
-                    try:
-                        
-                        result = self._run_backend(
-                            self.backend.hardware_service.handle_stepper_command({
-                                'command': 'start_sweep',
-                                'min_cm': min_cm,
-                                'max_cm': max_cm,
-                                'normal_speed': normal_speed,
-                                'acceleration': acceleration
-                            })
-                        )
-                        
-                        logger.info(f"NEMA sweep started: {result}")
-                    except Exception as e:
-                        logger.error(f"Error in NEMA sweep: {e}")
-                
-                thread = threading.Thread(target=nema_sweep_thread, daemon=True)
-                thread.start()
-                
-                self.socketio.emit('backend_message', {
-                    'type': 'nema_sweep_started',
-                    'min_cm': min_cm,
-                    'max_cm': max_cm,
-                    'timestamp': time.time()
-                }, room=client_sid)
-            else:
-                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
-                
-        except Exception as e:
-            logger.error(f"NEMA sweep error: {e}")
-            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
-
-    def _handle_nema_stop_sweep(self, client_sid):
-        """Handle NEMA stop sweep command"""
-        try:
-            logger.info("Web UI requesting NEMA stop sweep")
-            
-            if self.backend and hasattr(self.backend, 'hardware_service'):
-                import threading
-                
-                def nema_stop_thread():
-                    import asyncio
-                    try:
-                        
-                        result = self._run_backend(
-                            self.backend.hardware_service.handle_stepper_command({
-                                'command': 'stop_sweep'
-                            })
-                        )
-                        
-                        logger.info(f"NEMA sweep stopped: {result}")
-                    except Exception as e:
-                        logger.error(f"Error stopping NEMA sweep: {e}")
-                
-                thread = threading.Thread(target=nema_stop_thread, daemon=True)
-                thread.start()
-                
-                self.socketio.emit('backend_message', {
-                    'type': 'nema_sweep_stopped',
-                    'timestamp': time.time()
-                }, room=client_sid)
-            else:
-                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
-                
-        except Exception as e:
-            logger.error(f"NEMA stop sweep error: {e}")
-            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
-
-    def _handle_nema_get_status(self, client_sid):
-        """Handle NEMA get status command"""
-        try:
-            if self.backend and hasattr(self.backend, 'hardware_service'):
-                import threading
-                
-                def nema_status_thread():
-                    import asyncio
-                    try:
-                        
-                        result = self._run_backend(
-                            self.backend.hardware_service.handle_stepper_command({
-                                'command': 'get_status'
-                            })
-                        )
-                        
-                        # Send status back to client
-                        if result and result.get('success'):
-                            status = result.get('status', {})
-                            self.socketio.emit('backend_message', {
-                                'type': 'nema_status',
-                                'status': status,
-                                'timestamp': time.time()
-                            })
-                    except Exception as e:
-                        logger.error(f"Error getting NEMA status: {e}")
-                
-                thread = threading.Thread(target=nema_status_thread, daemon=True)
-                thread.start()
-            else:
-                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
-                
-        except Exception as e:
-            logger.error(f"NEMA get status error: {e}")
-            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
-
-    def _handle_nema_config_update(self, client_sid, data):
-        """Handle NEMA config update command"""
-        try:
-            config = data.get('config', {})
-            logger.info(f"Web UI updating NEMA config: {config}")
-            
-            if self.backend and hasattr(self.backend, 'hardware_service'):
-                import threading
-                
-                def nema_config_thread():
-                    import asyncio
-                    try:
-                        
-                        result = self._run_backend(
-                            self.backend.hardware_service.handle_stepper_command({
-                                'command': 'update_config',
-                                'config': config
-                            })
-                        )
-                        
-                        logger.info(f"NEMA config updated: {result}")
-                    except Exception as e:
-                        logger.error(f"Error updating NEMA config: {e}")
-                
-                thread = threading.Thread(target=nema_config_thread, daemon=True)
-                thread.start()
-                
-                self.socketio.emit('backend_message', {
-                    'type': 'nema_config_updated',
-                    'timestamp': time.time()
-                }, room=client_sid)
-            else:
-                self.socketio.emit('error', {'message': 'Hardware service not available'}, room=client_sid)
-                
-        except Exception as e:
-            logger.error(f"NEMA config update error: {e}")
-            self.socketio.emit('error', {'message': str(e)}, room=client_sid)
-
-    def _handle_emergency_stop(self, client_sid):
-        """Handle emergency stop command - forward to backend"""
-        try:
-            logger.critical("EMERGENCY STOP requested from web UI")
-            
-            if self.backend and hasattr(self.backend, 'hardware_service'):
-                import threading
-                
-                def emergency_stop_thread():
-                    import asyncio
-                    try:
-                        self._run_backend(self.backend.hardware_service.emergency_stop_all())
-                        logger.info("Emergency stop executed successfully")
-                    except Exception as e:
-                        logger.error(f"Error executing emergency stop: {e}")
-                
-                # Execute emergency stop in background thread
-                thread = threading.Thread(target=emergency_stop_thread, daemon=True)
-                thread.start()
-                
-                # Broadcast to all clients immediately
-                self.socketio.emit('backend_message', {
-                    'type': 'emergency_stop',
-                    'source': 'web_ui',
-                    'timestamp': time.time()
-                })
-                
-            else:
-                logger.error("Backend or hardware_service not available for emergency stop")
-                self.socketio.emit('error', {
-                    'message': 'Emergency stop failed - backend not available'
-                }, room=client_sid)
-            
-        except Exception as e:
-            logger.error(f"Emergency stop handler error: {e}")
-            self.socketio.emit('error', {
-                'message': f'Emergency stop error: {str(e)}'
-            }, room=client_sid)
-
-    def _handle_get_controller_config(self, client_sid):
-        """Get controller configuration from backend"""
-        try:
-            config_path = Path("configs/controller_config.json")
-            
-            if config_path.exists():
-                with open(config_path, 'r') as f:
-                    controller_config = json.load(f)
-                
-                logger.info(f"Loaded controller config with {len(controller_config)} mappings")
-                
-                self.socketio.emit('backend_message', {
-                    'type': 'controller_config',
-                    'config': controller_config,
-                    'timestamp': time.time()
-                }, room=client_sid)
-            else:
-                logger.warning("Controller config file not found")
-                self.socketio.emit('backend_message', {
-                    'type': 'controller_config',
-                    'config': {},
-                    'timestamp': time.time()
-                }, room=client_sid)
-            
-        except Exception as e:
-            logger.error(f"Error loading controller config: {e}")
-            self.socketio.emit('backend_message', {
-                'type': 'controller_config',
-                'config': {},
-                'timestamp': time.time()
-            }, room=client_sid)
-
-    def _handle_get_audio_files(self, client_sid):
-        """Get list of available audio files from backend"""
-        try:
-            audio_files = []
-            
-            # Check if backend has audio controller
-            if self.backend and hasattr(self.backend, 'audio_controller'):
-                # Try to get audio files from the audio directory
-                audio_dir = Path("audio")
-                if audio_dir.exists() and audio_dir.is_dir():
-                    # Get all audio files
-                    for ext in ['*.mp3', '*.wav', '*.ogg', '*.m4a']:
-                        audio_files.extend([f.name for f in audio_dir.glob(ext)])
-            
-            # Sort alphabetically
-            audio_files.sort()
-            
-            logger.info(f"Found {len(audio_files)} audio files")
-            
-            self.socketio.emit('backend_message', {
-                'type': 'audio_files',
-                'files': audio_files,
-                'count': len(audio_files),
-                'timestamp': time.time()
-            }, room=client_sid)
-            
-        except Exception as e:
-            logger.error(f"Error getting audio files: {e}")
-            self.socketio.emit('backend_message', {
-                'type': 'audio_files',
-                'files': [],
-                'count': 0,
-                'timestamp': time.time()
-            }, room=client_sid)     
 
     def _handle_system_status(self, client_sid):
         """Get real system status from backend including hardware status"""
@@ -1358,21 +750,6 @@ class DroidDeckWebServer:
         except Exception as e:
             logger.error(f"Error getting system status: {e}")
 
-    def _handle_get_servo_positions(self, client_sid, data):
-        """Get servo positions from backend"""
-        try:
-            maestro = data.get('maestro', 1)
-            
-            self.socketio.emit('backend_message', {
-                'type': 'all_servo_positions',
-                'maestro': maestro,
-                'positions': {},
-                'timestamp': time.time()
-            }, room=client_sid)
-            
-        except Exception as e:
-            logger.error(f"Error getting servo positions: {e}")
-    
     def start(self):
         """Start the web server in a separate thread"""
         if self.running:

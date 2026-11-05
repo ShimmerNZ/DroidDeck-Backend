@@ -159,6 +159,7 @@ function handleBackendMessage(data) {
             loadScenes();
             break;
         case 'controller_config':
+        case 'controller_config_data':
             if (data.config) {
                 controllerMappings = data.config;
                 updateMappingList();
