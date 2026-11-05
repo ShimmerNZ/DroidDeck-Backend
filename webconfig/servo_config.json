@@ -1,0 +1,88 @@
+{
+  "nema": {
+    "lead_screw_pitch": 8.0,
+    "lead_screw_length": 20.0,
+    "homing_speed": 800,
+    "normal_speed": 4800,
+    "acceleration": 5163,
+    "min_position": 5.0,
+    "max_position": 15.0
+  },
+  "m2_ch0": {
+    "home": 1529,
+    "accel": 0
+  },
+  "m2_ch1": {
+    "home": 1520,
+    "accel": 0
+  },
+  "m2_ch2": {
+    "home": 992
+  },
+  "m2_ch3": {
+    "home": 992
+  },
+  "m2_ch4": {
+    "home": 992
+  },
+  "m2_ch5": {
+    "home": 992
+  },
+  "m2_ch6": {
+    "home": 992
+  },
+  "m2_ch7": {
+    "home": 992
+  },
+  "m2_ch8": {
+    "home": 992
+  },
+  "m2_ch9": {
+    "home": 992
+  },
+  "m2_ch10": {
+    "home": 992
+  },
+  "m2_ch11": {
+    "home": 992
+  },
+  "m2_ch12": {
+    "home": 992
+  },
+  "m2_ch13": {
+    "home": 992
+  },
+  "m2_ch14": {
+    "home": 992
+  },
+  "m2_ch15": {
+    "home": 992
+  },
+  "m2_ch16": {
+    "home": 992
+  },
+  "m2_ch17": {
+    "home": 992
+  },
+  "m2_ch18": {
+    "home": 992
+  },
+  "m2_ch19": {
+    "home": 992
+  },
+  "m2_ch20": {
+    "home": 992
+  },
+  "m2_ch21": {
+    "home": 992
+  },
+  "m2_ch22": {
+    "home": 992
+  },
+  "m2_ch23": {
+    "home": 992
+  },
+  "m1_ch7": {
+    "accel": 0
+  }
+}

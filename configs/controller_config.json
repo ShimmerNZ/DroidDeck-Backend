@@ -49,14 +49,16 @@
     {
       "behavior": "differential_tracks",
       "left_servo": "m2_ch12",
-      "right_servo": "m2_ch13"
+      "right_servo": "m2_ch13",
+      "invert_left": true
     }
   ],
   "left_stick_y": [
     {
       "behavior": "differential_tracks",
       "left_servo": "m2_ch12",
-      "right_servo": "m2_ch13"
+      "right_servo": "m2_ch13",
+      "invert_left": true
     }
   ],
   "left_trigger": [
