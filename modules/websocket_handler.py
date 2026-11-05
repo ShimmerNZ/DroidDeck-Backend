@@ -1457,6 +1457,12 @@ class WebSocketMessageHandler:
             })
     
     async def _get_bottango_scenes(self) -> list:
+        """Return available Bottango scenes. Every scene file is read and
+        parsed, so the scan runs on a worker thread to keep the event loop
+        (and the 50Hz motion mixer) free."""
+        return await asyncio.to_thread(self._scan_bottango_scenes)
+
+    def _scan_bottango_scenes(self) -> list:
             """Return available Bottango scene files from the scenes/ folder.
 
             configs/scenes_registry.json can be stale if scenes are copied/created after startup.

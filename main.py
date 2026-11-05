@@ -354,6 +354,28 @@ class WALLEBackend:
             except Exception as e:
                 logger.error(f"Control link watchdog error: {e}")
 
+    async def _home_stepper_after_release(self, stepper) -> bool:
+        """Home the NEMA after failsafe release and leave it enabled.
+
+        home_motor() restores the motor's disabled flag from before homing,
+        which after failsafe is 'disabled', so the motor is enabled explicitly
+        here once homing succeeds - unless failsafe was re-engaged meanwhile.
+        """
+        try:
+            success = await stepper.home_motor()
+        except Exception as e:
+            logger.error(f"NEMA homing error: {e}")
+            return False
+        if not success:
+            logger.warning("NEMA homing failed - motor remains disabled")
+            return False
+        if self.failsafe_active:
+            logger.info("NEMA homed but failsafe was re-engaged - motor stays disabled")
+            return False
+        stepper.enable_motor()
+        logger.info("NEMA homing successful - motor enabled")
+        return True
+
     async def toggle_failsafe(self, enable: bool) -> Dict[str, Any]:
         """Toggle failsafe mode"""
         try:
@@ -411,18 +433,18 @@ class WALLEBackend:
                         nema_status["homed"] = True
                     else:
                         logger.info("NEMA not homed - starting homing sequence")
-                        try:
-                            success = await stepper.home_motor()
-                            if success:
-                                logger.info("NEMA homing successful")
-                                nema_status["enabled"] = True
-                                nema_status["homed"] = True
-                            else:
-                                logger.warning("NEMA homing failed - motor remains disabled")
+                        if getattr(stepper, "hardware_timed", False):
+                            # Hardware-timed homing doesn't block, so run it in the
+                            # background: failsafe release (and the Deck connection
+                            # that sent it) shouldn't wait the several seconds it takes
+                            spawn(self._home_stepper_after_release(stepper), name="nema_homing")
+                            nema_status["homing"] = True
+                        else:
+                            success = await self._home_stepper_after_release(stepper)
+                            nema_status["enabled"] = success
+                            nema_status["homed"] = success
+                            if not success:
                                 nema_status["error"] = "Homing failed"
-                        except Exception as e:
-                            logger.error(f"NEMA homing error: {e}")
-                            nema_status["error"] = str(e)
 
                 self.failsafe_active = False
                 self.state = SystemState.NORMAL

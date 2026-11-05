@@ -346,6 +346,16 @@ class NEMA23Controller:
 
     def disable_motor(self):
         """Disable the stepper motor"""
+        if self._wave and self._wave_busy and not self._emergency:
+            # A hardware-timed move would keep playing its queued pulses into
+            # the disabled driver and finish believing it reached its target.
+            # Cut them now so the move ends with the position actually reached
+            self._emergency = True
+            self._cut_time = time.monotonic()
+            try:
+                self._wave.cancel()
+            except Exception as e:
+                logger.error(f"Failed to cancel step wave: {e}")
         if self.gpio_initialized:
             set_output(self.config.enable_pin, True)  # TB6600 disables on HIGH
             self.intentionally_disabled = True
