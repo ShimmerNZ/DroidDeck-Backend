@@ -97,6 +97,10 @@ def _read_mjpeg_part(raw):
     return bytes(data)
 
 
+# Time for the ESP32 to notice the stream closed and return to serving requests
+SETTINGS_PAUSE_SECONDS = 0.5
+
+
 class CameraProxy:
     def __init__(self):
         self.load_config()
@@ -115,16 +119,16 @@ class CameraProxy:
         self.connected_to_esp32 = False
         self.stream_thread = None
 
-        # ESP32 camera settings with correct parameter names
+        # ESP32 camera settings, matching the sketch's OV3660 defaults until
+        # the real values are read from the camera
         self.esp32_settings = {
-            "resolution": 6,       # SVGA (800x600)
-            "quality": 12,         # JPEG quality (4-63, lower = higher quality)
-            "brightness": 0,       # -2 to 2
+            "resolution": 6,       # Index into the ESP32's resolution table: 6 = VGA (640x480)
+            "quality": 10,         # JPEG quality (4-25, lower = higher quality)
+            "brightness": 1,       # -2 to 2
             "contrast": 0,         # -2 to 2
-            "saturation": 0,       # -2 to 2
+            "saturation": -2,      # -2 to 2
             "h_mirror": False,     # Horizontal mirror
-            "v_flip": False,       # Vertical flip
-            "xclk_freq": 12        # Clock frequency (8-20 MHz)
+            "v_flip": True         # Vertical flip
         }
 
         # Stream control
@@ -160,7 +164,7 @@ class CameraProxy:
             "max_connection_errors": 5,
             "frame_quality": 90,
             "auto_start_stream": False,
-            "target_fps": 25,         # Optimized for smooth delivery
+            "target_fps": 30,         # Delivery cap per client
             "chunk_size": 32768,      # 32KB chunks
             "enable_stats": True,
             "max_frame_age": 0.2      # Skip frames older than 200ms
@@ -227,7 +231,25 @@ class CameraProxy:
         return self.esp32_settings
 
     def update_esp32_settings(self, settings):
-        """Update ESP32 camera settings using correct endpoints"""
+        """Update ESP32 camera settings, pausing the stream while they apply.
+
+        The ESP32's web server is busy inside its stream loop while the proxy
+        is pulling frames, so it cannot answer a settings request until that
+        stream is closed. The stream is restarted afterwards if it was running.
+        """
+        resume_stream = self.streaming_enabled
+        if resume_stream:
+            logger.info("Pausing camera stream to apply settings")
+            self.stop_stream()
+            time.sleep(SETTINGS_PAUSE_SECONDS)
+        try:
+            return self._post_esp32_settings(settings)
+        finally:
+            if resume_stream:
+                self.start_stream()
+
+    def _post_esp32_settings(self, settings):
+        """Send settings to the ESP32"""
         success_count = 0
         total_settings = len(settings)
         failed_settings = []
