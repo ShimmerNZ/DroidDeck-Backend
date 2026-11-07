@@ -13,6 +13,12 @@ from dataclasses import dataclass
 from enum import Enum
 from modules.task_utils import spawn
 
+# Crowd mode caps track speed to a percentage of full speed
+CROWD_SPEED_MIN = 10
+CROWD_SPEED_MAX = 100
+CROWD_SPEED_STEP = 5
+DEFAULT_CROWD_SPEED_PERCENT = 60
+
 logger = logging.getLogger(__name__)
 
 class BehaviorType(Enum):
@@ -686,6 +692,13 @@ class DifferentialTracksHandler(BehaviorHandler):
             if config.get('invert_right', False):
                 right_speed = -right_speed
 
+            # Crowd mode scales both tracks equally, so steering feels the
+            # same at a lower top speed and centre stays exactly at stop
+            if self.processor and hasattr(self.processor, 'drive_speed_factor'):
+                factor = self.processor.drive_speed_factor()
+                left_speed *= factor
+                right_speed *= factor
+
             has_mixer =((self.processor and hasattr(self.processor, 'motion_mixer') and self.processor.motion_mixer) or (self.processor and hasattr(self.processor, 'joystick_layer') and self.processor.joystick_layer))
 
             # Change threshold only applies to direct hardware commands. When
@@ -951,6 +964,15 @@ class ImuToggleHandler(BehaviorHandler):
         return True
 
 
+def normalise_crowd_speed(percent: Any) -> int:
+    """Clamp a crowd speed percentage to the allowed range and step"""
+    try:
+        value = int(round(float(percent) / CROWD_SPEED_STEP) * CROWD_SPEED_STEP)
+    except (TypeError, ValueError):
+        return DEFAULT_CROWD_SPEED_PERCENT
+    return max(CROWD_SPEED_MIN, min(CROWD_SPEED_MAX, value))
+
+
 class ControllerInputProcessor:
     """Main controller input processing system"""
 
@@ -960,6 +982,11 @@ class ControllerInputProcessor:
         self.stepper_controller = stepper_controller
         self.backend = backend_ref
         self.motion_mixer = motion_mixer
+
+        # Crowd mode is always on at start-up; the speed limit is loaded
+        # from hardware_config.json by the backend
+        self.crowd_mode = True
+        self.crowd_speed_percent = DEFAULT_CROWD_SPEED_PERCENT
 
         # Load servo config for min/max/home lookups
         self.servo_config = self._load_servo_config()
@@ -1174,6 +1201,22 @@ class ControllerInputProcessor:
         }
 
         logger.info("Controller input processor initialized")
+
+    def set_drive_limit(self, crowd_mode: Optional[bool] = None,
+                        crowd_speed_percent: Optional[Any] = None) -> Dict[str, Any]:
+        """Update crowd mode and/or its speed limit; returns the new state"""
+        if crowd_mode is not None:
+            self.crowd_mode = bool(crowd_mode)
+        if crowd_speed_percent is not None:
+            self.crowd_speed_percent = normalise_crowd_speed(crowd_speed_percent)
+        return self.drive_limit_state()
+
+    def drive_speed_factor(self) -> float:
+        """Multiplier applied to track speed: 1.0 at full speed"""
+        return self.crowd_speed_percent / 100.0 if self.crowd_mode else 1.0
+
+    def drive_limit_state(self) -> Dict[str, Any]:
+        return {"crowd_mode": self.crowd_mode, "crowd_speed_percent": self.crowd_speed_percent}
 
     def _load_servo_home_positions(self) -> Dict[str, int]:
         """Load servo home positions from controller_config.json center_offset values"""

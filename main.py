@@ -215,7 +215,11 @@ class WALLEBackend:
             motion_mixer=self.motion_mixer
         )
 
-
+        # Crowd mode starts on every time, at the saved speed limit
+        crowd_speed = config_dict.get("hardware", {}).get("drive", {}).get("crowd_speed_percent")
+        drive_state = self.controller_input_processor.set_drive_limit(
+            crowd_mode=True, crowd_speed_percent=crowd_speed)
+        logger.info(f"Crowd mode ON at {drive_state['crowd_speed_percent']}% of full track speed")
 
         # WebSocket message handler
         self.websocket_handler = WebSocketMessageHandler(
@@ -1012,6 +1016,7 @@ class WALLEBackend:
                     "battery_voltage": reading.battery_voltage,
                     "battery_soc": self.telemetry_system.get_battery_estimate().get("soc_percent"),
                     "active_alerts": self.telemetry_system.get_active_alerts(),
+                    "drive_mode": self.controller_input_processor.drive_limit_state(),
                     "sabertooth_temp": reading.sabertooth_temp,
                     "current_tracks": reading.current_tracks,
                     "current_total": reading.current_total,

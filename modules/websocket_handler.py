@@ -114,6 +114,8 @@ class WebSocketMessageHandler:
             "set_system_volume": self._handle_set_system_volume,
             "get_battery_config": self._handle_get_battery_config,
             "save_battery_config": self._handle_save_battery_config,
+            "get_drive_mode": self._handle_get_drive_mode,
+            "set_drive_mode": self._handle_set_drive_mode,
             
             # Gesture detection
             "gesture": self._handle_gesture,
@@ -1903,6 +1905,57 @@ class WebSocketMessageHandler:
         except Exception as e:
             logger.error(f"Save battery config error: {e}")
             await self._send_error_response(websocket, f"Failed to save battery config: {e}")
+
+    def _drive_mode_message(self) -> Optional[dict]:
+        """Current crowd mode state, or None if the input processor is missing"""
+        processor = self.controller_input_processor
+        if not processor or not hasattr(processor, "drive_limit_state"):
+            return None
+        return {"type": "drive_mode", **processor.drive_limit_state(), "timestamp": time.time()}
+
+    async def _handle_get_drive_mode(self, websocket, data: Dict[str, Any]):
+        """Send the crowd mode state to the requesting client"""
+        message = self._drive_mode_message()
+        if message is None:
+            await self._send_error_response(websocket, "Drive control not available")
+            return
+        await self._send_websocket_message(websocket, message)
+
+    async def _handle_set_drive_mode(self, websocket, data: Dict[str, Any]):
+        """Apply crowd mode and/or its speed limit live, saving the limit.
+
+        Crowd mode itself is not saved: it is always on at start-up.
+        """
+        processor = self.controller_input_processor
+        if not processor or not hasattr(processor, "set_drive_limit"):
+            await self._send_error_response(websocket, "Drive control not available")
+            return
+        try:
+            previous_percent = processor.crowd_speed_percent
+            state = processor.set_drive_limit(
+                crowd_mode=data.get("crowd_mode"),
+                crowd_speed_percent=data.get("crowd_speed_percent"),
+            )
+            mode_text = f"ON at {state['crowd_speed_percent']}%" if state["crowd_mode"] else "OFF (full speed)"
+            logger.info(f"Crowd mode {mode_text}")
+
+            if state["crowd_speed_percent"] != previous_percent:
+                hw_config = await self.config_store.aload("hardware_config", {})
+                hardware = hw_config.setdefault("hardware", {})
+                drive = hardware.get("drive")
+                hardware["drive"] = {**(drive if isinstance(drive, dict) else {}),
+                                     "crowd_speed_percent": state["crowd_speed_percent"]}
+                if not await self.config_store.asave("hardware_config", hw_config):
+                    logger.error("Crowd speed limit applied but not saved to hardware_config.json")
+
+            message = self._drive_mode_message()
+            if hasattr(self.backend, "broadcast_message"):
+                await self.backend.broadcast_message(message)
+            else:
+                await self._send_websocket_message(websocket, message)
+        except Exception as e:
+            logger.error(f"Set drive mode error: {e}")
+            await self._send_error_response(websocket, f"Failed to set drive mode: {e}")
 
     async def _handle_set_system_volume(self, websocket, data: Dict[str, Any]):
         """Handle system volume change request"""
