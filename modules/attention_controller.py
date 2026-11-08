@@ -450,10 +450,10 @@ class LoggingGazeOutput(GazeOutput, _HeadOnlyGaze):
 
 class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
     """Gaze output that drives the real Head Pan/Head Tilt servos through
-    the motion mixer, as a persistent override layer sitting above the
-    (additive) joystick layer and below scene playback - so a scene still
-    fades in from wherever the head is currently held, and an idle,
-    centred joystick can never fight the held look direction.
+    the motion mixer, as a persistent additive layer like the joystick: the
+    look direction is an offset from home, so a scene's head animation plays
+    around wherever the head is looking instead of from centre, and an
+    idle, centred joystick adds nothing to the held look direction.
 
     Uses the same _HeadOnlyGaze state machine as LoggingGazeOutput, so
     behaviour already checked in dry-run carries over unchanged; only
@@ -468,9 +468,8 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
     # dispatched the same way the joystick is - configured speed/accel kept
     # applied on the Maestro - which is what actually lets
     # servo_config.json's speed/accel produce eased, non-jerky motion
-    # here. Still comfortably below scenes (priority 10),
-    # so a scene fading in still overrides it correctly; joystick being
-    # additive means the tie in priority value doesn't matter to it.
+    # here. Being additive, its priority does not affect blending with
+    # scenes or the joystick.
     LAYER_PRIORITY = 0
 
     def __init__(self, mixer: Any, emit: Callable[[str], None],
@@ -487,7 +486,7 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
         self._layer = MotionLayer(
             name=self.LAYER_NAME,
             priority=self.LAYER_PRIORITY,
-            blend_mode=BlendMode.OVERRIDE,
+            blend_mode=BlendMode.ADDITIVE,
             weight=1.0,
             target_weight=1.0,
             auto_remove=False,

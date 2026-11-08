@@ -1265,7 +1265,9 @@ class MotionMixer:
             for ch in locked_channels:
                 state = self.constraints.states.get(ch)
                 current_pos = state.last_output if (state and state.initialized) else self.constraints.get_home_position(ch)
-                hold_layer.set_channel(ch, current_pos)
+                # Additive layers (joystick, gaze) are still added on top of
+                # the hold, so leave their offset out of the snapshot
+                hold_layer.set_channel(ch, current_pos - self._additive_offset(ch))
             hold_layer.set_immediate(1.0)
             hold_layer.fade_out(crossfade_in)
             await self.add_layer(hold_layer)
@@ -1512,6 +1514,23 @@ class MotionMixer:
         )
         self.stats["active_channels"] = active_channels
         self.stats["blend_time_ms"] = blend_time * 0.1 + self.stats["blend_time_ms"] * 0.9
+
+    def _additive_offset(self, channel_id: str) -> float:
+        """Total offset from home the additive layers currently add to a channel"""
+        joystick_only = channel_id in self._protected_channels
+        offset = 0.0
+        home = self.constraints.get_home_position(channel_id)
+        for layer in self.layers.values():
+            if layer.blend_mode != BlendMode.ADDITIVE or layer.weight <= 0.001:
+                continue
+            if joystick_only and layer is not self.joystick_layer:
+                continue
+            if channel_id not in layer.channel_values:
+                continue
+            if layer.channel_mask and channel_id not in layer.channel_mask:
+                continue
+            offset += (layer.channel_values[channel_id] - home) * layer.weight
+        return offset
 
     def _blend_all_channels(self) -> Dict[str, float]:
         """
