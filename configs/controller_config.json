@@ -3,8 +3,8 @@
     {
       "behavior": "nema_stepper",
       "min_position": 1.0,
-      "max_position": 13.0,
-      "normal_speed": 4800,
+      "max_position": 12.0,
+      "normal_speed": 4500,
       "acceleration": 5163,
       "nema_behavior": "toggle_positions"
     }
@@ -80,7 +80,8 @@
     {
       "behavior": "direct_servo",
       "target": "m1_ch1",
-      "center_offset": 44
+      "center_offset": 84,
+      "expo":0.6
     }
   ],
   "right_stick_y": [
@@ -88,7 +89,8 @@
       "behavior": "direct_servo",
       "target": "m1_ch0",
       "invert": false,
-      "center_offset": -401
+      "center_offset": -461,
+      "expo":0.6
     }
   ],
   "right_trigger": [
@@ -109,19 +111,16 @@
   "shoulder_left": [
     {
       "behavior": "toggle_servo",
-      "target": "m1_ch2",
-      "position_1": 1552,
-      "position_2": 2200,
-      "trigger_mode": "hold"
+      "target": "m2_ch2",
+      "position_1": 1172,
+      "position_2": 1350,
+      "trigger_mode": "toggle"
     }
   ],
   "shoulder_right": [
     {
-      "behavior": "toggle_servo",
-      "target": "m1_ch3",
-      "trigger_mode": "hold",
-      "position_1": 1330,
-      "position_2": 912
+      "behavior": "system_control",
+      "system_action": "select"
     }
   ],
   "stick_left_click": [

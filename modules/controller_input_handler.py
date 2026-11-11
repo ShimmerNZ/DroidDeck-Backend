@@ -80,6 +80,22 @@ class BehaviorHandler:
         pulse = int(center + value * 500)
         return max(992, min(2000, pulse))
 
+    @staticmethod
+    def _apply_expo(value: float, expo: float) -> float:
+        """Soften the stick around centre while keeping full travel at the ends.
+
+        expo 0 is linear; expo 1 is fully cubic. Blends (1 - expo) * v + expo * v^3,
+        so small deflections give fine movement and full deflection still reaches
+        the end of the servo range.
+        """
+        try:
+            expo = max(0.0, min(1.0, float(expo)))
+        except (TypeError, ValueError):
+            return value
+        if expo == 0.0:
+            return value
+        return (1.0 - expo) * value + expo * value * value * value
+
     def _set_mixer_target(self, channel: str, pulse: float) -> bool:
         """Route a target to the MotionMixer joystick layer if available.
         Returns True if routed to mixer (or joystick layer), False if caller should fall back to direct hardware.
@@ -126,8 +142,9 @@ class DirectServoHandler(BehaviorHandler):
             if channel_locked and not has_mixer:
                 return True
 
-            # Apply inversion and sensitivity
+            # Apply inversion, expo curve and sensitivity
             value = -controller_input.raw_value if invert else controller_input.raw_value
+            value = self._apply_expo(value, config.get('expo', 0.0))
             value *= sensitivity
 
             # Change threshold only applies to direct hardware commands.
