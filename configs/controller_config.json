@@ -81,7 +81,7 @@
       "behavior": "direct_servo",
       "target": "m1_ch1",
       "center_offset": 84,
-      "expo":0.6
+      "expo": 0.6
     }
   ],
   "right_stick_y": [
@@ -89,8 +89,8 @@
       "behavior": "direct_servo",
       "target": "m1_ch0",
       "invert": false,
-      "center_offset": -461,
-      "expo":0.6
+      "center_offset": -371,
+      "expo": 0.6
     }
   ],
   "right_trigger": [
@@ -137,17 +137,11 @@
       "servos": [
         {
           "channel": "m1_ch2",
-          "invert": false,
-          "min_pulse": 992,
-          "home_pulse": 1552,
-          "max_pulse": 2200
+          "invert": false
         },
         {
           "channel": "m1_ch3",
-          "invert": false,
-          "min_pulse": 992,
-          "home_pulse": 1330,
-          "max_pulse": 2000
+          "invert": false
         }
       ]
     }

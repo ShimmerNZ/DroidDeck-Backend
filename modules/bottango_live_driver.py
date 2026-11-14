@@ -3,7 +3,7 @@
 """
 Bottango Live Network Driver
 
-Implements the Bottango Driver API (API version 8) as a WebSocket client.
+Implements the Bottango Driver API (driver version 0.8.0e1) as a WebSocket client.
 The Pi connects outbound to the Bottango WebSocket server running on the
 Windows PC, acting as a hardware driver.
 
@@ -39,13 +39,23 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DRIVER_VERSION  = "CUSTOM8"       # API version 8
+DRIVER_VERSION  = "0.8.0e1"       # Must match the driver version Bottango expects
 DEFAULT_HOST    = "10.1.1.5"      # Bottango Windows PC IP
 DEFAULT_PORT    = 59225            # Bottango network driver port
 SCALED_INT_MAX  = 8192             # Bottango Scaled Int range (0-8192)
 API_READY       = "\nOK\n"        # "ready for next command" token
 BOOT_MSG        = "BOOT\n"        # Sent immediately on connection open
 RECONNECT_DELAY = 5.0              # Seconds between reconnect attempts
+
+# Modules response sent one line at a time after an hMOD request.
+# CMD_SRC,0 = live control only.
+# CMD_CFG = max command length, max buffered curves, sync commands supported,
+# motor signal bit width.
+MODULE_RESPONSES = (
+    "MOD,CMD_SRC,0\n",
+    "MOD,CMD_CFG,247,8,0,32\n",
+    "MOD,EoM\n",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -174,12 +184,12 @@ class BottangoLiveDriver:
         self._servo_config = self._load_servo_config(cfg_path)
 
         self._effectors: dict = {}
+        self._modules_pending: list = []
         self._sync_time_ms: float = 0.0
         self._sync_wall_ms: float = 0.0
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._blocked_track_channels: set = set()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._tick_task = None
         self._writer = None
@@ -275,6 +285,7 @@ class BottangoLiveDriver:
     async def _run_session(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle a single connected session with Bottango."""
         self._effectors.clear()
+        self._modules_pending = []
         self._sync_time_ms = 0.0
         self._sync_wall_ms = time.monotonic() * 1000.0
 
@@ -324,6 +335,10 @@ class BottangoLiveDriver:
         try:
             if verb == "hRQ":
                 await self._handle_handshake(parts, writer)
+            elif verb == "hMOD":
+                await self._handle_modules_request(writer)
+            elif verb == "OK":
+                await self._handle_modules_continue(writer)
             elif verb == "tSYN":
                 await self._handle_time_sync(parts, writer)
             elif verb == "STOP":
@@ -366,10 +381,28 @@ class BottangoLiveDriver:
 
     async def _handle_handshake(self, parts: list, writer: asyncio.StreamWriter):
         random_code = parts[1].strip().lstrip("h") if len(parts) > 1 else "0"
-        response = f"btngoHSK,{DRIVER_VERSION},{random_code},1\n"
+        response = f"btngoHSK,{DRIVER_VERSION},{random_code}\n"
+        self._modules_pending = []
         await self._send(writer, response)
         await self._send_ready(writer)
         logger.info(f"Bottango handshake complete (code={random_code})")
+
+    async def _handle_modules_request(self, writer: asyncio.StreamWriter):
+        """Start the modules response. Each line is sent after a ready token."""
+        self._modules_pending = list(MODULE_RESPONSES)
+        await self._send_ready(writer)
+        await self._send_next_module(writer)
+
+    async def _handle_modules_continue(self, writer: asyncio.StreamWriter):
+        """Bottango acknowledged the previous modules line, send the next one."""
+        await self._send_ready(writer)
+        await self._send_next_module(writer)
+
+    async def _send_next_module(self, writer: asyncio.StreamWriter):
+        if self._modules_pending:
+            line = self._modules_pending.pop(0)
+            await self._send(writer, line)
+            logger.debug(f"Modules response sent: {line.strip()}")
 
     async def _handle_time_sync(self, parts: list, writer: asyncio.StreamWriter):
         if len(parts) > 1:
@@ -508,19 +541,7 @@ class BottangoLiveDriver:
         except asyncio.CancelledError:
             pass
 
-    def _is_track_channel(self, channel_key: str) -> bool:
-        """Track channels are controller-only and never driven by Bottango"""
-        backend = getattr(self.hardware_service, "backend_reference", None)
-        if backend is not None and hasattr(backend, "is_track_channel"):
-            return backend.is_track_channel(channel_key)
-        return channel_key in ("m2_ch12", "m2_ch13")
-
     async def _send_servo(self, channel_key: str, pw: int):
-        if self._is_track_channel(channel_key):
-            if channel_key not in self._blocked_track_channels:
-                self._blocked_track_channels.add(channel_key)
-                logger.warning(f"Bottango live output to track channel {channel_key} ignored - tracks are controller-only")
-            return
         logger.debug(f"send_servo: {channel_key} -> {pw} us")
         if self.hardware_service:
             try:

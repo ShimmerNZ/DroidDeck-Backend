@@ -28,7 +28,7 @@
     },
     "audio": {
       "directory": "audio",
-      "volume": 0.3
+      "volume": 0.75
     },
     "bottango": {
       "host": "10.1.1.5"

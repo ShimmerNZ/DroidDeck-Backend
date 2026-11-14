@@ -883,10 +883,10 @@ class ImuTiltHandler(BehaviorHandler):
     Config mirrors multi_servo: a 'servos' list where each entry has:
         channel   — servo channel key (e.g. 'm1_ch1')
         invert    — bool, reverses direction for that servo
-        min_pulse — optional override (falls back to servo_config.json)
-        max_pulse — optional override
 
-    The raw_value (-1 → +1) is mapped across the full min→max range of each
+    Min, home and max for each channel always come from the live servo config
+    held by the processor, so a servo settings save takes effect immediately.
+    The raw_value (-1 → +1) is mapped from home out to min or max of each
     servo so left/right eye servos can respond oppositely by inverting one.
     """
 
@@ -894,14 +894,6 @@ class ImuTiltHandler(BehaviorHandler):
         super().__init__(*args, **kwargs)
         self.last_sent_values = {}
         self.change_threshold = 0.01
-        self.servo_config = {}
-        try:
-            import json
-            with open('configs/servo_config.json', 'r') as f:
-                self.servo_config = json.load(f)
-        except Exception as e:
-            if self.logger:
-                self.logger.warning(f"ImuTiltHandler: could not load servo_config.json: {e}")
 
     async def process(self, controller_input: ControllerInput, config: Dict[str, Any]) -> bool:
         try:
@@ -921,15 +913,11 @@ class ImuTiltHandler(BehaviorHandler):
                 if not channel:
                     continue
 
-                if 'min_pulse' in servo_info and 'max_pulse' in servo_info:
-                    min_pulse  = servo_info['min_pulse']
-                    max_pulse  = servo_info['max_pulse']
-                    home_pulse = servo_info.get('home_pulse', (min_pulse + max_pulse) // 2)
-                else:
-                    servo_cfg  = self.servo_config.get(channel, {})
-                    min_pulse  = servo_cfg.get('min', 992)
-                    max_pulse  = servo_cfg.get('max', 2000)
-                    home_pulse = servo_cfg.get('home', (min_pulse + max_pulse) // 2)
+                servo_config = self.processor.servo_config if self.processor else {}
+                servo_cfg  = servo_config.get(channel, {})
+                min_pulse  = servo_cfg.get('min', 992)
+                max_pulse  = servo_cfg.get('max', 2000)
+                home_pulse = servo_cfg.get('home', (min_pulse + max_pulse) // 2)
 
                 center      = (min_pulse + max_pulse) // 2
                 pulse_range = (max_pulse - min_pulse) // 2
