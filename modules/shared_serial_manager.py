@@ -152,7 +152,7 @@ class BatchCommandBuilder:
         )
 
 
-class EnhancedSharedSerialPortManager:
+class SharedSerialPortManager:
     """
     Shared serial port manager with priority queueing, batch commands,
     realtime coalescing, and automatic reconnection.
@@ -783,12 +783,12 @@ class EnhancedSharedSerialPortManager:
         return stats
 
 
-class EnhancedMaestroControllerShared:
+class MaestroControllerShared:
     """
     Maestro controller using a shared serial manager, with batch command support
     """
 
-    def __init__(self, device_id: str, device_number: int, shared_manager: EnhancedSharedSerialPortManager):
+    def __init__(self, device_id: str, device_number: int, shared_manager: SharedSerialPortManager):
         self.device_id = device_id
         self.device_number = device_number
         self.shared_manager = shared_manager
@@ -1139,15 +1139,13 @@ class EnhancedMaestroControllerShared:
 # ================== COMPATIBILITY LAYER ==================
 # These aliases maintain backward compatibility with existing code
 
-SharedSerialPortManager = EnhancedSharedSerialPortManager
-MaestroControllerShared = EnhancedMaestroControllerShared
 
 # Global manager registry for compatibility functions
-_global_managers: Dict[Tuple[str, int], EnhancedSharedSerialPortManager] = {}
+_global_managers: Dict[Tuple[str, int], SharedSerialPortManager] = {}
 _manager_lock = threading.Lock()
 
 
-def get_shared_manager(port: str, baud_rate: int = 57600) -> EnhancedSharedSerialPortManager:
+def get_shared_manager(port: str, baud_rate: int = 57600) -> SharedSerialPortManager:
     """
     Get or create a shared serial manager (compatibility function)
 
@@ -1156,14 +1154,14 @@ def get_shared_manager(port: str, baud_rate: int = 57600) -> EnhancedSharedSeria
         baud_rate: Baud rate for communication
 
     Returns:
-        Enhanced shared serial port manager instance
+        Shared serial port manager instance
     """
     manager_key = (port, baud_rate)
 
     with _manager_lock:
         if manager_key not in _global_managers:
             logger.info(f"Creating shared manager: {port} @ {baud_rate}")
-            manager = EnhancedSharedSerialPortManager(port, baud_rate)
+            manager = SharedSerialPortManager(port, baud_rate)
             manager.start()
             _global_managers[manager_key] = manager
         else:

@@ -11,7 +11,7 @@ import json
 import logging
 import time
 import os
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional
 
 from modules.attention_controller import AttentionController, MotionMixerGazeOutput as AttentionMotionMixerGazeOutput
 from modules.config_store import ConfigStore
@@ -68,7 +68,6 @@ class WebSocketMessageHandler:
             "servo": self._handle_servo_command,
             "servo_speed": self._handle_servo_speed_command,
             "servo_acceleration": self._handle_servo_acceleration_command,
-            "servo_config_update": self._handle_servo_config_update,
             "servo_home_positions": self._handle_servo_home_positions,
             "servo_save_settings": self._handle_servo_save_settings,
             "servo_request_config": self._handle_servo_request_config,
@@ -82,13 +81,10 @@ class WebSocketMessageHandler:
             "get_controller_status": self._handle_get_controller_status,
             "save_controller_config": self._handle_save_controller_config,
             "get_controller_config": self._handle_get_controller_config,
-            "imu_toggle_debug": self._handle_imu_toggle_debug,
-            "button_debug": self._handle_button_debug,
             
             # Stepper motor control
             "stepper": self._handle_stepper_command,
 
-            "frontend_controller": self._handle_frontend_controller,
             "steamdeck_controller": self._handle_steamdeck_controller,  
             
             # Scene management
@@ -153,38 +149,6 @@ class WebSocketMessageHandler:
         logger.info(f" WebSocket handler initialized with {len(self.handlers)} message types")
 
         
-    async def _handle_frontend_controller(self, websocket, data: Dict[str, Any]):
-        """Handle frontend controller input - same as steamdeck but different source"""
-        try:
-            if hasattr(self.backend, 'note_control_frame'):
-                self.backend.note_control_frame(websocket)
-            axes = data.get("axes", {})
-            buttons = data.get("buttons", {})
-            timestamp = data.get("timestamp", time.time())
-            
-            # Process through existing controller input processor
-            if hasattr(self.backend, 'controller_input_processor'):
-                # Process all axes
-                for axis_name, axis_value in axes.items():
-                    await self.backend.controller_input_processor.process_controller_input(
-                        control_name=axis_name,
-                        raw_value=axis_value,
-                        input_type="axis"
-                    )
-                # Process all buttons
-                for button_name, button_pressed in buttons.items():
-                    # Convert boolean to float (1.0 or 0.0)
-                    button_value = 1.0 if button_pressed else 0.0
-                    await self.backend.controller_input_processor.process_controller_input(
-                        control_name=button_name,
-                        raw_value=button_value,
-                        input_type="button"
-                    )
-            
-        except Exception as e:
-            logger.error(f"Frontend controller error: {e}")
-            await self._send_error_response(websocket, f"Controller error: {str(e)}")
-
     async def _handle_steamdeck_controller(self, websocket, data: Dict[str, Any]):
         """Handle steamdeck controller input"""
         try:
@@ -286,18 +250,6 @@ class WebSocketMessageHandler:
             await self._send_error_response(websocket, f"Message handling error: {str(e)}")
             return False
     
-    async def _handle_button_debug(self, websocket, data: Dict[str, Any]):
-        """Log every button-down edge from the frontend for diagnostics."""
-        logger.info(f"[BTN] Frontend button pressed: {data.get('button')}")
-
-    async def _handle_imu_toggle_debug(self, websocket, data: Dict[str, Any]):
-        """Log the frontend's current imu_toggle_buttons set for debugging."""
-        buttons = data.get("buttons", [])
-        if buttons:
-            logger.info(f"[IMU] Frontend imu_toggle_buttons: {buttons}")
-        else:
-            logger.warning("[IMU] Frontend imu_toggle_buttons is empty - no toggle button configured")
-
     async def _handle_get_controller_config(self, websocket, data: Dict[str, Any]):
         """Return the backend's controller_config.json to the requesting client"""
         try:
@@ -523,39 +475,6 @@ class WebSocketMessageHandler:
             logger.error(f"Save calibration error: {e}")
             await self._send_error_response(websocket, f"Save calibration error: {str(e)}")
 
-    async def _handle_controller_calibration(self, websocket, data: Dict[str, Any]):
-        """Handle automatic controller calibration request"""
-        try:
-            if hasattr(self.backend, 'bluetooth_controller'):
-                success = await self.backend.bluetooth_controller.perform_startup_calibration()
-                await self._send_websocket_message(websocket, {
-                    "type": "controller_calibration_result",
-                    "success": success,
-                    "message": "Automatic calibration completed" if success else "Calibration failed"
-                })
-            else:
-                await self._send_error_response(websocket, "No bluetooth controller available")
-        except Exception as e:
-            logger.error(f"Controller calibration error: {e}")
-            await self._send_error_response(websocket, f"Calibration error: {str(e)}")
-
-    async def _handle_manual_controller_calibration(self, websocket, data: Dict[str, Any]):
-        """Handle manual controller calibration request"""
-        try:
-            if hasattr(self.backend, 'bluetooth_controller'):
-                success = await self.backend.bluetooth_controller.manual_calibration_sequence()
-                await self._send_websocket_message(websocket, {
-                    "type": "manual_calibration_result",
-                    "success": success,
-                    "message": "Manual calibration completed" if success else "Manual calibration failed"
-                })
-            else:
-                await self._send_error_response(websocket, "No bluetooth controller available")
-        except Exception as e:
-            logger.error(f"Manual controller calibration error: {e}")
-            await self._send_error_response(websocket, f"Manual calibration error: {str(e)}")
-
-
     # ==================== SERVO CONTROL HANDLERS ====================
     
     async def _handle_servo_command(self, websocket, data: Dict[str, Any]):
@@ -646,23 +565,6 @@ class WebSocketMessageHandler:
         success = await self.hardware_service.get_servo_position(channel_key, position_callback)
         if not success:
             await self._send_error_response(websocket, f"Failed to request position for {channel_key}")
-
-    async def _handle_servo_config_update(self, websocket, data: Dict[str, Any]):
-        """Handle servo configuration update"""
-        config = data.get("config")
-        
-        if not config:
-            await self._send_error_response(websocket, "Missing config data")
-            return
-        
-        # Just acknowledge - the actual servo commands were already sent
-        await self._send_websocket_message(websocket, {
-            "type": "servo_config_updated", 
-            "success": True,
-            "timestamp": time.time()
-        })
-        
-        logger.info(f"Servo configuration updated")
 
     async def _handle_servo_home_positions(self, websocket, data: Dict[str, Any]):
         """Handle servo home positions notification from frontend and update backend config"""
@@ -1266,18 +1168,19 @@ class WebSocketMessageHandler:
     
 
     async def _handle_scene_command(self, websocket, data):
-        emotion = data.get("emotion")
-        if not emotion:
-            await self._send_error_response(websocket, "Missing emotion/scene name")
+        """Play a scene by name"""
+        scene_name = data.get("scene_name")
+        if not scene_name:
+            await self._send_error_response(websocket, "Missing scene name")
             return
 
         # Fire-and-forget so we don't block controller message handling
-        spawn(self.scene_engine.play_scene(emotion))
+        spawn(self.scene_engine.play_scene(scene_name))
 
-        # Optional: immediate ack so UI gets feedback
+        # Immediate ack so the UI gets feedback
         await self._send_websocket_message(websocket, {
             "type": "scene_queued",
-            "scene_name": emotion,
+            "scene_name": scene_name,
             "timestamp": time.time()
         })
 
@@ -1823,7 +1726,7 @@ class WebSocketMessageHandler:
                     logger.info(f"Idle mode {'ENABLED' if state else 'DISABLED'} via frontend")
                     
                     # Send confirmation back to frontend
-                    await self._send_response(websocket, {
+                    await self._send_websocket_message(websocket, {
                         "type": "mode_response",
                         "mode": "idle",
                         "state": state,
@@ -1832,16 +1735,6 @@ class WebSocketMessageHandler:
                 else:
                     logger.error("Scene engine does not support idle mode (missing set_idle_mode method)")
                     await self._send_error_response(websocket, "Idle mode not available")
-                    
-            elif mode_name == "demo":
-                logger.warning("Demo mode not yet implemented")
-                await self._send_response(websocket, {
-                    "type": "mode_response",
-                    "mode": "demo",
-                    "state": state,
-                    "success": False,
-                    "message": "Demo mode not yet implemented"
-                })
             else:
                 logger.warning(f"Unknown mode: {mode_name}")
                 await self._send_error_response(websocket, f"Unknown mode: {mode_name}")
@@ -2037,28 +1930,6 @@ class WebSocketMessageHandler:
             logger.error(f"Failed to set system volume: {e}")
             await self._send_error_response(websocket, f"Failed to set volume: {str(e)}")
     
-    def handle_set_system_volume(self, data):
-        """DEPRECATED: Use _handle_set_system_volume instead. Kept for backward compatibility."""
-        volume = data.get('volume', 70)
-        
-        try:
-            import subprocess
-            
-            # Using ALSA (amixer)
-            subprocess.run(
-                ['amixer', 'sset', 'Master', f'{volume}%'],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            logger.info(f"System volume set to {volume}%")
-            return {'success': True, 'volume': volume}
-            
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to set volume: {e}")
-            return {'success': False, 'error': str(e)}
-
-    
     async def _send_error_response(self, websocket, error_message: str):
         """Send error response to websocket client"""
         error_response = {
@@ -2069,23 +1940,6 @@ class WebSocketMessageHandler:
         await self._send_websocket_message(websocket, error_response)
         logger.error(f" Sent error to client: {error_message}")
         
-    def get_handler_stats(self) -> Dict[str, Any]:
-        """Get statistics about message handling"""
-        return {
-            "total_handlers": len(self.handlers),
-            "handler_types": list(self.handlers.keys()),
-            "categories": {
-                "servo_control": 6,
-                "stepper_motor": 1,
-                "nema_control": 7,  # Add this line
-                "scene_management": 4,
-                "audio_control": 2,
-                "system_control": 3,
-                "gesture_tracking": 2,
-                "utility": 3
-            }
-        }
-    
     async def _handle_camera_url_update(self, websocket, data: Dict[str, Any]):
         """Update ESP32 camera URL in config file and restart the proxy process"""
         try:
@@ -2297,52 +2151,6 @@ class WebSocketMessageHandler:
             logger.error(f"Camera config update error: {e}")
             await self._send_error_response(websocket, f"Camera config error: {str(e)}")
 
-        """Apply calibration data from frontend wizard"""
-        try:
-            controller = self.backend.bluetooth_controller
-            
-            # Apply joystick ranges
-            joystick_ranges = calibration_data.get("joystick_ranges", {})
-            
-            for stick_name, ranges in joystick_ranges.items():
-                if stick_name == "left_stick":
-                    base_axis = 0
-                elif stick_name == "right_stick":
-                    base_axis = 2
-                else:
-                    continue
-                
-                # Set X and Y axis ranges
-                x_range = ranges.get('x', [0, 0])
-                y_range = ranges.get('y', [0, 0])
-                
-                if x_range != [0, 0]:
-                    controller.calibration.axis_min[base_axis] = x_range[0]
-                    controller.calibration.axis_max[base_axis] = x_range[1]
-                    controller.calibration.axis_center[base_axis] = (x_range[0] + x_range[1]) / 2
-                
-                if y_range != [0, 0]:
-                    controller.calibration.axis_min[base_axis + 1] = y_range[0]
-                    controller.calibration.axis_max[base_axis + 1] = y_range[1]
-                    controller.calibration.axis_center[base_axis + 1] = (y_range[0] + y_range[1]) / 2
-            
-            # Apply dead zones
-            dead_zones = calibration_data.get("dead_zones", {})
-            if "left_stick" in dead_zones or "right_stick" in dead_zones:
-                # Use the higher of the two dead zones as global dead zone
-                left_dz = dead_zones.get("left_stick", 0.15)
-                right_dz = dead_zones.get("right_stick", 0.15)
-                controller.calibration.dead_zone = max(left_dz, right_dz)
-            
-            # Mark as calibrated
-            controller.calibration.calibrated = True
-            
-            # Save to file
-            return controller.calibration.save_calibration()
-            
-        except Exception as e:
-            logger.error(f"Failed to apply calibration data: {e}")
-            return False
     # Repos the updater is allowed to install from. The repo value from the
     # message is checked against this list - an arbitrary client on the
     # hotspot cannot point the updater at their own repository.

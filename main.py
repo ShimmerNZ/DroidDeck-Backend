@@ -28,10 +28,9 @@ import os
 import sys
 import signal
 import subprocess
-import psutil
 import pygame
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional, Any
 from enum import Enum
 
 # Import websockets with proper version handling
@@ -52,12 +51,12 @@ except ImportError:
 
 # Import modular components
 from modules.websocket_handler import WebSocketMessageHandler
-from modules.scene_engine import EnhancedSceneEngine as SceneEngine
+from modules.scene_engine import SceneEngine
 from modules.audio_controller import NativeAudioController
 from modules.telemetry_system import SafeTelemetrySystem
-from modules.hardware_service import HardwareService, create_hardware_service
+from modules.hardware_service import create_hardware_service
 from modules.config_manager import ConfigurationManager
-from modules.bluetooth_controller import BackendBluetoothController
+from modules.bluetooth_controller import BluetoothController
 from modules.controller_input_handler import ControllerInputProcessor
 from modules.motion_system import MotionMixer, BlendMode
 from modules.gpio_compat import setup_output_pin, set_output, is_gpio_available
@@ -93,7 +92,6 @@ class SystemState(Enum):
     FAILSAFE = "failsafe"
     EMERGENCY = "emergency"
     IDLE = "idle"
-    DEMO = "demo"
 
 class WALLEBackend:
     """Main WALL-E backend system using modular architecture."""
@@ -234,7 +232,7 @@ class WALLEBackend:
         self.websocket_handler.camera_proxy_url = self.camera_proxy_url
 
         # Initialize bluetooth controller with WebSocket broadcast capability
-        self.bluetooth_controller = BackendBluetoothController(
+        self.bluetooth_controller = BluetoothController(
             controller_input_processor=self.controller_input_processor,
             websocket_broadcast=self.broadcast_websocket_message,
             on_disconnect=self._on_controller_disconnected
@@ -864,113 +862,6 @@ class WALLEBackend:
         except Exception as e:
             logger.error(f"Failed to send initial status: {e}")
 
-    async def handle_camera_config_update(self, data: Dict[str, Any]):
-        """Handle camera configuration updates from WebSocket with proxy communication"""
-        try:
-            config_updates = data.get("config", {})
-            logger.info(f"Updating camera config: {list(config_updates.keys())}")
-
-            # Send settings to camera proxy first
-            import requests
-            try:
-                # Blocking HTTP call - run off the event loop
-                response = await asyncio.to_thread(
-                    requests.post,
-                    f"{self.camera_proxy_url}/camera/settings",
-                    json=config_updates,
-                    timeout=5
-                )
-
-                if response.status_code == 200:
-                    result = response.json()
-                    updated_settings = result.get("settings", config_updates)
-
-                    # Save to local config file
-                    camera_config_path = Path("configs/camera_config.json")
-
-                    if camera_config_path.exists():
-                        with open(camera_config_path, "r") as f:
-                            current_config = json.load(f)
-                    else:
-                        current_config = {}
-
-                    # Update local configuration
-                    current_config.update(updated_settings)
-
-                    # Save updated configuration
-                    camera_config_path.parent.mkdir(exist_ok=True)
-                    with open(camera_config_path, "w") as f:
-                        json.dump(current_config, f, indent=2)
-
-                    # Broadcast successful update to all clients
-                    await self.broadcast_message({
-                        "type": "camera_config_updated",
-                        "success": True,
-                        "config": updated_settings,
-                        "message": result.get("message", "Settings updated successfully"),
-                        "timestamp": time.time()
-                    })
-
-                    logger.info("Camera configuration updated successfully")
-                    return True
-
-                elif response.status_code == 206:  # Partial success
-                    result = response.json()
-                    updated_settings = result.get("settings", config_updates)
-
-                    # Still save partial updates to local config
-                    camera_config_path = Path("configs/camera_config.json")
-                    if camera_config_path.exists():
-                        with open(camera_config_path, "r") as f:
-                            current_config = json.load(f)
-                    else:
-                        current_config = {}
-
-                    current_config.update(updated_settings)
-                    camera_config_path.parent.mkdir(exist_ok=True)
-                    with open(camera_config_path, "w") as f:
-                        json.dump(current_config, f, indent=2)
-
-                    # Broadcast partial success
-                    await self.broadcast_message({
-                        "type": "camera_config_updated",
-                        "success": False,
-                        "partial": True,
-                        "config": updated_settings,
-                        "message": result.get("message", "Some settings failed to update"),
-                        "timestamp": time.time()
-                    })
-
-                    logger.warning(f"Camera config partially updated: {result.get('message')}")
-                    return False
-
-                else:
-                    logger.error(f"Camera proxy returned HTTP {response.status_code}")
-                    await self.broadcast_message({
-                        "type": "camera_config_error",
-                        "message": f"Camera proxy returned HTTP {response.status_code}",
-                        "timestamp": time.time()
-                    })
-                    return False
-
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Failed to connect to camera proxy: {e}")
-                await self.broadcast_message({
-                    "type": "camera_config_error",
-                    "message": f"Camera proxy connection failed: {str(e)}",
-                    "timestamp": time.time()
-                })
-                return False
-
-        except Exception as e:
-            logger.error(f"Failed to update camera config: {e}")
-            await self.broadcast_message({
-                "type": "camera_config_error",
-                "message": f"Camera config error: {str(e)}",
-                "timestamp": time.time()
-            })
-            return False
-
     # ==================== TELEMETRY LOOP ====================
     async def telemetry_loop(self):
         """Background telemetry data collection and broadcasting - OPTIMIZED"""
@@ -1071,36 +962,6 @@ class WALLEBackend:
             except Exception as e:
                 logger.error(f"Telemetry loop error: {e}")
                 await asyncio.sleep(1.0)
-
-    def get_performance_stats(self) -> Dict[str, Any]:
-        """Get system performance statistics including controller optimization"""
-        try:
-            base_stats = {
-                "system_state": self.state.value,
-                "uptime": time.time() - self.start_time,
-                "connected_clients": len(self.connected_clients),
-            }
-
-            # Add controller optimization stats if available
-            if hasattr(self.bluetooth_controller, 'dpad_update_rate'):
-                base_stats["controller_optimization"] = {
-                    "enabled": True,
-                    "dpad_rate_hz": int(1.0 / self.bluetooth_controller.dpad_update_rate),
-                    "analog_rate_hz": int(1.0 / self.bluetooth_controller.analog_update_rate),
-                    "navigation_cooldown_ms": int(self.bluetooth_controller.navigation_cooldown * 1000),
-                    "separated_loops": True
-                }
-            else:
-                base_stats["controller_optimization"] = {
-                    "enabled": False,
-                    "legacy_mode": True
-                }
-
-            return base_stats
-
-        except Exception as e:
-            logger.error(f"Failed to get performance stats: {e}")
-            return {"error": str(e)}
 
     # ==================== SYSTEM STATUS & CONTROL ====================
 
@@ -1846,47 +1707,6 @@ async def announce_network_info(backend):
         await asyncio.get_running_loop().run_in_executor(
             None, _espeak, "Camera not found", backend
         )
-
-
-async def process_bottango_imports_on_startup():
-    """
-    Process any Bottango imports in the bottango_imports folder on startup
-
-    This runs automatically when the backend starts up
-    """
-    if not BOTTANGO_AVAILABLE:
-        logger.info("Bottango converter not available - skipping import processing")
-        return
-
-    try:
-        # Define directories
-        project_root = Path(__file__).parent
-        import_dir = project_root / 'bottango_imports'
-        scenes_dir = project_root / 'scenes'
-
-        logger.info("Checking for Bottango imports...")
-
-        # Create watchdog and process imports
-        watchdog = BottangoImportWatchdog(
-            import_dir=import_dir,
-            scenes_dir=scenes_dir,
-            delete_after_conversion=True  # Delete imports after processing
-        )
-
-        converted_files = watchdog.process_imports()
-
-        if converted_files:
-            logger.info(f"Processed {len(converted_files)} Bottango import(s)")
-
-            # Update scene registry
-            await update_scene_registry(scenes_dir)
-        else:
-            logger.info("No Bottango imports to process")
-
-    except Exception as e:
-        logger.error(f"Error processing Bottango imports: {e}")
-        import traceback
-        traceback.print_exc()
 
 
 async def update_scene_registry(scenes_dir: Path):

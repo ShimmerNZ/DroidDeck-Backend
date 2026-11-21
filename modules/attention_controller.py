@@ -662,12 +662,6 @@ class MotionMixerGazeOutput(GazeOutput, _HeadOnlyGaze):
             return pos
         return max(-1.0, min(1.0, pos + math.copysign(vel * vel / (2.0 * accel), vel)))
 
-    @staticmethod
-    def _step_toward(current: float, target: float, max_delta: float) -> float:
-        if abs(target - current) <= max_delta:
-            return target
-        return current + (max_delta if target > current else -max_delta)
-
     def _pulse_for(self, channel_id: str, normalized: float) -> float:
         """Map -1..+1 to this channel's configured microsecond range,
         scaled asymmetrically around home since home is not always in the

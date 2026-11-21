@@ -8,7 +8,7 @@ Processes controller inputs and routes them through behavior-specific handlers
 import asyncio
 import logging
 import time
-from typing import Dict, Any, Optional, Callable, List
+from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from enum import Enum
 from modules.task_utils import spawn
@@ -1545,20 +1545,6 @@ class ControllerInputProcessor:
             self.stats["failed_commands"] += 1
             return False
 
-    def get_active_inputs(self) -> Dict[str, ControllerInput]:
-        """Get currently active controller inputs"""
-        # Clean up old inputs (older than 1 second)
-        current_time = time.time()
-        expired_inputs = [
-            name for name, input_obj in self.active_inputs.items()
-            if current_time - input_obj.timestamp > 1.0
-        ]
-
-        for name in expired_inputs:
-            del self.active_inputs[name]
-
-        return self.active_inputs.copy()
-
     def get_controller_stats(self) -> Dict[str, Any]:
         """Get controller processing statistics"""
         return {
@@ -1574,94 +1560,11 @@ class ControllerInputProcessor:
             "supported_behaviors": [bt.value for bt in BehaviorType]
         }
 
-    def get_controller_mappings(self) -> Dict[str, Any]:
-        """Get current controller mappings configuration"""
-        return self.controller_mappings.copy()
-
-    def update_controller_mapping(self, control_name: str, config: Dict[str, Any]) -> bool:
-        """Update or add a controller mapping - supports multiple mappings per button"""
-        try:
-            if self._validate_config(control_name, config):
-                # Check if we already have mapping(s) for this control
-                existing = self.controller_mappings.get(control_name)
-
-                if existing is None:
-                    # No existing mapping - create new list with this config
-                    self.controller_mappings[control_name] = [config]
-                elif isinstance(existing, dict):
-                    # Old format: single dict - convert to list and add new
-                    self.controller_mappings[control_name] = [existing, config]
-                elif isinstance(existing, list):
-                    # Already a list - append new config
-                    self.controller_mappings[control_name].append(config)
-                else:
-                    logger.error(f"Unexpected mapping format for {control_name}")
-                    return False
-
-                logger.info(f"Added controller mapping for {control_name} (total: {len(self.controller_mappings[control_name])})")
-                return True
-            else:
-                logger.warning(f"Invalid configuration for {control_name}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Failed to update controller mapping: {e}")
-            return False
-
-    def remove_controller_mapping(self, control_name: str, config_index: int = None) -> bool:
-        """
-        Remove a controller mapping
-
-        Args:
-            control_name: The button/control name
-            config_index: Optional index of specific config to remove. If None, removes all.
-        """
-        try:
-            if control_name not in self.controller_mappings:
-                logger.warning(f"No mapping found for {control_name}")
-                return False
-
-            mappings = self.controller_mappings[control_name]
-
-            # If no index specified, remove all mappings for this control
-            if config_index is None:
-                del self.controller_mappings[control_name]
-                logger.info(f"Removed all mappings for {control_name}")
-                return True
-
-            # Remove specific mapping by index
-            if isinstance(mappings, list):
-                if 0 <= config_index < len(mappings):
-                    mappings.pop(config_index)
-
-                    # If list is now empty, remove the key entirely
-                    if len(mappings) == 0:
-                        del self.controller_mappings[control_name]
-                        logger.info(f"Removed last mapping for {control_name}")
-                    else:
-                        logger.info(f"Removed mapping {config_index} for {control_name} ({len(mappings)} remaining)")
-                    return True
-                else:
-                    logger.warning(f"Invalid index {config_index} for {control_name}")
-                    return False
-            elif isinstance(mappings, dict):
-                # Old format - just remove it
-                del self.controller_mappings[control_name]
-                logger.info(f"Removed mapping for {control_name}")
-                return True
-
-        except Exception as e:
-            logger.error(f"Failed to remove controller mapping: {e}")
-            return False
-
     def cleanup(self):
         """Clean up controller input processor"""
         logger.info("Cleaning up controller input processor...")
         self.active_inputs.clear()
         self.controller_mappings.clear()
-
-# Alias for backward compatibility
-ControllerInputHandler = ControllerInputProcessor
 
 class NemaStepperHandler(BehaviorHandler):
     """Handle NEMA stepper control - backend version that controls actual hardware"""

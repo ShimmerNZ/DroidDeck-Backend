@@ -6,13 +6,12 @@ Centralized configuration loading, validation, and hot-reload support
 """
 
 import json
-import os
 import time
 import logging
 import threading
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Callable
-from dataclasses import dataclass, asdict
+from typing import Dict, Any, List, Callable
+from dataclasses import dataclass
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -250,9 +249,6 @@ class ConfigurationManager:
                 result.errors.append("Configuration must be a JSON object or array")
                 return result
             
-            # Schema validation would go here if jsonschema is available
-            # For now, just do basic validation
-            
             return result
             
         except Exception as e:
@@ -345,34 +341,6 @@ class ConfigurationManager:
             logger.error(f"Failed to create backup for {config_name}: {e}")
             return False
     
-    def get_config(self, config_name: str, default: Any = None) -> Any:
-        """Get configuration by name"""
-        return self.configs.get(config_name, default)
-    
-    def set_config(self, config_name: str, config_data: Dict[str, Any]) -> bool:
-        """Set configuration and save to file"""
-        try:
-            # Validate configuration
-            validation_result = self.validate_config(config_name, config_data)
-            
-            if not validation_result.valid:
-                logger.error(f"❌ Cannot set invalid config {config_name}: {validation_result.errors}")
-                return False
-            
-            # Create backup
-            if config_name in self.configs:
-                self.create_config_backup(config_name)
-            
-            # Update configuration
-            self.configs[config_name] = config_data
-            
-            # Save to file
-            return self.save_config(config_name)
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to set config {config_name}: {e}")
-            return False
-    
     def save_config(self, config_name: str) -> bool:
         """Save configuration to file"""
         try:
@@ -406,19 +374,6 @@ class ConfigurationManager:
         
         self.reload_callbacks[config_name].append(callback)
         logger.debug(f"📞 Registered reload callback for {config_name}")
-    
-    def get_config_stats(self) -> Dict[str, Any]:
-        """Get configuration manager statistics"""
-        return {
-            "configs_loaded": self.stats["configs_loaded"],
-            "hot_reloads": self.stats["hot_reloads"], 
-            "validation_errors": self.stats["validation_errors"],
-            "backups_created": self.stats["backups_created"],
-            "last_reload": self.stats["last_reload"],
-            "hot_reload_enabled": self.enable_hot_reload,
-            "config_names": list(self.configs.keys()),
-            "total_callbacks": sum(len(callbacks) for callbacks in self.reload_callbacks.values())
-        }
     
     def cleanup(self):
         """Clean up resources"""

@@ -217,7 +217,7 @@ DroidDeck Backend (main.py)
 │   └── Scene Layer   (priority 10)
 ├── ConstraintPipeline          — Velocity limiting, deadband, position clamping
 ├── CommandDispatcher           — Batches channel commands per Maestro device
-├── EnhancedSceneEngine         — Scene loading, playback, and audio sync
+├── SceneEngine         — Scene loading, playback, and audio sync
 ├── BottangoFolderWatcher       — Auto-converts dropped Bottango JSON exports to scenes
 ├── BottangoLiveDriver          — TCP client for real-time Bottango timeline control
 ├── NEMA23Controller            — TB6600 stepper motor positioning

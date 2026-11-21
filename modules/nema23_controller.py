@@ -16,7 +16,6 @@ from collections import deque
 from typing import Optional, Callable, Dict, Any, List, Tuple
 from enum import Enum
 from dataclasses import dataclass
-import json
 
 # GPIO compatibility layer
 from modules.gpio_compat import (
@@ -24,9 +23,6 @@ from modules.gpio_compat import (
     setup_input_pin,
     set_output,
     read_input,
-    pulse_pin,
-    setup_button_callback,
-    cleanup_gpio,
     is_gpio_available,
     get_gpio_library,
     release_pin
@@ -428,18 +424,6 @@ class NEMA23Controller:
         except Exception as e:
             logger.error(f"Failed to update NEMA config: {e}")
             return False
-
-    def update_position(self, new_position_steps: int):
-        """Update current position and notify callbacks"""
-        if new_position_steps != self.current_position_steps:
-            self.current_position_steps = new_position_steps
-            position_cm = self.steps_to_cm(new_position_steps)
-
-            if self.position_changed_callback:
-                try:
-                    self.position_changed_callback(new_position_steps, position_cm)
-                except Exception as e:
-                    logger.error(f"Position callback error: {e}")
 
     def steps_to_cm(self, steps: int) -> float:
         """Convert steps to centimeters"""

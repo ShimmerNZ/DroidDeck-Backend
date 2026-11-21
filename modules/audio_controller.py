@@ -10,7 +10,6 @@ import pygame
 import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable
-import random
 
 import os
 import subprocess
@@ -352,10 +351,6 @@ class NativeAudioController:
             logger.error(f"Failed to set volume: {e}")
             return False
 
-    def get_volume(self) -> float:
-        """Get current volume level."""
-        return self.current_volume
-
     def is_busy(self) -> bool:
         """
         Check if audio is currently playing.
@@ -369,22 +364,12 @@ class NativeAudioController:
             logger.debug(f"Error checking audio busy state: {e}")
             return False
 
-    def get_file_count(self) -> int:
-        """Get number of available audio files."""
-        return len(self.audio_files)
-
     def get_playlist(self) -> List[str]:
         """
         Get list of available audio files.
         Returns list of audio filenames.
         """
         return [f"{path.name}" for path in self.audio_files.values()]
-
-    def get_track_keys(self) -> List[str]:
-        """
-        Get list of track keys (filenames without extensions).
-        """
-        return list(self.audio_files.keys())
 
     def _resolve_track_identifier(self, track_identifier) -> Optional[Path]:
         """
@@ -419,75 +404,6 @@ class NativeAudioController:
             logger.error(f"Error resolving track identifier {track_identifier}: {e}")
             return None
 
-    def play_random_track(self) -> bool:
-        """
-        Play a random track from available files.
-        """
-        if not self.audio_files:
-            logger.warning("No audio files available for random play")
-            return False
-        random_key = random.choice(list(self.audio_files.keys()))
-        logger.info(f"Playing random track: {random_key}")
-        return self.play_track(random_key)
-
-    def play_next_track(self) -> bool:
-        """
-        Play next track in playlist.
-        """
-        if not self.playlist:
-            logger.warning("Playlist is empty")
-            return False
-        try:
-            if self.current_track:
-                # Find current track index
-                current_index = -1
-                for i, track_key in enumerate(self.playlist):
-                    if track_key == self.current_track or self.audio_files[track_key].stem == str(self.current_track):
-                        current_index = i
-                        break
-                # Get next track
-                if current_index >= 0:
-                    next_index = (current_index + 1) % len(self.playlist)
-                    next_track = self.playlist[next_index]
-                    logger.info(f"Playing next track: {next_track}")
-                    return self.play_track(next_track)
-            # If no current track or not found, play first track
-            first_track = self.playlist[0]
-            logger.info(f"Playing first track: {first_track}")
-            return self.play_track(first_track)
-        except Exception as e:
-            logger.error(f"Failed to play next track: {e}")
-            return False
-
-    def play_previous_track(self) -> bool:
-        """
-        Play previous track in playlist.
-        """
-        if not self.playlist:
-            logger.warning("Playlist is empty")
-            return False
-        try:
-            if self.current_track:
-                # Find current track index
-                current_index = -1
-                for i, track_key in enumerate(self.playlist):
-                    if track_key == self.current_track or self.audio_files[track_key].stem == str(self.current_track):
-                        current_index = i
-                        break
-                # Get previous track
-                if current_index >= 0:
-                    prev_index = (current_index - 1) % len(self.playlist)
-                    prev_track = self.playlist[prev_index]
-                    logger.info(f"Playing previous track: {prev_track}")
-                    return self.play_track(prev_track)
-            # If no current track or not found, play last track
-            last_track = self.playlist[-1]
-            logger.info(f"Playing last track: {last_track}")
-            return self.play_track(last_track)
-        except Exception as e:
-            logger.error(f"Failed to play previous track: {e}")
-            return False
-
     def get_audio_info(self, track_identifier) -> Optional[Dict[str, Any]]:
         """
         Get information about an audio file.
@@ -513,14 +429,6 @@ class NativeAudioController:
         except Exception as e:
             logger.error(f"Failed to get audio info for {track_identifier}: {e}")
             return None
-
-    def rescan_audio_files(self) -> int:
-        """
-        Rescan audio directory for new/removed files.
-        Returns number of files found after rescan.
-        """
-        logger.info("Rescanning audio directory...")
-        return self.scan_audio_files()
 
     def get_audio_status(self) -> Dict[str, Any]:
         """
@@ -553,32 +461,6 @@ class NativeAudioController:
         except Exception as e:
             logger.error(f"Failed to get audio status: {e}")
             return {"error": str(e), "connected": False}
-
-    def validate_audio_file(self, file_path: Path) -> bool:
-        """
-        Validate that an audio file can be played (basic load test).
-        """
-        try:
-            if not file_path.exists():
-                return False
-            # Check file size (empty files are invalid)
-            if file_path.stat().st_size == 0:
-                return False
-            # Try to load the file (basic validation)
-            with self.audio_lock:
-                old_track = self.current_track
-                old_playing = self.is_playing
-                try:
-                    pygame.mixer.music.load(str(file_path))
-                    # Restore previous state if we interrupted playback
-                    if old_playing and old_track:
-                        self.play_track(old_track)
-                    return True
-                except pygame.error:
-                    return False
-        except Exception as e:
-            logger.debug(f"Audio file validation failed for {file_path}: {e}")
-            return False
 
     def set_track_started_callback(self, callback: Callable):
         """Set callback for when track starts playing."""

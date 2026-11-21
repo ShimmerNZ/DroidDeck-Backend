@@ -5,7 +5,6 @@ import asyncio
 import json
 import logging
 import time
-import math
 from typing import Dict, Set, List, Optional, Any, Callable, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -618,13 +617,6 @@ class ConstraintPipeline:
         state.last_update_time = time.monotonic()
         return out
 
-    def reset_channel(self, channel_id: str):
-        """Reset a channel's tracking state"""
-        if channel_id in self.states:
-            del self.states[channel_id]
-        if channel_id in self._quant_residual:
-            del self._quant_residual[channel_id]
-
     def reset_all(self):
         """Reset all channel states"""
         self.states.clear()
@@ -1008,26 +1000,10 @@ class MotionMixer:
         logger.debug(f"Layer added: {layer.name} (priority={layer.priority}, mode={layer.blend_mode.value})")
         return layer
 
-    async def remove_layer(self, name: str):
-        """Remove a motion layer"""
-        async with self._layer_lock:
-            self.layers.pop(name, None)
-            self.timeline_players.pop(name, None)
-        logger.debug(f"Layer removed: {name}")
-
     def add_tick_callback(self, callback: Callable[[float], None]):
         """Register a function called with dt at the start of every tick"""
         if callback not in self._tick_callbacks:
             self._tick_callbacks.append(callback)
-
-    def remove_tick_callback(self, callback: Callable[[float], None]):
-        """Unregister a tick callback"""
-        if callback in self._tick_callbacks:
-            self._tick_callbacks.remove(callback)
-
-    async def get_layer(self, name: str) -> Optional[MotionLayer]:
-        """Get a layer by name"""
-        return self.layers.get(name)
 
     # ---- Joystick Input ----
 
@@ -1351,14 +1327,6 @@ class MotionMixer:
 
         if to_stop:
             logger.info(f"Stopping scene: {scene_name}")
-
-    async def stop_all_scenes(self, crossfade_out: float = 0.3):
-        """Stop all playing scenes"""
-        for name, player in list(self.timeline_players.items()):
-            player.layer.fade_out(crossfade_out)
-            player.layer.auto_remove = True
-            player.playing = False
-        logger.info("All scenes stopping")
 
     def is_scene_playing(self, scene_name: str = None) -> bool:
         """Check if a specific scene (or any scene) is playing"""

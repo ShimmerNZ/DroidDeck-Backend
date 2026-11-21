@@ -10,9 +10,8 @@ import json
 import os
 import time
 import logging
-from typing import Dict, Optional, Any, Set
+from typing import Dict, Optional, Any
 from dataclasses import dataclass
-from enum import Enum
 from modules.task_utils import spawn
 
 try:
@@ -124,8 +123,8 @@ class ControllerCalibration:
             return False
 
 
-class OptimizedBluetoothController:
-    """Optimized Bluetooth controller service with separated input loops"""
+class BluetoothController:
+    """Bluetooth controller service with separated input loops"""
 
     # A full pygame joystick rescan holds the event loop for 100-300 ms, so it
     # only runs when /dev/input changes (a controller connecting adds device
@@ -638,7 +637,7 @@ class OptimizedBluetoothController:
         # Start the service loops
         self._service_tasks.append(spawn(self._startup_sequence(), name="bt_startup"))
 
-        logger.info("Optimized controller service starting (async initialization)")
+        logger.info("Bluetooth controller service starting (async initialization)")
 
     async def _startup_sequence(self):
         """Async startup sequence with retries for controller detection"""
@@ -801,7 +800,7 @@ class OptimizedBluetoothController:
             except Exception:
                 pass
 
-        logger.info("Optimized controller service stopped")
+        logger.info("Bluetooth controller service stopped")
 
     def get_controller_info(self) -> Dict:
         """Get current controller information"""
@@ -955,21 +954,6 @@ class OptimizedBluetoothController:
             logger.error(f"Manual calibration failed: {e}")
             return False
 
-    def get_calibrated_axis_value(self, axis_id: int) -> float:
-        """Get calibrated and normalized axis value"""
-        if not self.joystick or axis_id >= self.joystick.get_numaxes():
-            return 0.0
-
-        raw_value = self.joystick.get_axis(axis_id)
-
-        # Invert Y axes for intuitive control
-        if axis_id in [1, 3]:  # Y axes
-            raw_value = -raw_value
-
-        # Return only the normalized value, not the dead zone flag
-        normalized_value, _ = self.calibration.get_calibrated_value(axis_id, raw_value)
-        return normalized_value
-
     async def save_calibration(self, calibration_data: Dict[str, Any]) -> bool:
         """Save calibration data from frontend wizard"""
         try:
@@ -1014,7 +998,3 @@ class OptimizedBluetoothController:
         except Exception as e:
             logger.error(f"Failed to apply calibration data: {e}")
             return False
-
-
-# Alias for backward compatibility
-BackendBluetoothController = OptimizedBluetoothController

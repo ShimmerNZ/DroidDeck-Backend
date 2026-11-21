@@ -6,15 +6,12 @@ Cubic hermite/bezier curve evaluation
 """
 
 import json
-import os
 import sys
 import time
 import logging
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
-import shutil
-import math
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)

@@ -5,14 +5,13 @@ Droid Deck Web Server Module
 Flask + Socket.IO web interface bridging browser clients to the backend.
 """
 
-import os
 import json
 import logging
 import asyncio
 import threading
 import time
 from pathlib import Path
-from flask import Flask, send_from_directory, jsonify, request
+from flask import Flask, send_from_directory, jsonify
 from flask_socketio import SocketIO, emit
 from typing import Dict, Any, Optional
 
@@ -73,11 +72,6 @@ class DroidDeckWebServer:
         if backend_ref:
             self._wire_scene_callbacks()
 
-    def set_backend(self, backend_ref):
-        """Set or replace the backend reference and re-wire scene callbacks"""
-        self.backend = backend_ref
-        self._wire_scene_callbacks()
-
     def _backend_loop(self):
         """The backend's running asyncio loop, or None before it has started"""
         loop = getattr(self.backend, "loop", None)
@@ -136,14 +130,6 @@ class DroidDeckWebServer:
                 logger.error(f"Web command '{data.get('type')}' failed: {e}")
 
         future.add_done_callback(_log_failure)
-
-    def _call_backend(self, func, *args):
-        """Run a plain backend function on the backend loop's thread"""
-        loop = self._backend_loop()
-        if loop is None:
-            return func(*args)
-        loop.call_soon_threadsafe(func, *args)
-        return None
 
     def _wire_scene_callbacks(self):
         """Register scene engine callbacks to broadcast events to web clients"""
@@ -274,12 +260,17 @@ class DroidDeckWebServer:
                 return
 
             if self.backend and hasattr(self.backend, 'scene_engine'):
-                import threading
+                scene_engine = self.backend.scene_engine
+                label = scene_data.get('label')
 
                 def save_scene_thread():
-                    import asyncio
                     try:
-                        self._run_backend(self.backend.scene_engine.save_scenes([scene_data]))
+                        # save_scenes writes the whole scenes file, so replace or
+                        # append this one scene within the full list
+                        scenes = [s for name, s in scene_engine.scenes.items() if name != label]
+                        scenes.append(scene_data)
+                        if not self._run_backend(scene_engine.save_scenes(scenes)):
+                            raise RuntimeError(f"Scene '{label}' failed validation and was not saved")
                         self.socketio.emit('backend_message', {
                             'type': 'scene_saved',
                             'scene_name': scene_data.get('label'),
@@ -308,15 +299,23 @@ class DroidDeckWebServer:
 
             if self.backend and hasattr(self.backend, 'scene_engine'):
                 scene_engine = self.backend.scene_engine
-                if hasattr(scene_engine, 'scenes') and scene_name in scene_engine.scenes:
-                    del scene_engine.scenes[scene_name]
 
-                self.socketio.emit('backend_message', {
-                    'type': 'scene_deleted',
-                    'scene_name': scene_name,
-                    'timestamp': time.time()
-                }, room=client_sid)
-                logger.info(f"Scene deleted from web UI: {scene_name}")
+                def delete_scene_thread():
+                    try:
+                        scenes = [s for name, s in scene_engine.scenes.items() if name != scene_name]
+                        if not self._run_backend(scene_engine.save_scenes(scenes)):
+                            raise RuntimeError(f"Scene '{scene_name}' could not be deleted")
+                        self.socketio.emit('backend_message', {
+                            'type': 'scene_deleted',
+                            'scene_name': scene_name,
+                            'timestamp': time.time()
+                        }, room=client_sid)
+                        logger.info(f"Scene deleted from web UI: {scene_name}")
+                    except Exception as e:
+                        logger.error(f"Error deleting scene: {e}")
+                        self.socketio.emit('error', {'message': str(e)}, room=client_sid)
+
+                threading.Thread(target=delete_scene_thread, daemon=True).start()
             else:
                 self.socketio.emit('error', {'message': 'Scene engine not available'}, room=client_sid)
 
@@ -483,10 +482,7 @@ class DroidDeckWebServer:
             logger.warning(f"⚠️ Failsafe {'ENABLED' if enable else 'DISABLED'} from web UI")
             
             if self.backend and hasattr(self.backend, 'set_failsafe_mode'):
-                import threading
-                
                 def failsafe_thread():
-                    import asyncio
                     try:
                         
                         # Execute failsafe toggle
@@ -705,7 +701,7 @@ class DroidDeckWebServer:
                         'current_total': current.get('current_total', 0.0),
                     })
                     
-                    # ADD HARDWARE STATUS FROM TELEMETRY READING
+                    # Hardware status from the telemetry reading
                     telemetry_data['maestro1'] = {
                         'connected': current.get('maestro1_connected', False),
                         'channel_count': current.get('maestro1_status', {}).get('channel_count', 0),

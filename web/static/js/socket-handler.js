@@ -243,7 +243,7 @@ function loadScenes() {
 function playScene(sceneName) {
     sendWebSocketMessage({
         type: 'scene',
-        emotion: sceneName
+        scene_name: sceneName
     });
 }
 

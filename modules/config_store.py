@@ -60,11 +60,6 @@ class ConfigStore:
                 return True
         return self._path(name).exists()
 
-    def invalidate(self, name: str):
-        """Drop the cached copy so the next load re-reads from disk."""
-        with self._lock:
-            self._cache.pop(name, None)
-
     # ---- Asynchronous access (websocket handlers) ----
 
     async def aload(self, name: str, default: Optional[Any] = None) -> Any:
